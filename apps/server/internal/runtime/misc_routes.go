@@ -227,23 +227,69 @@ func (h *handler) patchInstanceTool(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) protectUpstreamCredential(tenant, id string, cfg map[string]any) error {
-	return protectModelConfig(h.deps.Secret, tenant, id, cfg)
+	oldEnvelope, _ := cfg["credentialEnc"].(string)
+	delete(cfg, "credentialEnc")
+	return protectModelConfig(h.deps.Secret, tenant, id, cfg, oldEnvelope)
 }
-func protectModelConfig(secret []byte, tenant, id string, cfg map[string]any) error {
-	credentials := map[string]any{}
-	for _, key := range []string{"apiKey", "accessToken", "refreshToken", "clientSecret"} {
-		if v, ok := cfg[key]; ok {
-			credentials[key] = v
-			delete(cfg, key)
+
+var modelCredentialKeys = []string{"apiKey", "accessToken", "refreshToken", "clientSecret"}
+
+func maskedModelCredential(value string) bool {
+	value = strings.TrimSpace(value)
+	return value != "" && strings.Trim(value, "*•●·") == ""
+}
+
+func protectModelConfig(secret []byte, tenant, id string, cfg map[string]any, oldEnvelope string) error {
+	delete(cfg, "credentialEnc") // Only a stored envelope, never a client envelope, is trusted.
+	merged := map[string]string{}
+	if oldEnvelope != "" {
+		raw, err := openSecretBox(secret, "model:"+tenant+":"+id, oldEnvelope)
+		if err != nil {
+			return errors.New("cannot decrypt upstream credentials")
+		}
+		if json.Unmarshal(raw, &merged) != nil || merged == nil {
+			return errors.New("invalid encrypted upstream credentials")
 		}
 	}
-	if len(credentials) == 0 {
+	clearAll, _ := cfg["clearCredentials"].(bool)
+	delete(cfg, "clearCredentials")
+	changed := clearAll
+	if clearAll {
+		merged = map[string]string{}
+	}
+	for _, key := range modelCredentialKeys {
+		flag := "has" + strings.ToUpper(key[:1]) + key[1:]
+		clearKey := "clear" + strings.ToUpper(key[:1]) + key[1:]
+		clear, _ := cfg[clearKey].(bool)
+		delete(cfg, clearKey)
+		v, exists := cfg[key]
+		delete(cfg, key)
+		delete(cfg, flag)
+		if clear {
+			delete(merged, key)
+			changed = true
+		} else if exists && v != nil {
+			s, ok := v.(string)
+			if !ok {
+				return errors.New("credential must be a string")
+			}
+			if strings.TrimSpace(s) != "" && !maskedModelCredential(s) {
+				merged[key] = s
+				changed = true
+			}
+		}
+		cfg[flag] = merged[key] != ""
+	}
+	if len(merged) == 0 {
 		return nil
 	}
-	raw, _ := json.Marshal(credentials)
-	enc, e := secretBox(secret, "model:"+tenant+":"+id, raw)
-	if e != nil {
-		return e
+	if !changed && oldEnvelope != "" {
+		cfg["credentialEnc"] = oldEnvelope
+		return nil
+	}
+	enc, err := secretBox(secret, "model:"+tenant+":"+id, rawJSON(merged))
+	if err != nil {
+		return err
 	}
 	cfg["credentialEnc"] = enc
 	return nil
@@ -470,6 +516,10 @@ func (h *handler) modelAuthLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	delete(cfg, "credentialEnc")
+	for _, key := range modelCredentialKeys {
+		delete(cfg, key)
+		cfg["has"+strings.ToUpper(key[:1])+key[1:]] = false
+	}
 	raw, _ := json.Marshal(cfg)
 	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.ModelUpstream{}).Where("tenant_id=? AND id=?", p.TenantID, id).Updates(map[string]any{"config_json": string(raw), "status": "auth_required", "updated_at": runtimeTimeString(h.store.now())}).Error
 	if e != nil {

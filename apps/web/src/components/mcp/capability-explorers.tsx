@@ -7,6 +7,25 @@ import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+
+export type ToolExposure = "direct" | "deferred" | "hidden";
+const exposureItems = [
+  { value: "direct", label: "始终列出" },
+  { value: "deferred", label: "按需发现" },
+  { value: "hidden", label: "隐藏" },
+];
+
+export function ToolExposureSelect({ value, disabled, onChange, label }: {
+  value: ToolExposure; disabled?: boolean; onChange: (value: ToolExposure) => void; label: string;
+}) {
+  return (
+    <Select value={value} items={exposureItems} disabled={disabled} onValueChange={(next) => { if (next) onChange(next as ToolExposure); }}>
+      <SelectTrigger size="sm" aria-label={label}><SelectValue /></SelectTrigger>
+      <SelectContent>{exposureItems.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent>
+    </Select>
+  );
+}
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
   SchemaToolForm,
@@ -18,6 +37,7 @@ export type McpToolRow = {
   qualifiedName: string;
   description?: string;
   providerId?: string;
+  instanceId?: string;
   inputSchema?: Record<string, unknown>;
   localName?: string;
   spaceScoped?: boolean;
@@ -30,6 +50,7 @@ export type McpResourceRow = {
   mimeType?: string;
   title?: string;
   providerId?: string;
+  instanceId?: string;
 };
 
 export type McpPromptRow = {
@@ -38,6 +59,7 @@ export type McpPromptRow = {
   title?: string;
   arguments?: Array<{ name: string; description?: string; required?: boolean }>;
   providerId?: string;
+  instanceId?: string;
 };
 
 export type McpResourceTemplateRow = {
@@ -47,6 +69,7 @@ export type McpResourceTemplateRow = {
   mimeType?: string;
   title?: string;
   providerId?: string;
+  instanceId?: string;
 };
 
 function EmptyRow({ colSpan, children }: { colSpan: number; children: React.ReactNode }) {
@@ -60,11 +83,19 @@ function EmptyRow({ colSpan, children }: { colSpan: number; children: React.Reac
 }
 
 export function McpToolsExplorer({
+  spaceId,
   tools,
   emptyHint = "暂无工具",
+  exposure,
 }: {
+  spaceId?: string;
   tools: McpToolRow[];
   emptyHint?: string;
+  exposure?: {
+    value: (tool: McpToolRow) => ToolExposure;
+    onChange: (tool: McpToolRow, value: ToolExposure) => void;
+    disabled?: boolean;
+  };
 }) {
   const [selected, setSelected] = useState<McpToolRow | null>(null);
   const [args, setArgs] = useState<Record<string, unknown>>({});
@@ -85,6 +116,9 @@ export function McpToolsExplorer({
       const res = await api<{ ok: boolean; result: unknown }>("/api/mcp/call", {
         method: "POST",
         json: {
+          spaceId,
+          instanceId: selected.instanceId,
+          toolName: selected.localName ?? selected.qualifiedName,
           qualifiedName: selected.qualifiedName,
           arguments: args,
         },
@@ -107,6 +141,7 @@ export function McpToolsExplorer({
             <TableHeader>
               <TableRow>
                 <TableHead>Tool</TableHead>
+                {exposure ? <TableHead className="w-28">展示方式</TableHead> : null}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -127,9 +162,14 @@ export function McpToolsExplorer({
                       {t.description}
                     </div>
                   </TableCell>
+                  {exposure ? (
+                    <TableCell onClick={(event) => event.stopPropagation()}>
+                      <ToolExposureSelect value={exposure.value(t)} disabled={exposure.disabled} label={`${t.localName ?? t.qualifiedName} 展示方式`} onChange={(value) => exposure.onChange(t, value)} />
+                    </TableCell>
+                  ) : null}
                 </TableRow>
               ))}
-              {!tools.length ? <EmptyRow colSpan={1}>{emptyHint}</EmptyRow> : null}
+              {!tools.length ? <EmptyRow colSpan={exposure ? 2 : 1}>{emptyHint}</EmptyRow> : null}
             </TableBody>
           </Table>
         </div>
@@ -171,10 +211,12 @@ export function McpToolsExplorer({
 }
 
 export function McpResourcesExplorer({
+  spaceId,
   resources,
   templates = [],
   emptyHint = "暂无资源",
 }: {
+  spaceId?: string;
   resources: McpResourceRow[];
   templates?: McpResourceTemplateRow[];
   emptyHint?: string;
@@ -190,7 +232,7 @@ export function McpResourcesExplorer({
     try {
       const res = await api<{ ok: boolean; result: unknown }>("/api/mcp/resources/read", {
         method: "POST",
-        json: { uri: row.uri },
+        json: { spaceId, instanceId: row.instanceId, uri: row.uri },
       });
       setResultText(JSON.stringify(res.result, null, 2));
     } catch (err) {
@@ -318,9 +360,11 @@ export function McpResourcesExplorer({
 }
 
 export function McpPromptsExplorer({
+  spaceId,
   prompts,
   emptyHint = "暂无 Prompts",
 }: {
+  spaceId?: string;
   prompts: McpPromptRow[];
   emptyHint?: string;
 }) {
@@ -358,6 +402,8 @@ export function McpPromptsExplorer({
       const res = await api<{ ok: boolean; result: unknown }>("/api/mcp/prompts/get", {
         method: "POST",
         json: {
+          spaceId,
+          instanceId: selected.instanceId,
           name: selected.name,
           arguments: args,
         },
@@ -454,9 +500,13 @@ export function McpPromptsExplorer({
 
 /** Prompt 参数补全（completion/complete）简易面板 */
 export function McpPromptCompletePanel({
+  spaceId,
+  instanceId,
   promptName,
   argumentName,
 }: {
+  spaceId?: string;
+  instanceId?: string;
   promptName: string;
   argumentName: string;
 }) {
@@ -473,8 +523,12 @@ export function McpPromptCompletePanel({
       }>("/api/mcp/complete", {
         method: "POST",
         json: {
-          ref: { type: "ref/prompt", name: promptName },
-          argument: { name: argumentName, value },
+          spaceId,
+          instanceId,
+          params: {
+            ref: { type: "ref/prompt", name: promptName },
+            argument: { name: argumentName, value },
+          },
         },
       });
       setSuggestions(res.result.completion?.values ?? []);

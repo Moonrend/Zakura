@@ -77,7 +77,7 @@ func (h *handler) bindingView(tenant string, row remoteChannelRow) map[string]an
 		}
 	}
 	return map[string]any{
-		"id": row.ID, "agentId": row.AgentID, "platform": row.Platform, "profileKey": row.ProfileKey, "label": row.Label,
+		"id": row.ID, "spaceId": row.SpaceID, "agentId": row.AgentID, "platform": row.Platform, "profileKey": row.ProfileKey, "label": row.Label,
 		"enabled": row.Enabled, "settings": settingsObj,
 		"credentialsEnabled": row.ConfigEnc != "", "configuredFields": fields,
 		"createdAt": row.CreatedAt, "updatedAt": row.UpdatedAt,
@@ -132,13 +132,25 @@ func pendingUserKey(entry any) string {
 
 func (h *handler) listRemoteChannels(w http.ResponseWriter, r *http.Request) {
 	tenant := principal(r).TenantID
+	space, e := h.requestedSpace(r)
+	if e != nil {
+		writeErr(w, e)
+		return
+	}
 	var rows []models.AgentChannelBinding
-	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ?", tenant).Order("created_at DESC").Find(&rows).Error; e != nil {
+	query := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ?", tenant)
+	if space != "" {
+		query = query.Where("space_id = ?", space)
+	}
+	if e := query.Order("created_at DESC").Find(&rows).Error; e != nil {
 		writeErr(w, e)
 		return
 	}
 	out := make([]map[string]any, 0)
 	for _, row := range rows {
+		if h.authorizeChannel(r, bindingRow(row)) != nil {
+			continue
+		}
 		out = append(out, h.bindingView(tenant, bindingRow(row)))
 	}
 	base := strings.TrimRight(h.deps.PublicURL, "/")
@@ -152,6 +164,7 @@ func (h *handler) listRemoteChannels(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) createRemoteChannel(w http.ResponseWriter, r *http.Request) {
 	var b struct {
+		SpaceID            string          `json:"spaceId"`
 		AgentID            string          `json:"agentId"`
 		Platform           string          `json:"platform"`
 		ProfileKey         string          `json:"profileKey"`
@@ -161,8 +174,8 @@ func (h *handler) createRemoteChannel(w http.ResponseWriter, r *http.Request) {
 		Credentials        json.RawMessage `json:"credentials"`
 		CredentialsEnabled *bool           `json:"credentialsEnabled"`
 	}
-	if httpx.DecodeJSON(r, &b) != nil || b.AgentID == "" || b.Platform == "" {
-		httpx.Error(w, 400, "agentId and platform required")
+	if httpx.DecodeJSON(r, &b) != nil || b.Platform == "" {
+		httpx.Error(w, 400, "platform required")
 		return
 	}
 	if !isRemotePlatform(b.Platform) {
@@ -170,12 +183,15 @@ func (h *handler) createRemoteChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := principal(r)
-	var agent models.Agent
-	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", p.TenantID, b.AgentID).First(&agent).Error; e != nil {
-		httpx.Error(w, 404, "Agent not found")
+	space, e := h.resourceSpace(r, b.SpaceID, b.AgentID)
+	if e != nil {
+		writeErr(w, e)
 		return
 	}
-	space := agent.SpaceID
+	if b.Enabled && b.AgentID == "" {
+		httpx.Error(w, 400, "enabled channel requires a reply Agent")
+		return
+	}
 	id := h.id()
 	profileKey := b.ProfileKey
 	if profileKey == "" {
@@ -191,8 +207,11 @@ func (h *handler) createRemoteChannel(w http.ResponseWriter, r *http.Request) {
 		configEnc = enc
 	}
 	now := h.now().Format(time.RFC3339Nano)
-	create := models.AgentChannelBinding{ID: strPtr(id), TenantID: p.TenantID, SpaceID: space, AgentID: b.AgentID, Platform: b.Platform, ProfileKey: profileKey, Label: b.Label, Enabled: b.Enabled, SettingsJSON: rawOr(b.Settings, "{}"), ConfigEnc: configEnc, CreatedAt: now, UpdatedAt: now}
-	if e := h.deps.Gorm.WithContext(r.Context()).Create(&create).Error; e != nil {
+	create := map[string]any{"id": id, "tenant_id": p.TenantID, "space_id": space, "agent_id": nil, "platform": b.Platform, "profile_key": profileKey, "label": b.Label, "enabled": b.Enabled, "settings_json": rawOr(b.Settings, "{}"), "config_enc": configEnc, "created_at": now, "updated_at": now}
+	if b.AgentID != "" {
+		create["agent_id"] = b.AgentID
+	}
+	if e := h.deps.Gorm.WithContext(r.Context()).Model(&models.AgentChannelBinding{}).Create(create).Error; e != nil {
 		writeErr(w, e)
 		return
 	}
@@ -217,7 +236,56 @@ func (h *handler) patchRemoteChannel(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "invalid JSON")
 		return
 	}
+	existing, e := h.loadRemoteChannelRow(r.Context(), p.TenantID, id)
+	if e != nil {
+		writeErr(w, e)
+		return
+	}
+	if e = h.authorizeChannel(r, existing); e != nil {
+		writeErr(w, e)
+		return
+	}
 	updates := map[string]any{}
+	if value, ok := m["spaceId"]; ok {
+		if space, ok := value.(string); !ok || space != existing.SpaceID {
+			httpx.Error(w, 400, "channel Space cannot change")
+			return
+		}
+	}
+	agent := existing.AgentID
+	if value, ok := m["agentId"]; ok {
+		if value == nil {
+			agent = ""
+		} else {
+			var valid bool
+			agent, valid = value.(string)
+			if !valid {
+				httpx.Error(w, 400, "invalid agentId")
+				return
+			}
+		}
+		if _, e = h.resourceSpace(r, existing.SpaceID, agent); e != nil {
+			writeErr(w, e)
+			return
+		}
+		if agent == "" {
+			updates["agent_id"] = nil
+			updates["enabled"] = false
+		} else {
+			updates["agent_id"] = agent
+		}
+	}
+	if value, ok := m["enabled"]; ok {
+		enabled, valid := value.(bool)
+		if !valid {
+			httpx.Error(w, 400, "invalid enabled")
+			return
+		}
+		if enabled && agent == "" {
+			httpx.Error(w, 400, "enabled channel requires a reply Agent")
+			return
+		}
+	}
 	for k, col := range map[string]string{"label": "label", "enabled": "enabled", "profileKey": "profile_key", "settings": "settings_json"} {
 		if v, ok := m[k]; ok {
 			if k == "settings" {
@@ -292,10 +360,22 @@ func mustJSON(v any) json.RawMessage {
 }
 func decodeObject(r *http.Request) (map[string]any, error) {
 	var m map[string]any
-	e := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 2<<20)).Decode(&m)
+	e := httpx.DecodeJSON(r, &m)
+	if e == nil && m == nil {
+		e = errors.New("JSON object required")
+	}
 	return m, e
 }
 func (h *handler) deleteRemoteChannel(w http.ResponseWriter, r *http.Request) {
+	row, e := h.loadRemoteChannelRow(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
+	if e != nil {
+		writeErr(w, e)
+		return
+	}
+	if e = h.authorizeChannel(r, row); e != nil {
+		writeErr(w, e)
+		return
+	}
 	res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", principal(r).TenantID, chi.URLParam(r, "id")).Delete(&models.AgentChannelBinding{})
 	if res.Error != nil {
 		writeErr(w, res.Error)
@@ -326,6 +406,10 @@ func (h *handler) updateRemoteChannelAccess(w http.ResponseWriter, r *http.Reque
 	key := strings.TrimSpace(b.UserKey)
 	row, e := h.loadRemoteChannelRow(r.Context(), p.TenantID, id)
 	if e != nil {
+		writeErr(w, e)
+		return
+	}
+	if e = h.authorizeChannel(r, row); e != nil {
 		writeErr(w, e)
 		return
 	}
@@ -368,7 +452,7 @@ func (h *handler) remoteWebhook(w http.ResponseWriter, r *http.Request) {
 	tenant, bindingID := chi.URLParam(r, "tenantId"), chi.URLParam(r, "bindingId")
 	var binding models.AgentChannelBinding
 	e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", tenant, bindingID).First(&binding).Error
-	if e != nil || !binding.Enabled {
+	if e != nil || !binding.Enabled || binding.AgentID == "" {
 		httpx.Error(w, 404, "Channel not found")
 		return
 	}

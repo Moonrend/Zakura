@@ -5,7 +5,7 @@ import (
 	"os/exec"
 )
 
-// LiveStream 统一的交互流（真 PTY / Windows 管道 / docker exec -i）。
+// LiveStream 统一的交互流（PTY / ConPTY / docker exec -i）。
 type LiveStream struct {
 	ID       string
 	Mode     string
@@ -14,6 +14,20 @@ type LiveStream struct {
 	Cmd      *exec.Cmd
 	Cancel   func()
 	ResizeFn func(cols, rows int) error
+	WaitFn   func() int
+}
+
+func (s *LiveStream) Wait() int {
+	if s.WaitFn != nil {
+		return s.WaitFn()
+	}
+	if s.Cmd != nil {
+		_ = s.Cmd.Wait()
+		if s.Cmd.ProcessState != nil {
+			return s.Cmd.ProcessState.ExitCode()
+		}
+	}
+	return -1
 }
 
 func (s *LiveStream) Write(b []byte) (int, error) { return s.In.Write(b) }

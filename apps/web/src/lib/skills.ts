@@ -20,6 +20,10 @@ import type {
 
 export { DEFAULT_SKILL_STORE, SKILL_STORES } from "@zakura/shared";
 
+function skillsPath(spaceId?: string): string {
+  return spaceId ? `/api/spaces/${encodeURIComponent(spaceId)}/skills` : "/api/skills";
+}
+
 export type {
   AgentSkillRecord,
   SkillAutoUpdateStatus,
@@ -60,29 +64,29 @@ export const SKILL_STORE_LABEL: Record<SkillStoreId, string> = {
   github: "GitHub",
 };
 
-export async function fetchSkillStores(): Promise<{
+export async function fetchSkillStores(spaceId?: string): Promise<{
   stores: SkillStoreMeta[];
   builtin: BuiltinSkillMeta[];
 }> {
-  return api("/api/skills/stores", { cacheTtlMs: 60_000 });
+  return api(`${skillsPath(spaceId)}/stores`, { cacheTtlMs: 60_000 });
 }
 
 /** 单商店检索：分页与总数都属于该商店 */
 export async function searchSkills(
   query: string,
   store: SkillStoreId,
-  opts: { repo?: string; offset?: number; limit?: number } = {},
+  opts: { repo?: string; offset?: number; limit?: number; spaceId?: string } = {},
 ): Promise<SkillSearchPage> {
   const params = new URLSearchParams({ q: query, store });
   if (opts.repo) params.set("repo", opts.repo);
   if (opts.offset) params.set("offset", String(opts.offset));
   if (opts.limit) params.set("limit", String(opts.limit));
-  return api(`/api/skills/search?${params.toString()}`, { cacheTtlMs: 15_000 });
+  return api(`${skillsPath(opts.spaceId)}/search?${params.toString()}`, { cacheTtlMs: 15_000 });
 }
 
 /** 服务端已同步的技能仓库（商店入口） */
-export async function listSkillRepos(): Promise<SkillRepoSummary[]> {
-  const res = await api<{ repos: SkillRepoSummary[] }>("/api/skills/repos", {
+export async function listSkillRepos(spaceId?: string): Promise<SkillRepoSummary[]> {
+  const res = await api<{ repos: SkillRepoSummary[] }>(`${skillsPath(spaceId)}/repos`, {
     cacheTtlMs: 30_000,
   });
   return res.repos;
@@ -113,8 +117,9 @@ export async function setSkillAutoUpdate(enabled: boolean): Promise<SkillAutoUpd
 export async function setSkillItemAutoUpdate(
   skillId: string,
   enabled: boolean,
+  spaceId?: string,
 ): Promise<SkillRecord> {
-  const res = await api<{ skill: SkillRecord }>(`/api/skills/${encodeURIComponent(skillId)}/auto-update`, {
+  const res = await api<{ skill: SkillRecord }>(`${skillsPath(spaceId)}/${encodeURIComponent(skillId)}/auto-update`, {
     method: "PATCH",
     json: { enabled },
   });
@@ -156,22 +161,24 @@ export async function deleteSkillToken(
   await api(`/api/skills/tokens/${provider}?scope=${scope}`, { method: "DELETE" });
 }
 
-export async function resolveSkillSource(source: string): Promise<SkillResolveResult> {
-  return api("/api/skills/resolve", { method: "POST", json: { source } });
+export async function resolveSkillSource(source: string, spaceId?: string): Promise<SkillResolveResult> {
+  return api(`${skillsPath(spaceId)}/resolve`, { method: "POST", json: { source } });
 }
 
-export async function listSkills(): Promise<SkillRecord[]> {
-  const res = await api<{ skills: SkillRecord[] }>("/api/skills");
+export async function listSkills(spaceId?: string): Promise<SkillRecord[]> {
+  const res = await api<{ skills: SkillRecord[] }>(skillsPath(spaceId));
   return res.skills;
 }
 
 export async function getSkill(
   id: string,
+  spaceId?: string,
 ): Promise<{ skill: SkillRecord; files: SkillFileContent[] }> {
-  return api(`/api/skills/${encodeURIComponent(id)}`);
+  return api(`${skillsPath(spaceId)}/${encodeURIComponent(id)}`);
 }
 
 export async function installSkill(body: {
+  spaceId?: string;
   source?: string;
   skillId?: string;
   names?: string[];
@@ -182,20 +189,24 @@ export async function installSkill(body: {
   installs: AgentSkillRecord[];
   warnings: string[];
 }> {
-  const target = body.all || body.agentIds?.length ? body : { ...body, all: true };
-  return api("/api/skills/install", { method: "POST", json: target });
+  const { spaceId, ...payload } = body;
+  return api(`${skillsPath(spaceId)}/install`, { method: "POST", json: payload });
 }
 
-export async function updateSkill(id: string): Promise<SkillRecord> {
+export async function updateSkill(id: string, spaceId?: string): Promise<SkillRecord> {
   const res = await api<{ skill: SkillRecord }>(
-    `/api/skills/${encodeURIComponent(id)}/update`,
+    `${skillsPath(spaceId)}/${encodeURIComponent(id)}/update`,
     { method: "POST" },
   );
   return res.skill;
 }
 
-export async function deleteSkill(id: string): Promise<void> {
-  await api(`/api/skills/${encodeURIComponent(id)}`, { method: "DELETE" });
+export async function deleteSkill(id: string, spaceId?: string): Promise<void> {
+  await api(`${skillsPath(spaceId)}/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function registerSpaceSkill(spaceId: string, workspacePath: string): Promise<void> {
+  await api(`${skillsPath(spaceId)}/register`, { method: "POST", json: { workspacePath } });
 }
 
 export async function listAgentSkills(

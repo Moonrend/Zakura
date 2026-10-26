@@ -22,8 +22,11 @@ func writeMaskedText(t *testing.T, conn net.Conn, text string) {
 	n := len(payload)
 	if n < 126 {
 		head = append(head, 0x80|byte(n))
-	} else {
+	} else if n <= 65535 {
 		head = append(head, 0x80|126, byte(n>>8), byte(n))
+	} else {
+		head = append(head, 0x80|127)
+		head = binary.BigEndian.AppendUint64(head, uint64(n))
 	}
 	mask := []byte{1, 2, 3, 4}
 	head = append(head, mask...)
@@ -34,6 +37,27 @@ func writeMaskedText(t *testing.T, conn net.Conn, text string) {
 		t.Fatal(e)
 	}
 }
+func TestWriteMaskedTextPayloadLengths(t *testing.T) {
+	for _, size := range []int{125, 126, 65535, 65536} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			client, server := net.Pipe()
+			defer client.Close()
+			defer server.Close()
+			payload := strings.Repeat("x", size)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				writeMaskedText(t, client, payload)
+			}()
+			final, opcode, raw, err := readWSFrameParts(bufio.NewReader(server), 1<<20)
+			if err != nil || !final || opcode != 1 || string(raw) != payload {
+				t.Fatalf("size=%d decoded=%d final=%v opcode=%d err=%v", size, len(raw), final, opcode, err)
+			}
+			<-done
+		})
+	}
+}
+
 func readServerText(t *testing.T, r *bufio.Reader) string {
 	t.Helper()
 	head := make([]byte, 2)

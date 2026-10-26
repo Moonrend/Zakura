@@ -228,7 +228,7 @@ export type AcpPermissionGrant = {
   pathPrefix?: string;
 };
 
-export type AcpRuntimeState = "starting" | "idle" | "active" | "closed";
+export type AcpRuntimeState = "starting" | "idle" | "active" | "auth_required" | "error" | "closed";
 
 export type AcpOptionInfo = {
   id: string;
@@ -280,8 +280,10 @@ export type AcpRuntimeStatus = {
    * 未声明时按全 false 处理（仅 text + resource_link 安全）。
    */
   promptCapabilities?: AcpPromptCapabilities;
-  authMethods?: Array<{ id: string; name: string; description?: string }>;
+  authMethods?: Array<{ id: string; name: string; description?: string; type?: string }>;
   authRequired?: boolean;
+  /** The bounded MCP delegation needs explicit runtime reconnection. */
+  mcpReconnectRequired?: boolean;
   /** 后台启动失败时的可读原因；state 一般为 closed */
   error?: string;
 };

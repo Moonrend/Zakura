@@ -2,7 +2,6 @@
 package runtime
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -17,7 +16,7 @@ func BenchmarkGatewayFirstEvent(b *testing.B) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(event)))
 	for b.Loop() {
-		if _, err := readStreamCommit(bufio.NewReader(strings.NewReader(event))); err != nil {
+		if _, err := commitStream(io.NopCloser(strings.NewReader(event))); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -29,7 +28,7 @@ func BenchmarkGatewayCandidatePayload(b *testing.B) {
 		_, _ = io.WriteString(w, "{}")
 	}))
 	defer upstream.Close()
-	gateway := NewGateway(nil)
+	gateway := NewGateway(NewStore(testDepsTB(b)))
 	defer gateway.client.CloseIdleConnections()
 	config := Upstream{Protocol: "openai", Config: raw(map[string]any{"baseUrl": upstream.URL})}
 	route := ModelRoute{Model: "actual-model"}
@@ -50,7 +49,7 @@ func BenchmarkGatewayCandidatePayload(b *testing.B) {
 func BenchmarkGatewayResolveCandidates(b *testing.B) {
 	for _, count := range []int{1, 32, 128} {
 		b.Run(fmt.Sprint(count), func(b *testing.B) {
-			deps := testDeps(b)
+			deps := testDepsTB(b)
 			seedTenant(b, deps, "tenant")
 			store := NewStore(deps)
 			for i := 0; i < count; i++ {

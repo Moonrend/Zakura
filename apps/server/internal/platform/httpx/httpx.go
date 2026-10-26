@@ -13,27 +13,28 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
 	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
 )
 
 const maxJSONBody = 2 << 20
 
 type Principal struct {
-	UserID          string `json:"userId"`
-	TenantID        string `json:"tenantId"`
-	Email           string `json:"email"`
-	Role            string `json:"role"`
-	SessionID       string `json:"sid"`
-	IsPlatformAdmin bool   `json:"isPlatformAdmin"`
-	APIKey          bool   `json:"apiKey"`
-	APIKeyID        string `json:"-"`
-	AgentID         string `json:"-"`
-	SpaceID         string `json:"-"`
-	APIKeyScopes    string `json:"-"`
-	OAuth           bool   `json:"-"`
-	OAuthScope      string `json:"-"`
+	UserID          string    `json:"userId"`
+	TenantID        string    `json:"tenantId"`
+	Email           string    `json:"email"`
+	Role            string    `json:"role"`
+	SessionID       string    `json:"sid"`
+	IsPlatformAdmin bool      `json:"isPlatformAdmin"`
+	APIKey          bool      `json:"apiKey"`
+	APIKeyID        string    `json:"-"`
+	AgentID         string    `json:"-"`
+	SpaceID         string    `json:"-"`
+	APIKeyScopes    string    `json:"-"`
+	OAuth           bool      `json:"-"`
+	OAuthScope      string    `json:"-"`
+	OAuthExpiresAt  time.Time `json:"-"`
 }
 
 type principalKey struct{}
@@ -76,22 +77,36 @@ func DecodeJSON(r *http.Request, dst any) error {
 func Auth(deps *appdeps.Dependencies) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			deny := func(status int, message string) {
+				if r.URL.Path == "/v1/messages" || r.URL.Path == "/v1/messages/count_tokens" {
+					typ := "authentication_error"
+					if status == http.StatusForbidden {
+						typ = "permission_error"
+					}
+					JSON(w, status, map[string]any{"type": "error", "error": map[string]any{"type": typ, "message": message}})
+					return
+				}
+				Error(w, status, message)
+			}
 			raw := bearerToken(r.Header.Get("Authorization"))
+			if raw == "" && (r.URL.Path == "/v1/messages" || r.URL.Path == "/v1/messages/count_tokens" || r.URL.Path == "/v1/models") {
+				raw = r.Header.Get("x-api-key")
+			}
 			if raw == "" {
-				Error(w, http.StatusUnauthorized, "unauthorized")
+				deny(http.StatusUnauthorized, "unauthorized")
 				return
 			}
 			p, err := authenticate(r.Context(), deps, raw)
 			if err != nil {
-				Error(w, http.StatusUnauthorized, "unauthorized")
+				deny(http.StatusUnauthorized, "unauthorized")
 				return
 			}
 			if p.OAuth && !oauthScopeAllows(p.OAuthScope, r.URL.Path) {
-				Error(w, http.StatusForbidden, "insufficient_scope")
+				deny(http.StatusForbidden, "insufficient_scope")
 				return
 			}
 			if p.APIKey && strings.HasPrefix(r.URL.Path, "/api/") && !apiKeyAllows(p.APIKeyScopes, "api") {
-				Error(w, http.StatusForbidden, "insufficient_scope")
+				deny(http.StatusForbidden, "insufficient_scope")
 				return
 			}
 			next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), p)))
@@ -245,10 +260,34 @@ func authenticateOAuthAccess(ctx context.Context, deps *appdeps.Dependencies, ra
 	if tenantID == "" {
 		tenantID = stringClaim("tenantId")
 	}
-	p := Principal{UserID: stringClaim("sub"), TenantID: tenantID, AgentID: stringClaim("aid"), OAuthScope: stringClaim("scope"), OAuth: true}
+	expiresAt, err := claims.GetExpirationTime()
+	if err != nil || expiresAt == nil {
+		return Principal{}, errors.New("invalid OAuth access token expiry")
+	}
+	p := Principal{UserID: stringClaim("sub"), TenantID: tenantID, AgentID: stringClaim("aid"), OAuthScope: stringClaim("scope"), OAuth: true, OAuthExpiresAt: expiresAt.Time}
 	if p.UserID == "" || p.TenantID == "" {
 		return Principal{}, errors.New("invalid OAuth principal")
 	}
+	resource := stringClaim("resource")
+	spaceID := stringClaim("spaceId")
+	for _, name := range []string{"aid", "spaceId", "resource"} {
+		if value := claims[name]; value != nil {
+			if _, ok := value.(string); !ok {
+				return Principal{}, errors.New("invalid OAuth resource claims")
+			}
+		}
+	}
+	binding, err := ResolveOAuthMCPResource(ctx, deps, deps.DB, p.TenantID, resource, p.AgentID)
+	if err != nil || spaceID != "" && (resource == "" || spaceID != binding.SpaceID) {
+		return Principal{}, errors.New("invalid OAuth resource binding")
+	}
+	if resource != "" {
+		audiences, err := claims.GetAudience()
+		if err != nil || len(audiences) != 1 || audiences[0] != resource {
+			return Principal{}, errors.New("invalid OAuth resource audience")
+		}
+	}
+	p.SpaceID, p.AgentID = binding.SpaceID, binding.AgentID
 	var userStatus, tenantStatus, membershipStatus string
 	err = deps.DB.QueryRowContext(ctx, deps.Rebind(`SELECT u.email,u.is_platform_admin,u.status,t.status,m.role,m.status
 		FROM users u JOIN tenant_memberships m ON m.user_id=u.id AND m.tenant_id=? JOIN tenants t ON t.id=m.tenant_id WHERE u.id=?`), p.TenantID, p.UserID).

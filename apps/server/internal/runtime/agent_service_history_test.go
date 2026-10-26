@@ -118,8 +118,8 @@ func TestAgentSessionHistoryReplay(t *testing.T) {
 	if !strings.Contains(strings.Join(third, "|"), "user:p1") || !strings.Contains(strings.Join(third, "|"), "assistant:hi1") || !strings.Contains(strings.Join(third, "|"), "user:p2") || !strings.Contains(strings.Join(third, "|"), "assistant:hi2") || !strings.Contains(strings.Join(third, "|"), "user:p3") {
 		t.Fatalf("third request messages=%v", third)
 	}
-	first := messageContents(bodies[0])
-	if len(first) != 1 || first[0] != "user:p1" {
+	first := requestMessages(bodies[0])
+	if len(first) != 3 || first[0]["role"] != "system" || first[1]["role"] != "user" || first[1]["content"] != "p1" || !strings.Contains(gwStr(first[2]["content"]), "当前时间") {
 		t.Fatalf("first request messages=%v", first)
 	}
 }
@@ -138,12 +138,15 @@ func TestAgentSessionHistoryBudget(t *testing.T) {
 	beginTurn(t, store, agent.ID, session.ID, "now")
 
 	bodies := captured()
-	if len(bodies) != 1 {
-		t.Fatalf("model calls=%d", len(bodies))
+	if len(bodies) != 2 {
+		t.Fatalf("expected summary and answer calls, got %d", len(bodies))
 	}
-	joined := strings.Join(messageContents(bodies[0]), "|")
+	joined := strings.Join(messageContents(bodies[1]), "|")
+	if !strings.Contains(joined, "[Earlier conversation summary]\nok") {
+		t.Fatalf("summary missing: %s", joined)
+	}
 	if strings.Contains(joined, long) {
-		t.Fatalf("oversized history message was not trimmed")
+		t.Fatalf("oversized history message was not summarized")
 	}
 	if !strings.Contains(joined, "recent-note") || !strings.Contains(joined, "user:now") {
 		t.Fatalf("recent messages missing: %v", messageContents(bodies[0]))

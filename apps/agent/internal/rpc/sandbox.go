@@ -141,7 +141,7 @@ func (h *Handler) execWithPolicy(ctx context.Context, raw json.RawMessage, start
 		if start {
 			result, err = h.hostExecStart(raw)
 		} else {
-			result, err = h.hostExec(raw)
+			result, err = h.hostExec(ctx, raw)
 		}
 	}
 	if err != nil {

@@ -55,6 +55,8 @@ export type RuntimeNode = {
   createdAt: string;
   updatedAt: string;
   needsReinstall?: boolean;
+  canUse?: boolean;
+  dockerError?: string;
 };
 
 export type RunnerInstallPackage = {
@@ -97,7 +99,19 @@ export async function listRuntimeNodes(): Promise<RuntimeNode[]> {
   const res = await api<{ nodes: RuntimeNode[]; canUseLocalRunner?: boolean }>(
     "/api/runtime-nodes",
   );
-  return res.nodes ?? [];
+  return (res.nodes ?? []).map(node => ({
+    ...node,
+    canUse: node.kind !== "local" || res.canUseLocalRunner === true,
+  }));
+}
+
+export function workspaceNodeUnavailableReason(node: RuntimeNode): string | null {
+  if (node.canUse === false) return "没有使用此节点的权限";
+  if (node.status !== "online") return node.status === "draining" ? "节点正在维护" : "节点离线";
+  if (!["server", "computer", "local"].includes(node.kind)) return "此节点不支持工作区";
+  if (node.capabilities.docker !== true) return node.dockerError || "节点的 Docker 不可用";
+  if (node.capabilities.dockerCreateReceipts !== true) return "请先更新节点程序，再创建工作区";
+  return null;
 }
 
 export async function getRuntimeNode(id: string): Promise<RuntimeNode> {

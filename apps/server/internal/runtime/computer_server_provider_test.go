@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,12 +24,26 @@ func TestServerComputerProvisioning(t *testing.T) {
 				t.Fatal(err)
 			}
 			var mu sync.Mutex
-			creates, finds := 0, 0
+			creates, finds, mkdirs := 0, 0, 0
+			mkdirAbs := ""
 			var instance computerContainer
 			h := builtinToolHarness(t, d, "rnr_computer_"+mode, func(method string, params map[string]any) (any, error) {
 				switch method {
 				case "sys.info":
 					return map[string]any{"version": "test", "kind": "server", "storageRoot": "/srv/zakura", "capabilities": map[string]any{"docker": true}}, nil
+				case "host.fs.mkdir":
+					mu.Lock()
+					defer mu.Unlock()
+					root := fmt.Sprint(params["root"])
+					rel := fmt.Sprint(params["path"])
+					if root != "/srv/zakura" || !strings.HasPrefix(rel, "computers/") || !strings.HasSuffix(rel, "/workspace") {
+						return nil, errors.New("unscoped computer root")
+					}
+					mkdirs++
+					mkdirAbs = fmt.Sprintf("/srv/zakura/%s", rel)
+					return map[string]any{"abs": mkdirAbs}, nil
+				case "docker.images":
+					return []computerImageStatus{{Image: serverComputerImage, ID: "sha256:present"}}, nil
 				case "docker.create":
 					mu.Lock()
 					defer mu.Unlock()
@@ -41,8 +56,11 @@ func TestServerComputerProvisioning(t *testing.T) {
 					_ = json.Unmarshal(raw, &labels)
 					name := fmt.Sprint(params["name"])
 					volume := params["volumes"].([]any)[0].(map[string]any)
-					if volume["volumeName"] != name+"-data" || volume["containerPath"] != "/workspace" || volume["hostPath"] != nil || params["privileged"] != nil || params["ports"] != nil {
+					if volume["hostPath"] != mkdirAbs || volume["containerPath"] != "/workspace" || params["privileged"] != nil || params["ports"] != nil {
 						return nil, errors.New("unsafe creation spec")
+					}
+					if _, hasVolume := volume["volumeName"]; hasVolume {
+						return nil, errors.New("legacy volume name present")
 					}
 					instance = computerContainer{DockerID: "container", Name: "/" + name, Image: serverComputerImage, Status: "running", Labels: labels}
 					if mode == "wrong-owner" {
@@ -94,6 +112,12 @@ func TestServerComputerProvisioning(t *testing.T) {
 			if _, err = adapter.Find(ctx, r); err == nil {
 				t.Fatal("reconciliation without approval")
 			}
+			mu.Lock()
+			if mkdirs != 0 {
+				mu.Unlock()
+				t.Fatal("host filesystem touched before approval")
+			}
+			mu.Unlock()
 			p := computers.Provisioner{Store: store, Providers: map[computers.Provider]computers.CreationProvider{computers.Server: adapter}}
 			result, err := p.ApproveAndCreate(ctx, target, r.CreateOperationID, "admin")
 			if mode == "success" {
@@ -128,12 +152,140 @@ func TestServerComputerProvisioning(t *testing.T) {
 			if creates != 1 {
 				t.Fatalf("creates=%d", creates)
 			}
+			expectedMkdirs := 2
+			if mode == "success" || mode == "unsupported" {
+				expectedMkdirs = 1
+			}
+			if mkdirs != expectedMkdirs {
+				t.Fatalf("mkdirs=%d", mkdirs)
+			}
 			if mode == "success" || mode == "unsupported" {
 				if finds != 0 {
 					t.Fatalf("unexpected lookup: %d", finds)
 				}
 			} else if finds != 1 {
 				t.Fatalf("finds=%d", finds)
+			}
+		})
+	}
+}
+
+// TestServerComputerProvisioningEnsuresImage covers the pre-create image probe:
+// a present image skips the pull, an absent image pulls exactly once before the
+// container is created, a pull that outlives the caller context still creates the
+// container, and a failed pull leaves the runtime in Unknown.
+func TestServerComputerProvisioningEnsuresImage(t *testing.T) {
+	for _, mode := range []string{"present", "absent", "absent-caller-cancelled", "pull-error"} {
+		t.Run(mode, func(t *testing.T) {
+			d := testDeps(t)
+			seedTenant(t, d, "tenant")
+			ctx, cancelCaller := context.WithCancel(context.Background())
+			defer cancelCaller()
+			space, err := NewStore(d).CreateSpace(ctx, "tenant", Space{Name: "computers"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var mu sync.Mutex
+			var rpcs []string
+			creates := 0
+			imageParams := ""
+			var instance computerContainer
+			h := builtinToolHarness(t, d, "rnr_computer_image_"+mode, func(method string, params map[string]any) (any, error) {
+				switch method {
+				case "sys.info":
+					return map[string]any{"version": "test", "kind": "server", "storageRoot": "/srv/zakura", "capabilities": map[string]any{"docker": true}}, nil
+				case "docker.images":
+					mu.Lock()
+					rpcs = append(rpcs, "docker.images")
+					imageParams = fmt.Sprint(params["images"])
+					mu.Unlock()
+					if mode == "present" {
+						return []computerImageStatus{{Image: serverComputerImage, ID: "sha256:present"}}, nil
+					}
+					return []computerImageStatus{{Image: serverComputerImage, Error: "no such image"}}, nil
+				case "docker.pull":
+					mu.Lock()
+					rpcs = append(rpcs, "docker.pull")
+					mu.Unlock()
+					if mode == "pull-error" {
+						return nil, errors.New("registry unavailable")
+					}
+					if mode == "absent-caller-cancelled" {
+						// The approve request ends while the pull is still running.
+						cancelCaller()
+					}
+					return map[string]string{"image": fmt.Sprint(params["image"])}, nil
+				case "host.fs.mkdir":
+					mu.Lock()
+					rpcs = append(rpcs, "host.fs.mkdir")
+					mu.Unlock()
+					return map[string]any{"abs": fmt.Sprintf("/srv/zakura/%s", fmt.Sprint(params["path"]))}, nil
+				case "docker.create":
+					mu.Lock()
+					defer mu.Unlock()
+					rpcs = append(rpcs, "docker.create")
+					creates++
+					raw, _ := json.Marshal(params["labels"])
+					var labels map[string]string
+					_ = json.Unmarshal(raw, &labels)
+					instance = computerContainer{DockerID: "container", Name: "/" + fmt.Sprint(params["name"]), Image: serverComputerImage, Status: "running", Labels: labels}
+					return instance, nil
+				default:
+					return nil, fmt.Errorf("unexpected RPC %s", method)
+				}
+			})
+			if err = d.Gorm.Exec(`UPDATE runtime_nodes SET kind='server' WHERE id='node'`).Error; err != nil {
+				t.Fatal(err)
+			}
+			store := h.computerStore()
+			c := computers.Computer{ID: "computer", TenantID: "tenant", SpaceID: space.ID, Name: "Server", Provider: computers.Server, RuntimeNodeID: "node", IdleSeconds: 900, MaxLifetimeSeconds: 3600}
+			sealed, err := computers.SealCredentials(d.Secret, c.TenantID, c.SpaceID, c.ID, []byte(`{}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = store.Create(ctx, c, sealed); err != nil {
+				t.Fatal(err)
+			}
+			r, err := store.ReserveRuntime(context.Background(), "tenant", space.ID, c.ID, "", time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := computers.Target{TenantID: r.TenantID, SpaceID: r.SpaceID, ComputerID: r.ComputerID, RuntimeID: r.ID, Incarnation: r.Incarnation}
+			adapter := serverComputerProvider{h: h}
+			p := computers.Provisioner{Store: store, Providers: map[computers.Provider]computers.CreationProvider{computers.Server: adapter}}
+			result, err := p.ApproveAndCreate(ctx, target, r.CreateOperationID, "admin")
+			mu.Lock()
+			defer mu.Unlock()
+			if imageParams != "["+serverComputerImage+"]" {
+				t.Fatalf("docker.images params = %q", imageParams)
+			}
+			if mode == "present" {
+				if err != nil || result.State != computers.Ready || result.ExternalID != "container" {
+					t.Fatalf("present create: %+v %v", result, err)
+				}
+				if len(rpcs) != 3 || rpcs[0] != "docker.images" || rpcs[1] != "host.fs.mkdir" || rpcs[2] != "docker.create" {
+					t.Fatalf("present RPCs = %v", rpcs)
+				}
+				return
+			}
+			if mode == "pull-error" {
+				if !errors.Is(err, computers.ErrCreationUncertain) {
+					t.Fatalf("expected uncertain: %v", err)
+				}
+				if creates != 0 || len(rpcs) != 2 || rpcs[1] != "docker.pull" {
+					t.Fatalf("pull-error RPCs = %v creates=%d", rpcs, creates)
+				}
+				stored, readErr := store.GetRuntime(context.Background(), target)
+				if readErr != nil || stored.State != computers.Unknown {
+					t.Fatalf("state after pull error: %+v %v", stored, readErr)
+				}
+				return
+			}
+			if err != nil || result.State != computers.Ready || result.ExternalID != "container" {
+				t.Fatalf("pull create: %+v %v", result, err)
+			}
+			if len(rpcs) != 4 || rpcs[0] != "docker.images" || rpcs[1] != "docker.pull" || rpcs[2] != "host.fs.mkdir" || rpcs[3] != "docker.create" {
+				t.Fatalf("absent RPCs = %v", rpcs)
 			}
 		})
 	}

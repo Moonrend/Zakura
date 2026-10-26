@@ -9,20 +9,22 @@ import (
 )
 
 type Space struct {
-	ID              string          `json:"id"`
-	TenantID        string          `json:"tenantId,omitempty"`
-	Name            string          `json:"name"`
-	Slug            string          `json:"slug"`
-	Description     string          `json:"description"`
-	EnableComputer  bool            `json:"enableComputer"`
-	WorkspaceImage  *string         `json:"workspaceImage"`
-	RuntimeNodeID   *string         `json:"runtimeNodeId"`
-	WorkspaceKind   string          `json:"workspaceKind"`
-	WorkspaceStatus string          `json:"workspaceStatus"`
-	Config          json.RawMessage `json:"config"`
-	LastError       *string         `json:"lastError"`
-	CreatedAt       time.Time       `json:"createdAt"`
-	UpdatedAt       time.Time       `json:"updatedAt"`
+	ID                         string          `json:"id"`
+	TenantID                   string          `json:"tenantId,omitempty"`
+	Name                       string          `json:"name"`
+	Slug                       string          `json:"slug"`
+	Description                string          `json:"description"`
+	EnableComputer             bool            `json:"enableComputer"`
+	WorkspaceImage             *string         `json:"workspaceImage"`
+	RuntimeNodeID              *string         `json:"runtimeNodeId"`
+	WorkspaceKind              string          `json:"workspaceKind"`
+	WorkspaceStatus            string          `json:"workspaceStatus"`
+	CurrentWorkspaceInstanceID *string         `json:"currentWorkspaceInstanceId"`
+	WorkspaceGeneration        int64           `json:"workspaceGeneration"`
+	Config                     json.RawMessage `json:"config"`
+	LastError                  *string         `json:"lastError"`
+	CreatedAt                  time.Time       `json:"createdAt"`
+	UpdatedAt                  time.Time       `json:"updatedAt"`
 }
 
 type Agent struct {
@@ -83,11 +85,19 @@ type Run struct {
 	CreatedAt       time.Time  `json:"createdAt"`
 }
 
+// QueueMessage is a follow-up held in the server-side session queue. Its JSON
+// form (see queue.go) carries both "id" and the frontend's "messageId".
 type QueueMessage struct {
-	ID          string          `json:"id"`
-	Content     string          `json:"content"`
-	Attachments json.RawMessage `json:"attachments,omitempty"`
-	Options     json.RawMessage `json:"options,omitempty"`
+	ID          string
+	Content     string
+	Context     *MessageContext
+	Attachments json.RawMessage
+	Options     json.RawMessage
+	Mode        string
+	Interrupt   bool
+	CreatedAt   string
+	UserID      string
+	UserName    string
 }
 
 type Memory struct {

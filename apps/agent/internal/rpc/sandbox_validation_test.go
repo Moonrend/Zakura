@@ -53,7 +53,7 @@ func TestSandboxRPCPolicyAndEnforcement(t *testing.T) {
 func TestSandboxRPCRejectsUnsupportedTransports(t *testing.T) {
 	t.Setenv("ZAKURA_SANDBOX_ENABLED", "")
 	h := New("computer", t.TempDir())
-	for _, method := range []string{"host.pty.start", "docker.create", "docker.run", "docker.exec", "docker.exec.start", "docker.attach", "docker.recreate"} {
+	for _, method := range []string{"host.pty.start", "docker.create", "docker.run", "docker.start", "docker.exec", "docker.exec.start", "docker.attach", "docker.recreate"} {
 		t.Run(method, func(t *testing.T) {
 			result := sandboxCall(t, h, method, map[string]any{"executionMode": "sandbox", "spaceId": "space-a"})
 			if result.Error == "" || !strings.Contains(result.Error, "sandbox") {

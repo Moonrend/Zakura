@@ -1,5 +1,12 @@
 import { api } from "@/lib/api";
 
+export type WorkspaceTarget = string | { spaceId: string };
+function workspaceAPI(target: WorkspaceTarget): string {
+  return typeof target === "string"
+    ? `/api/agents/${encodeURIComponent(target)}`
+    : `/api/spaces/${encodeURIComponent(target.spaceId)}`;
+}
+
 export type FsEntry = {
   name: string;
   path: string;
@@ -31,26 +38,26 @@ function qs(path: string) {
   return `path=${encodeURIComponent(path)}`;
 }
 
-export async function fsList(agentId: string, path = "/") {
-  return api<FsListResponse>(`/api/agents/${agentId}/fs/list?${qs(path)}`);
+export async function fsList(agentId: WorkspaceTarget, path = "/") {
+  return api<FsListResponse>(`${workspaceAPI(agentId)}/fs/list?${qs(path)}`);
 }
 
-export async function fsStat(agentId: string, path = "/") {
-  return api<FsEntry>(`/api/agents/${agentId}/fs?${qs(path)}`);
+export async function fsStat(agentId: WorkspaceTarget, path = "/") {
+  return api<FsEntry>(`${workspaceAPI(agentId)}/fs?${qs(path)}`);
 }
 
-export async function fsRead(agentId: string, path: string) {
-  return api<FsReadResponse>(`/api/agents/${agentId}/fs/read?${qs(path)}`);
+export async function fsRead(agentId: WorkspaceTarget, path: string) {
+  return api<FsReadResponse>(`${workspaceAPI(agentId)}/fs/read?${qs(path)}`);
 }
 
 export async function fsWrite(
-  agentId: string,
+  agentId: WorkspaceTarget,
   path: string,
   content: string,
   expectedRevision?: string,
 ) {
   return api<{ ok: true; path: string; revision: string }>(
-    `/api/agents/${agentId}/fs/write`,
+    `${workspaceAPI(agentId)}/fs/write`,
     {
       method: "POST",
       json: { path, content, ...(expectedRevision ? { expectedRevision } : {}) },
@@ -58,39 +65,39 @@ export async function fsWrite(
   );
 }
 
-export async function fsMkdir(agentId: string, path: string) {
-  return api<{ ok: true; path: string }>(`/api/agents/${agentId}/fs/mkdir`, {
+export async function fsMkdir(agentId: WorkspaceTarget, path: string) {
+  return api<{ ok: true; path: string }>(`${workspaceAPI(agentId)}/fs/mkdir`, {
     method: "POST",
     json: { path },
   });
 }
 
-export async function fsDelete(agentId: string, path: string, recursive = true) {
-  return api<{ ok: true; path: string }>(`/api/agents/${agentId}/fs/delete`, {
+export async function fsDelete(agentId: WorkspaceTarget, path: string, recursive = true) {
+  return api<{ ok: true; path: string }>(`${workspaceAPI(agentId)}/fs/delete`, {
     method: "POST",
     json: { path, recursive },
   });
 }
 
-export async function fsRename(agentId: string, oldPath: string, newPath: string) {
-  return api<{ ok: true; path: string }>(`/api/agents/${agentId}/fs/rename`, {
+export async function fsRename(agentId: WorkspaceTarget, oldPath: string, newPath: string) {
+  return api<{ ok: true; path: string }>(`${workspaceAPI(agentId)}/fs/rename`, {
     method: "POST",
     json: { oldPath, newPath },
   });
 }
 
-export async function fsExtract(agentId: string, path: string, destination?: string) {
-  return api<{ ok: true; destination: string }>(`/api/agents/${agentId}/fs/extract`, {
+export async function fsExtract(agentId: WorkspaceTarget, path: string, destination?: string) {
+  return api<{ ok: true; destination: string }>(`${workspaceAPI(agentId)}/fs/extract`, {
     method: "POST",
     json: { path, destination },
   });
 }
 
-export async function fsUpload(agentId: string, path: string, file: File) {
+export async function fsUpload(agentId: WorkspaceTarget, path: string, file: File) {
   const form = new FormData();
   form.set("path", path);
   form.set("file", file);
-  const res = await fetch(`/api/agents/${agentId}/fs/upload`, {
+  const res = await fetch(`${workspaceAPI(agentId)}/fs/upload`, {
     method: "POST",
     headers: sessionHeader(),
     body: form,
@@ -109,7 +116,7 @@ export async function fsUpload(agentId: string, path: string, file: File) {
  * 几十兆的文件在进度条上只能干等，所以这条路径走 XHR。
  */
 export function fsUploadWithProgress(
-  agentId: string,
+  agentId: WorkspaceTarget,
   path: string,
   file: File,
   opts: { onProgress?: (ratio: number) => void; signal?: AbortSignal } = {},
@@ -124,7 +131,7 @@ export function fsUploadWithProgress(
     form.set("file", file);
 
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", `/api/agents/${agentId}/fs/upload`);
+    xhr.open("POST", `${workspaceAPI(agentId)}/fs/upload`);
     for (const [key, value] of Object.entries(sessionHeader())) {
       xhr.setRequestHeader(key, value);
     }
@@ -175,14 +182,14 @@ async function downloadBlob(url: string, init?: RequestInit, fallbackName = "dow
   URL.revokeObjectURL(a.href);
 }
 
-export async function fsDownload(agentId: string, path: string) {
+export async function fsDownload(agentId: WorkspaceTarget, path: string) {
   const name = path.split("/").filter(Boolean).pop() || "file";
-  await downloadBlob(`/api/agents/${agentId}/fs/download?${qs(path)}`, undefined, name);
+  await downloadBlob(`${workspaceAPI(agentId)}/fs/download?${qs(path)}`, undefined, name);
 }
 
 /** 读取文件内容为 Blob（预览用，不触发浏览器下载） */
-export async function fsFetchBlob(agentId: string, path: string): Promise<Blob> {
-  const res = await fetch(`/api/agents/${agentId}/fs/download?${qs(path)}`, {
+export async function fsFetchBlob(agentId: WorkspaceTarget, path: string): Promise<Blob> {
+  const res = await fetch(`${workspaceAPI(agentId)}/fs/download?${qs(path)}`, {
     headers: sessionHeader(),
   });
   if (!res.ok) {
@@ -192,9 +199,9 @@ export async function fsFetchBlob(agentId: string, path: string): Promise<Blob> 
   return res.blob();
 }
 
-export async function fsArchive(agentId: string, paths: string[]) {
+export async function fsArchive(agentId: WorkspaceTarget, paths: string[]) {
   await downloadBlob(
-    `/api/agents/${agentId}/fs/archive`,
+    `${workspaceAPI(agentId)}/fs/archive`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json", ...sessionHeader() },
@@ -316,14 +323,14 @@ export type AgentProject = {
   path: string | null;
 };
 
-export async function listAgentProjects(agentId: string) {
-  return api<{ projects: AgentProject[] }>(`/api/agents/${agentId}/projects`, {
+export async function listAgentProjects(agentId: WorkspaceTarget) {
+  return api<{ projects: AgentProject[] }>(`${workspaceAPI(agentId)}/projects`, {
     cacheTtlMs: false,
   });
 }
 
 export async function createAgentProject(
-  agentId: string,
+  agentId: WorkspaceTarget,
   body: {
     name: string;
     description?: string;
@@ -333,13 +340,13 @@ export async function createAgentProject(
   },
 ) {
   return api<{ project: AgentProject; cloneError?: string }>(
-    `/api/agents/${agentId}/projects`,
+    `${workspaceAPI(agentId)}/projects`,
     { method: "POST", json: body },
   );
 }
 
 export async function updateAgentProject(
-  agentId: string,
+  agentId: WorkspaceTarget,
   slug: string,
   body: {
     name?: string;
@@ -350,18 +357,18 @@ export async function updateAgentProject(
   },
 ) {
   return api<{ project: AgentProject }>(
-    `/api/agents/${agentId}/projects/${encodeURIComponent(slug)}`,
+    `${workspaceAPI(agentId)}/projects/${encodeURIComponent(slug)}`,
     { method: "PATCH", json: body },
   );
 }
 
-export async function renameAgentProject(agentId: string, slug: string, name: string) {
+export async function renameAgentProject(agentId: WorkspaceTarget, slug: string, name: string) {
   return updateAgentProject(agentId, slug, { slug: name, name });
 }
 
-export async function deleteAgentProject(agentId: string, slug: string) {
+export async function deleteAgentProject(agentId: WorkspaceTarget, slug: string) {
   return api<{ ok: true; deleted: boolean }>(
-    `/api/agents/${agentId}/projects/${encodeURIComponent(slug)}`,
+    `${workspaceAPI(agentId)}/projects/${encodeURIComponent(slug)}`,
     { method: "DELETE" },
   );
 }
@@ -389,74 +396,74 @@ export type ProjectConfigSnapshot = {
   };
 };
 
-export async function getProjectConfig(agentId: string, slug: string) {
+export async function getProjectConfig(agentId: WorkspaceTarget, slug: string) {
   return api<{ config: ProjectConfigSnapshot }>(
-    `/api/agents/${agentId}/projects/${encodeURIComponent(slug)}/config`,
+    `${workspaceAPI(agentId)}/projects/${encodeURIComponent(slug)}/config`,
     { cacheTtlMs: false },
   );
 }
 
 export async function saveProjectInstructions(
-  agentId: string,
+  agentId: WorkspaceTarget,
   slug: string,
   body: { content: string; file?: "AGENTS.md" | "CLAUDE.md" },
 ) {
   return api<{ config: ProjectConfigSnapshot; path: string }>(
-    `/api/agents/${agentId}/projects/${encodeURIComponent(slug)}/instructions`,
+    `${workspaceAPI(agentId)}/projects/${encodeURIComponent(slug)}/instructions`,
     { method: "PUT", json: body },
   );
 }
 
 export async function saveProjectHooks(
-  agentId: string,
+  agentId: WorkspaceTarget,
   slug: string,
   body: { events: import("@zakura/shared").AgentHooksByEvent; file?: string | null },
 ) {
   return api<{ config: ProjectConfigSnapshot; path: string }>(
-    `/api/agents/${agentId}/projects/${encodeURIComponent(slug)}/hooks`,
+    `${workspaceAPI(agentId)}/projects/${encodeURIComponent(slug)}/hooks`,
     { method: "PUT", json: body },
   );
 }
 
 export async function createProjectSkill(
-  agentId: string,
+  agentId: WorkspaceTarget,
   slug: string,
   body: { name: string; description: string; body?: string },
 ) {
   return api<{ skill: ProjectSkillMeta; config: ProjectConfigSnapshot }>(
-    `/api/agents/${agentId}/projects/${encodeURIComponent(slug)}/skills`,
+    `${workspaceAPI(agentId)}/projects/${encodeURIComponent(slug)}/skills`,
     { method: "POST", json: body },
   );
 }
 
 export async function readProjectSkillFile(
-  agentId: string,
+  agentId: WorkspaceTarget,
   slug: string,
   name: string,
   path?: string,
 ) {
   const qs = path ? `?path=${encodeURIComponent(path)}` : "";
   return api<{ path: string; content: string }>(
-    `/api/agents/${agentId}/projects/${encodeURIComponent(slug)}/skills/${encodeURIComponent(name)}/file${qs}`,
+    `${workspaceAPI(agentId)}/projects/${encodeURIComponent(slug)}/skills/${encodeURIComponent(name)}/file${qs}`,
     { cacheTtlMs: false },
   );
 }
 
 export async function saveProjectSkillFile(
-  agentId: string,
+  agentId: WorkspaceTarget,
   slug: string,
   name: string,
   content: string,
 ) {
   return api<{ config: ProjectConfigSnapshot; path: string }>(
-    `/api/agents/${agentId}/projects/${encodeURIComponent(slug)}/skills/${encodeURIComponent(name)}`,
+    `${workspaceAPI(agentId)}/projects/${encodeURIComponent(slug)}/skills/${encodeURIComponent(name)}`,
     { method: "PUT", json: { content } },
   );
 }
 
-export async function deleteProjectSkill(agentId: string, slug: string, name: string) {
+export async function deleteProjectSkill(agentId: WorkspaceTarget, slug: string, name: string) {
   return api<{ config: ProjectConfigSnapshot }>(
-    `/api/agents/${agentId}/projects/${encodeURIComponent(slug)}/skills/${encodeURIComponent(name)}`,
+    `${workspaceAPI(agentId)}/projects/${encodeURIComponent(slug)}/skills/${encodeURIComponent(name)}`,
     { method: "DELETE" },
   );
 }

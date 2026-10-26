@@ -2,7 +2,7 @@
 package runtime
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"slices"
@@ -10,20 +10,7 @@ import (
 
 // Leave nested JSON opaque on the common OpenAI path. This avoids decoding and
 // rebuilding messages/tools and preserves integers larger than float64 can hold.
-func prepareProviderPayload(protocol, operation, model string, original []byte) ([]byte, bool, error) {
-	if protocol == "anthropic" || operation == "messages" {
-		var body map[string]any
-		decoder := json.NewDecoder(bytes.NewReader(original))
-		decoder.UseNumber()
-		if !json.Valid(original) || decoder.Decode(&body) != nil || body == nil {
-			return nil, false, errors.New("invalid JSON body")
-		}
-		body["model"] = model
-		body = normalizeProviderRequest(protocol, operation, body)
-		streaming, _ := body["stream"].(bool)
-		payload, err := json.Marshal(body)
-		return payload, streaming, err
-	}
+func prepareNativeGatewayPayload(model string, original []byte) ([]byte, bool, error) {
 	var body map[string]json.RawMessage
 	if json.Unmarshal(original, &body) != nil || body == nil {
 		return nil, false, errors.New("invalid JSON body")
@@ -51,4 +38,22 @@ func prepareProviderPayload(protocol, operation, model string, original []byte) 
 	}
 	payload = append(payload, '}')
 	return payload, streaming, nil
+}
+
+// Only bypass dialect decoding when neither conversion nor route defaults nor
+// Anthropic cache/thinking policies need to inspect nested fields.
+func prepareGatewayPayload(ctx context.Context, protocol, operation string, route ModelRoute, original []byte) ([]byte, bool, error) {
+	opts := gwRouteOptions(route.Options)
+	if !isAnthropicProtocol(protocol) && (!gwChatOperation(operation) || operation == "chat" && opts.MaxTokens == nil && opts.Temperature == nil) {
+		return prepareNativeGatewayPayload(route.Model, original)
+	}
+	body, err := decodeGatewayBody(original)
+	if err != nil {
+		return nil, false, err
+	}
+	streaming, _ := body["stream"].(bool)
+	body = prepareUpstreamRequest(protocol, operation, route, body)
+	applyContextCache(ctx, protocol, body)
+	payload, err := json.Marshal(body)
+	return payload, streaming, err
 }

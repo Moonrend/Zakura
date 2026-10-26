@@ -15,7 +15,6 @@ import (
 func ValidateConfiguration(provider Provider, config map[string]string) error {
 	required := map[Provider][]string{
 		E2B: {"apiKey", "template"}, SSH: {"host", "user", "privateKey", "hostKeyFingerprint"},
-		Railway: {"privateKey", "hostKeyFingerprint"},
 	}
 	allowed := map[string]bool{}
 	for _, key := range required[provider] {
@@ -26,6 +25,13 @@ func ValidateConfiguration(provider Provider, config map[string]string) error {
 	}
 	if provider == SSH {
 		allowed["port"] = true
+	}
+	// Railway needs no pre-known key material: the private key is generated on
+	// demand and the host key is trusted on first use, so its only allowed fields
+	// are optional until the first connection pins the fingerprint.
+	if provider == Railway {
+		allowed["privateKey"] = true
+		allowed["hostKeyFingerprint"] = true
 	}
 	switch provider {
 	case Server, RemoteAgent, Temporary, E2B, SSH, Railway:
@@ -38,13 +44,16 @@ func ValidateConfiguration(provider Provider, config map[string]string) error {
 		}
 	}
 	if provider == SSH || provider == Railway {
-		if _, err := ssh.ParsePrivateKey([]byte(config["privateKey"])); err != nil {
-			return fmt.Errorf("invalid or encrypted SSH private key")
+		if key := config["privateKey"]; strings.TrimSpace(key) != "" {
+			if _, err := ssh.ParsePrivateKey([]byte(key)); err != nil {
+				return fmt.Errorf("invalid or encrypted SSH private key")
+			}
 		}
-		fingerprint := config["hostKeyFingerprint"]
-		digest, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(fingerprint, "SHA256:"))
-		if !strings.HasPrefix(fingerprint, "SHA256:") || err != nil || len(digest) != 32 {
-			return fmt.Errorf("host key fingerprint must be an OpenSSH SHA256 fingerprint")
+		if fingerprint := config["hostKeyFingerprint"]; strings.TrimSpace(fingerprint) != "" {
+			digest, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(fingerprint, "SHA256:"))
+			if !strings.HasPrefix(fingerprint, "SHA256:") || err != nil || len(digest) != 32 {
+				return fmt.Errorf("host key fingerprint must be an OpenSSH SHA256 fingerprint")
+			}
 		}
 	}
 	if provider == SSH {

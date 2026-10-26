@@ -459,12 +459,16 @@ function SidebarGroupContent({
   )
 }
 
+function isSidebarItemHidden(el: HTMLElement) {
+  return el.offsetHeight < 2 || !!el.closest(
+    '[hidden], [data-slot="collapsible-content"][data-closed], [data-slot="collapsible-content"][data-ending-style]'
+  )
+}
+
 function SidebarMenu({ className, children, ...props }: React.ComponentProps<"ul">) {
   const { ref, hover, alloc } = useFluidHoverScope({
     gapClick: false,
-    isItemDisabled: (el) =>
-      el.offsetHeight < 2 ||
-      !!el.closest("[hidden], [data-closed], [data-ending-style]"),
+    isItemDisabled: isSidebarItemHidden,
   })
   return (
     <div

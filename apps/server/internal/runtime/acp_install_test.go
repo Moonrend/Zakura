@@ -32,36 +32,28 @@ func TestACPInstallDispatchesRegistrySpecAndPersistsProgress(t *testing.T) {
 	RegisterRoutes(router, d)
 	server := httptest.NewServer(router)
 	defer server.Close()
-	commands := make(chan []any, 4)
+	pulls := make(chan string, 4)
 	startMigrationRunner(t, server.URL, runnerToken, func(method string, params map[string]any) (any, error) {
 		switch method {
 		case "sys.info":
-			return map[string]any{"version": "test", "kind": "computer", "storageRoot": "/srv/zakura", "capabilities": map[string]any{"host": true}, "hostInfo": map[string]any{"platform": "linux"}}, nil
-		case "host.exec":
-			command, _ := params["command"].([]any)
-			commands <- command
-			return map[string]any{"exitCode": 0, "stdout": fmt.Sprint(command), "stderr": ""}, nil
+			return map[string]any{"version": "test", "kind": "computer", "storageRoot": "/srv/zakura", "capabilities": map[string]any{"host": true, "docker": true}, "hostInfo": map[string]any{"platform": "linux"}}, nil
+		case "docker.pull":
+			pulls <- fmt.Sprint(params["image"])
+			return map[string]any{"ok": true}, nil
 		default:
 			return nil, fmt.Errorf("unexpected method %s", method)
 		}
 	})
-	deadline := time.Now().Add(2 * time.Second)
-	for {
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
 		var status string
 		_ = d.DB.QueryRow(`SELECT status FROM runtime_nodes WHERE id='node'`).Scan(&status)
 		if status == "online" {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("runner did not connect")
-		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	code, _ := doJSON(t, server.Client(), http.MethodPut, server.URL+"/api/agents/"+agent.ID+"/acp/agents/codex", token, map[string]any{"command": "codex", "displayName": "Codex"})
-	if code != 200 {
-		t.Fatalf("save ACP profile: %d", code)
-	}
-	code, accepted := doJSON(t, server.Client(), http.MethodPost, server.URL+"/api/agents/"+agent.ID+"/acp/agents/codex/install", token, map[string]any{})
+	code, accepted := doJSON(t, server.Client(), http.MethodPost, server.URL+"/api/spaces/"+space.ID+"/acp/agents/codex/install", token, map[string]any{})
 	if code != http.StatusAccepted || accepted["accepted"] != true {
 		t.Fatalf("install accept contract: %d %#v", code, accepted)
 	}
@@ -71,15 +63,23 @@ func TestACPInstallDispatchesRegistrySpecAndPersistsProgress(t *testing.T) {
 			items := polled["installs"].([]any)
 			if len(items) == 1 {
 				install := items[0].(map[string]any)
+				if install["state"] == "failed" {
+					t.Fatalf("install failed: %#v", install)
+				}
 				if install["state"] == "completed" {
-					first, second := <-commands, <-commands
-					if len(first) < 5 || first[0] != "npm" || first[1] != "install" || first[len(first)-1] != "@openai/codex" || len(second) != 2 || second[0] != "codex" || second[1] != "--version" {
-						t.Fatalf("ACP install commands: %#v %#v", first, second)
+					select {
+					case image := <-pulls:
+						if image != acpAdapterImage("codex", "") {
+							t.Fatalf("wrong adapter image: %s", image)
+						}
+					case <-time.After(time.Second):
+						t.Fatal("no image pulled")
+					}
+					fresh, _ := store.GetAgent(context.Background(), "tenant", agent.ID)
+					if string(fresh.Config) != "{}" {
+						t.Fatalf("install leaked into Agent config: %s", fresh.Config)
 					}
 					return
-				}
-				if install["state"] == "failed" {
-					t.Fatalf("ACP install failed: %#v", install)
 				}
 			}
 		}

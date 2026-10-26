@@ -148,6 +148,7 @@ func TestImportStdioProvisionsNativeBridgeOnRunner(t *testing.T) {
 	stopRequest := make(chan map[string]any, 1)
 	runnerErrors := make(chan error, 1)
 	go func() {
+		var container map[string]any
 		u, _ := url.Parse(server.URL)
 		conn, err := net.Dial("tcp", u.Host)
 		if err != nil {
@@ -198,13 +199,24 @@ func TestImportStdioProvisionsNativeBridgeOnRunner(t *testing.T) {
 					return
 				}
 				result = map[string]any{"ok": true, "path": frame.Params["path"], "abs": "/srv/zakura/workspaces/" + space.ID + "/.zakura/components/id-000003"}
-			case "docker.run":
+			case "docker.create":
 				runRequest <- frame.Params
-				result = map[string]any{"dockerId": "docker-1", "name": "stdio", "image": "bridge:test", "status": "running", "ports": []map[string]any{{"containerPort": 3100, "hostPort": bridgePort, "protocol": "tcp"}}}
+				container = map[string]any{"dockerId": "docker-1", "name": frame.Params["name"], "image": frame.Params["image"], "labels": frame.Params["labels"], "status": "running", "ports": []map[string]any{{"containerPort": 3100, "hostPort": bridgePort, "protocol": "tcp"}}}
+				result = container
+			case "docker.list":
+				result = []any{}
+				if container != nil {
+					result = []any{container}
+				}
 			case "docker.inspect":
-				result = map[string]any{"dockerId": "docker-1", "status": "running"}
+				result = container
 			case "docker.stop":
 				stopRequest <- frame.Params
+				if frame.Params["remove"] == true {
+					container = nil
+				} else if container != nil {
+					container["status"] = "exited"
+				}
 				result = map[string]any{"ok": true}
 			default:
 				runnerErrors <- fmt.Errorf("unexpected method %s", frame.Method)

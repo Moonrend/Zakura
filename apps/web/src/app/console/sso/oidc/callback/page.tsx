@@ -27,7 +27,7 @@ function Inner() {
           { method: "POST", json: { code, state } },
         );
         setSession(res.session);
-        router.replace(res.tenant?.onboardingCompleted === false ? "/onboarding" : "/dashboard/spaces");
+        router.replace(res.tenant?.onboardingCompleted === false ? "/onboarding" : "/chat");
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       }

@@ -6,13 +6,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
 	platformdb "github.com/Moonrend/Zakura/apps/server/internal/platform/db"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/migrations"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/pgtest"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -144,10 +144,7 @@ func TestMemorySearchTrigramSkipsNonPostgres(t *testing.T) {
 
 func testPostgresDeps(t *testing.T) *appdeps.Dependencies {
 	t.Helper()
-	dsn := os.Getenv("ZAKURA_TEST_POSTGRES_URL")
-	if dsn == "" {
-		t.Skip("ZAKURA_TEST_POSTGRES_URL is not set")
-	}
+	dsn := pgtest.FreshURL(t, pgtest.URL(t), "runtime")
 	ctx := context.Background()
 	conn, err := platformdb.Open(ctx, dsn)
 	if err != nil {
@@ -157,11 +154,20 @@ func testPostgresDeps(t *testing.T) *appdeps.Dependencies {
 	if conn.Dialect != "postgres" {
 		t.Fatalf("expected postgres dialect, got %q", conn.Dialect)
 	}
-	if _, err = conn.DB.ExecContext(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public`); err != nil {
-		t.Fatalf("reset disposable PostgreSQL database: %v", err)
-	}
 	if err = migrations.Apply(ctx, conn.DB, conn.Dialect, conn.Rebind); err != nil {
 		t.Fatalf("apply PostgreSQL migrations: %v", err)
+	}
+	// Schema fallback intentionally excludes public. If the disposable service
+	// preinstalled pg_trgm there, expose only its similarity function through a
+	// private wrapper instead of adding public tables to search_path.
+	var wrapper string
+	if err := conn.DB.QueryRowContext(ctx, `SELECT CASE WHEN n.nspname=current_schema() THEN '' ELSE format('CREATE FUNCTION similarity(text,text) RETURNS real LANGUAGE SQL IMMUTABLE STRICT AS %L', format('SELECT %I.similarity($1,$2)',n.nspname)) END FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='pg_trgm'`).Scan(&wrapper); err != nil {
+		t.Fatalf("pg_trgm prerequisite unavailable: %v", err)
+	}
+	if wrapper != "" {
+		if _, err := conn.DB.ExecContext(ctx, wrapper); err != nil {
+			t.Fatalf("expose isolated pg_trgm function: %v", err)
+		}
 	}
 	gdb, err := conn.Gorm()
 	if err != nil {
@@ -204,8 +210,10 @@ func TestMemorySearchTrigramPostgres(t *testing.T) {
 func TestMemorySearchTrigramProbeFailureCached(t *testing.T) {
 	d := testPostgresDeps(t)
 	ctx := context.Background()
-	if _, err := d.DB.ExecContext(ctx, `DROP EXTENSION IF EXISTS pg_trgm`); err != nil {
-		t.Skipf("cannot drop pg_trgm: %v", err)
+	// Replace only the private fixture's function, never DROP a database-global
+	// extension (schema fallback can share a database with other fixtures).
+	if _, err := d.DB.ExecContext(ctx, `CREATE OR REPLACE FUNCTION similarity(text,text) RETURNS real LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'pgtest unavailable similarity'; END $$`); err != nil {
+		t.Fatalf("install private probe failure: %v", err)
 	}
 	h := &handler{deps: d}
 	hits, err := h.memorySearchTrigram(ctx, "tenant", "agent", "apple", 5)

@@ -61,6 +61,10 @@ func TestGatewayHTTPStreamFlushesBeforeUpstreamFinishes(t *testing.T) {
 	defer upstream.Close()
 	d := testDeps(t)
 	seedTenant(t, d, "tenant")
+	space, spaceErr := NewStore(d).CreateSpace(context.Background(), "tenant", Space{Name: "Gateway", WorkspaceKind: "local"})
+	if spaceErr != nil {
+		t.Fatal(spaceErr)
+	}
 	store := NewStore(d)
 	u, err := store.CreateUpstream(context.Background(), "tenant", Upstream{Name: "stream", Config: raw(map[string]any{"baseUrl": upstream.URL})})
 	if err != nil {
@@ -72,7 +76,7 @@ func TestGatewayHTTPStreamFlushesBeforeUpstreamFinishes(t *testing.T) {
 	h := &handler{deps: d, store: store, service: NewService(store)}
 	defer h.service.gateway.client.CloseIdleConnections()
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r = r.WithContext(httpx.WithPrincipal(r.Context(), httpx.Principal{TenantID: "tenant", APIKey: true, AgentID: "agent", APIKeyScopes: `["gateway"]`}))
+		r = r.WithContext(httpx.WithPrincipal(r.Context(), httpx.Principal{TenantID: "tenant", APIKey: true, SpaceID: space.ID, APIKeyScopes: `["gateway"]`}))
 		h.gateway("chat", "chat")(w, r)
 	}))
 	defer proxy.Close()
@@ -113,7 +117,7 @@ func TestGatewayStreamHasNoLifetimeResponseLimit(t *testing.T) {
 	const size = maxProviderResponse + 4096
 	writer := &gatewayCountingWriter{}
 	reader := io.LimitReader(&gatewayRepeatingReader{}, size)
-	if err := copyProviderResponse(writer, &ProviderResponse{Status: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(reader)}); err != nil {
+	if err := copyProviderResponse(writer, &ProviderResponse{Status: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(reader), Stream: true, Operation: "chat"}); err != nil {
 		t.Fatal(err)
 	}
 	if writer.size != size {
@@ -126,31 +130,33 @@ type gatewayRepeatingReader struct{}
 func (*gatewayRepeatingReader) Read(p []byte) (int, error) { clear(p); return len(p), nil }
 
 func TestGatewayPayloadPreservesNumbersAndNormalizesProtocols(t *testing.T) {
-	for _, tc := range []struct{ protocol, operation string }{{"openai", "chat"}, {"openai", "responses"}, {"anthropic", "chat"}, {"openai", "messages"}} {
-		original := []byte(`{"model":"alias","stream":true,"messages":[{"role":"system","content":"rules"},{"role":"user","content":"hi"}],"metadata":{"id":9007199254740993},"max_completion_tokens":9007199254740993,"tools":[{"name":"echo","input_schema":{"type":"object"}}],"odd\u0000key":"value"}`)
-		before := append([]byte(nil), original...)
-		payload, stream, err := prepareProviderPayload(tc.protocol, tc.operation, "real-model", original)
-		if err != nil || !stream || !bytes.Equal(before, original) || !json.Valid(payload) {
-			t.Fatalf("%+v stream=%v err=%v", tc, stream, err)
+	original := []byte(`{"model":"alias","stream":true,"messages":[{"role":"user","content":"hi"}],"metadata":{"id":9007199254740993},"max_completion_tokens":9007199254740993,"odd\u0000key":"value"}`)
+	for _, options := range []json.RawMessage{nil, raw(map[string]any{"temperature": 0.25, "maxTokens": 99})} {
+		payload, streaming, err := prepareGatewayPayload(context.Background(), "openai", "chat", ModelRoute{Model: "real", Options: options}, original)
+		if err != nil || !streaming || !json.Valid(payload) {
+			t.Fatalf("stream=%v err=%v payload=%s", streaming, err, payload)
 		}
 		var body map[string]json.RawMessage
-		if err := json.Unmarshal(payload, &body); err != nil {
-			t.Fatal(err)
-		}
-		if string(body["model"]) != `"real-model"` || !bytes.Contains(body["metadata"], []byte("9007199254740993")) {
+		_ = json.Unmarshal(payload, &body)
+		if string(body["model"]) != `"real"` || string(body["max_completion_tokens"]) != "9007199254740993" || !bytes.Contains(body["metadata"], []byte("9007199254740993")) || string(body["odd\x00key"]) != `"value"` {
 			t.Fatalf("corrupted payload: %s", payload)
 		}
-		if tc.protocol == "anthropic" && (string(body["max_tokens"]) != "9007199254740993" || string(body["system"]) != `"rules"`) {
-			t.Fatalf("normalization failed: %s", payload)
-		}
-		if tc.operation == "messages" && !bytes.Contains(body["tools"], []byte(`"function"`)) {
-			t.Fatalf("tools not converted: %s", payload)
+		if options != nil && (string(body["temperature"]) != "0.25" || body["max_tokens"] != nil) {
+			t.Fatalf("route defaults replaced explicit limits: %s", payload)
 		}
 	}
-	for _, payload := range []string{"null", "[]", "{} {}", "{", "1"} {
+	if !bytes.Contains(original, []byte(`"model":"alias"`)) {
+		t.Fatal("mutated input")
+	}
+	// The new bridge owns conversion, including its larger default token limit.
+	payload, _, err := prepareGatewayPayload(withContextCache(context.Background(), "tenant", "session"), "anthropic", "chat", ModelRoute{Model: "real"}, []byte(`{"messages":[{"role":"system","content":"rules"},{"role":"user","content":"hi"}]}`))
+	if err != nil || !bytes.Contains(payload, []byte(`"cache_control"`)) || !bytes.Contains(payload, []byte(`"max_tokens":4096`)) {
+		t.Fatalf("cache/bridge lost: %s %v", payload, err)
+	}
+	for _, invalid := range []string{"null", "[]", "{} {}", "{", "1"} {
 		for _, protocol := range []string{"openai", "anthropic"} {
-			if _, _, err := prepareProviderPayload(protocol, "chat", "m", []byte(payload)); err == nil {
-				t.Fatalf("accepted %s", payload)
+			if _, _, err := prepareGatewayPayload(context.Background(), protocol, "chat", ModelRoute{Model: "m"}, []byte(invalid)); err == nil {
+				t.Fatalf("accepted %s", invalid)
 			}
 		}
 	}
@@ -165,7 +171,7 @@ func TestGatewayTransportRetryCancellation(t *testing.T) {
 	defer cancel()
 	var calls atomic.Int32
 	called := make(chan struct{})
-	gateway := &Gateway{client: &http.Client{Transport: gatewayRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+	gateway := &Gateway{store: NewStore(testDeps(t)), client: &http.Client{Transport: gatewayRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls.Add(1)
 		close(called)
 		return nil, errors.New("dial failed")
@@ -282,6 +288,10 @@ func TestGatewayHTTPResponseReadFailures(t *testing.T) {
 		t.Run(fmt.Sprint(stream), func(t *testing.T) {
 			d := testDeps(t)
 			seedTenant(t, d, "tenant")
+			space, spaceErr := NewStore(d).CreateSpace(context.Background(), "tenant", Space{Name: "Gateway", WorkspaceKind: "local"})
+			if spaceErr != nil {
+				t.Fatal(spaceErr)
+			}
 			store := NewStore(d)
 			u, err := store.CreateUpstream(context.Background(), "tenant", Upstream{Name: "broken", Config: raw(map[string]any{"baseUrl": "http://example.test"})})
 			if err != nil {
@@ -301,7 +311,7 @@ func TestGatewayHTTPResponseReadFailures(t *testing.T) {
 				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {contentType}}, Body: io.NopCloser(io.MultiReader(strings.NewReader(prefix), gatewayErrorReader{}))}, nil
 			})}
 			proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				r = r.WithContext(httpx.WithPrincipal(r.Context(), httpx.Principal{TenantID: "tenant", APIKey: true, AgentID: "agent", APIKeyScopes: `["gateway"]`}))
+				r = r.WithContext(httpx.WithPrincipal(r.Context(), httpx.Principal{TenantID: "tenant", APIKey: true, SpaceID: space.ID, APIKeyScopes: `["gateway"]`}))
 				h.gateway("chat", "chat")(w, r)
 			}))
 			defer proxy.Close()
@@ -351,4 +361,31 @@ func TestGatewayLargeCatalogAndSharedUpstreams(t *testing.T) {
 	if err != nil || len(candidates) != 502 {
 		t.Fatalf("shared upstream route lost: candidates=%d err=%v", len(candidates), err)
 	}
+}
+
+func TestGatewayTranslatedReaderHasNoLifetimeLimit(t *testing.T) {
+	event := "data: " + strings.Repeat("x", 4096) + "\n\n"
+	// Reuse a fixed event without constructing a >64 MiB input string.
+	r := gwNewSSEReader(io.LimitReader(&gatewayEventRepeater{event: []byte(event)}, maxProviderResponse+int64(len(event))))
+	var total int64
+	for total <= maxProviderResponse {
+		ev, err := r.Next()
+		if err != nil || len(ev.Data) != 4096 {
+			t.Fatalf("at %d bytes: event=%+v err=%v", total, ev, err)
+		}
+		total += int64(len(event))
+	}
+}
+
+type gatewayEventRepeater struct {
+	event  []byte
+	offset int
+}
+
+func (r *gatewayEventRepeater) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = r.event[r.offset]
+		r.offset = (r.offset + 1) % len(r.event)
+	}
+	return len(p), nil
 }

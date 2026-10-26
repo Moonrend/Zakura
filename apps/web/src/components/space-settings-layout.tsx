@@ -7,13 +7,13 @@ import { fetchAgents, type AgentListItem } from "@/lib/agents";
 import { AgentDetailProvider } from "@/components/agent-detail-context";
 import { PageLoading } from "@/components/ui/progress-linear";
 
-/** 这些页的数据跟着某个 Agent（会话、密钥、定时任务），不是空间上的一份配置。 */
+/** 这些旧入口目前仍展示 Agent 各自的记录。 */
 const PER_AGENT_SECTIONS = new Set([
   "automation",
-  "gateway",
-  "projects",
   "tool-calls",
 ]);
+
+const SPACE_SECTIONS = new Set(["approvals", "gateway", "acp", "computer", "computers", "disks", "projects", "web", "skills", "mcp", "platforms", "connect"]);
 
 type SpaceSettingsValue = {
   spaceId: string;
@@ -40,10 +40,12 @@ export default function SpaceSettingsLayout({
   const pathname = usePathname();
   const section = pathname.split("/").filter(Boolean).pop() ?? "";
   const perAgent = PER_AGENT_SECTIONS.has(section);
+  const spaceScoped = SPACE_SECTIONS.has(section);
   const [agents, setAgents] = useState<AgentListItem[] | null>(null);
   const [pickedId, setPickedId] = useState<string | null>(null);
 
   useEffect(() => {
+    if (spaceScoped) return;
     let cancelled = false;
     void (async () => {
       try {
@@ -57,7 +59,15 @@ export default function SpaceSettingsLayout({
     return () => {
       cancelled = true;
     };
-  }, [spaceId]);
+  }, [spaceId, spaceScoped]);
+
+  if (spaceScoped) {
+    return (
+      <SpaceSettingsContext.Provider value={{ spaceId, agents: [], hostAgentId: "" }}>
+        {children}
+      </SpaceSettingsContext.Provider>
+    );
+  }
 
   if (!agents) return <PageLoading />;
 
@@ -68,7 +78,7 @@ export default function SpaceSettingsLayout({
       <div className="space-y-3 p-2">
         <h1 className="text-lg font-medium">空间设置</h1>
         <p className="text-sm text-muted-foreground">
-          这个空间还没有 Agent。ACP、消息渠道和 MCP 会记在空间上，不会按 Agent 各存一份。请先在
+          这个页面仍展示 Agent 各自的记录。请先在
           <Link href={`/dashboard/spaces/${spaceId}`} className="mx-1 underline">
             Agents
           </Link>
@@ -99,7 +109,7 @@ export default function SpaceSettingsLayout({
           </select>
         </div>
       ) : null}
-      {host ? (
+      {host && !spaceScoped ? (
         <AgentDetailProvider key={host.id} id={host.id}>
           {children}
         </AgentDetailProvider>

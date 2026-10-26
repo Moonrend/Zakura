@@ -4,11 +4,11 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
 import {
-  fetchAgentProviders,
-  saveAgentProviders,
-  type AgentProviderOptions,
+  fetchSpaceWebProviders,
+  saveSpaceWebProviders,
+  type SpaceWebProviderOptions,
 } from "@/lib/agents";
-import { useAgentDetail } from "@/components/agent-detail-context";
+import { useParams } from "next/navigation";
 import {
   SettingsHeader,
   SettingsRow,
@@ -37,19 +37,19 @@ type WebState = {
 };
 
 export default function AgentWebPage() {
-  const { id } = useAgentDetail();
-  const [opts, setOpts] = useState<AgentProviderOptions | null>(null);
+  const { id } = useParams<{ id: string }>();
+  const [opts, setOpts] = useState<SpaceWebProviderOptions | null>(null);
   const [state, setState] = useState<WebState | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const res = await fetchAgentProviders(id);
+      const res = await fetchSpaceWebProviders(id);
       setOpts(res);
       setState({
-        searchEnabled: res.webSearch.agent.enabled,
-        searchEngine: res.webSearch.agent.defaultEngine ?? TENANT_DEFAULT,
-        fetchEnabled: res.webFetch.agent.enabled,
-        fetchBackend: res.webFetch.agent.defaultBackend ?? TENANT_DEFAULT,
+        searchEnabled: res.webSearch.space.enabled,
+        searchEngine: res.webSearch.space.defaultEngine ?? TENANT_DEFAULT,
+        fetchEnabled: res.webFetch.space.enabled,
+        fetchBackend: res.webFetch.space.defaultBackend ?? TENANT_DEFAULT,
       });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
@@ -62,7 +62,7 @@ export default function AgentWebPage() {
 
   const persist = useCallback(
     async (patch: Partial<WebState>) => {
-      const body: Parameters<typeof saveAgentProviders>[1] = {};
+      const body: Parameters<typeof saveSpaceWebProviders>[1] = {};
       if (patch.searchEnabled !== undefined || patch.searchEngine !== undefined) {
         body.webSearch = {
           ...(patch.searchEnabled !== undefined
@@ -89,8 +89,8 @@ export default function AgentWebPage() {
             : {}),
         };
       }
-      const res = await saveAgentProviders(id, body);
-      setOpts(res.options);
+      const res = await saveSpaceWebProviders(id, body);
+      setOpts(res);
     },
     [id],
   );
@@ -144,6 +144,11 @@ export default function AgentWebPage() {
         actions={<SettingsSaveIndicator status={status} error={error} />}
       />
 
+      <p className="text-xs text-muted-foreground">
+        搜索：{opts.webSearch.status === "ready" ? opts.webSearch.effective.defaultEngine : opts.webSearch.status === "disabled" ? "已禁用" : "未配置"}
+        {" · "}抓取：{opts.webFetch.status === "ready" ? opts.webFetch.effective.defaultBackend : opts.webFetch.status === "disabled" ? "已禁用" : "未配置"}
+        {" · "}配置保存在当前 Space，Agent 只能进一步收窄。
+      </p>
       <SettingsSection title="搜索">
         <SettingsRow label="启用" htmlFor="web-search-on">
           <Switch

@@ -3,6 +3,7 @@ package computers
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -11,22 +12,69 @@ import (
 // GetRuntime uses the entire pinned identity. Never look up an instance by a
 // provider ID alone: different accounts can return identical provider IDs.
 func (s Store) GetRuntime(ctx context.Context, t Target) (Runtime, error) {
-	return scanRuntime(s.DB.QueryRowContext(ctx, s.query(`SELECT id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,external_id,expires_at,idle_deadline FROM computer_runtimes WHERE tenant_id=? AND space_id=? AND computer_id=? AND id=? AND incarnation=?`), t.TenantID, t.SpaceID, t.ComputerID, t.RuntimeID, t.Incarnation))
+	return scanRuntime(s.DB.QueryRowContext(ctx, s.query(`SELECT id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,external_id,root_path,access_token_enc,manifest_json,expires_at,idle_deadline FROM computer_runtimes WHERE tenant_id=? AND space_id=? AND computer_id=? AND id=? AND incarnation=?`), t.TenantID, t.SpaceID, t.ComputerID, t.RuntimeID, t.Incarnation))
+}
+
+// ActiveRuntime reads the active-slot runtime for a computer and session scope
+// without recording intent. Unlike ReserveRuntime it never inserts anything, so
+// execution resolution cannot create pending operations or consume slots.
+func (s Store) ActiveRuntime(ctx context.Context, tenant, space, computer, session string) (Runtime, error) {
+	return scanRuntime(s.DB.QueryRowContext(ctx, s.query(`SELECT id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,external_id,root_path,access_token_enc,manifest_json,expires_at,idle_deadline FROM computer_runtimes WHERE tenant_id=? AND space_id=? AND computer_id=? AND session_scope=? AND state IN ('pending_approval','creating','ready','disconnected','stopping','unknown') ORDER BY created_at DESC,id DESC LIMIT 1`), tenant, space, computer, session))
+}
+
+// computerCapabilities maps each provider to the execution channels it has
+// actually implemented and verified. CompleteCreation grants exactly this set
+// once a provider instance is observed; any channel not listed here stays
+// ungranted, so CheckTarget honestly refuses execution on it.
+//
+// Server hosts the ACP sidecar in a sibling container on the same node and so
+// also grants Docker. Temporary withholds Docker because it never hosts the
+// sidecar. PTY is granted to the transports that attach a real interactive
+// shell: server and temporary over the runner's docker exec stream, and SSH and
+// Railway over an SSH session. E2B grants Commands and Files only: envd's
+// process start is a one-shot server-streaming RPC with no bidirectional input
+// channel, so an interactive shell cannot be wired without speculating about an
+// unimplemented protocol and is left ungranted. Desktop and browser stay
+// ungranted for every provider. Providers absent from this map (RemoteAgent has
+// no control-plane provider and never reaches completion) grant nothing.
+var computerCapabilities = map[Provider][]Capability{
+	Server:    {Commands, Files, Docker, PTY},
+	Temporary: {Commands, Files, PTY},
+	E2B:       {Commands, Files},
+	Railway:   {Commands, Files, PTY},
+	SSH:       {Commands, Files, PTY},
 }
 
 // CompleteCreation records an observed provider instance, never provisions one.
 // A reconciler may complete an ambiguous create with the SAME operation ID.
 // Exactly one completion wins. Replays cannot replace the instance or renew its
 // lifetime. Temporary lifetime starts at approval, not at delayed reconciliation.
-func (s Store) CompleteCreation(ctx context.Context, t Target, operation, externalID string, now time.Time) error {
-	if strings.TrimSpace(externalID) == "" || operation == "" {
+// rootPath persists the computer's node workspace directory; only the server and
+// temporary providers return one. Capabilities are granted per provider from
+// computerCapabilities, so a channel a provider has not implemented stays
+// ungranted and CheckTarget honestly refuses it. AccessTokenEnc, when set, is
+// already a sealed envelope and is persisted verbatim.
+func (s Store) CompleteCreation(ctx context.Context, t Target, operation string, result CreationResult, now time.Time) error {
+	if strings.TrimSpace(result.ExternalID) == "" || operation == "" {
 		return errors.New("provider instance and creation operation are required")
+	}
+	if strings.TrimSpace(result.RootPath) == "" {
+		result.RootPath = ""
+	}
+	if result.AccessTokenEnc != "" && !strings.HasPrefix(result.AccessTokenEnc, credentialVersion) {
+		return errors.New("access token must be a sealed envelope")
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if err = s.lockCreationOwners(ctx, tx, t.TenantID, t.SpaceID, t.ComputerID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrTransitionConflict
+		}
+		return err
+	}
 	var provider Provider
 	var idleSeconds, maxSeconds int
 	var approved string
@@ -54,12 +102,25 @@ func (s Store) CompleteCreation(ctx context.Context, t Target, operation, extern
 		expires = deadline.UTC().Format(time.RFC3339Nano)
 		idle = idleDeadline.UTC().Format(time.RFC3339Nano)
 	}
-	result, err := tx.ExecContext(ctx, s.query(`UPDATE computer_runtimes SET state='ready',external_id=?,expires_at=?,idle_deadline=?,updated_at=? WHERE tenant_id=? AND space_id=? AND computer_id=? AND id=? AND incarnation=? AND create_operation_id=? AND state IN ('creating','unknown') AND external_id IS NULL`), externalID, expires, idle, now.UTC().Format(time.RFC3339Nano), t.TenantID, t.SpaceID, t.ComputerID, t.RuntimeID, t.Incarnation, operation)
-	if err = requireRow(result, err); errors.Is(err, sql.ErrNoRows) {
+	res, err := tx.ExecContext(ctx, s.query(`UPDATE computer_runtimes SET state='ready',external_id=?,root_path=?,access_token_enc=?,expires_at=?,idle_deadline=?,updated_at=? WHERE tenant_id=? AND space_id=? AND computer_id=? AND id=? AND incarnation=? AND create_operation_id=? AND state IN ('creating','unknown') AND external_id IS NULL`), result.ExternalID, nullable(result.RootPath), nullable(result.AccessTokenEnc), expires, idle, now.UTC().Format(time.RFC3339Nano), t.TenantID, t.SpaceID, t.ComputerID, t.RuntimeID, t.Incarnation, operation)
+	if err = requireRow(res, err); errors.Is(err, sql.ErrNoRows) {
 		return ErrTransitionConflict
 	}
 	if err != nil {
 		return err
 	}
+	if granted, ok := computerCapabilities[provider]; ok {
+		if _, err = tx.ExecContext(ctx, s.query(`UPDATE computers SET capabilities_json=? WHERE tenant_id=? AND space_id=? AND id=?`), mustCapabilities(granted), t.TenantID, t.SpaceID, t.ComputerID); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
+}
+
+func mustCapabilities(caps []Capability) string {
+	raw, err := json.Marshal(caps)
+	if err != nil {
+		return "[]"
+	}
+	return string(raw)
 }

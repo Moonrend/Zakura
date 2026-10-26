@@ -2,6 +2,7 @@
 package runtime
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -11,13 +12,34 @@ import (
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
+
+func validModelCapability(capability string) bool {
+	switch capability {
+	case "chat", "embedding", "rerank", "image", "evaluation":
+		return true
+	}
+	return false
+}
 
 func (h *handler) patchUpstream(w http.ResponseWriter, r *http.Request) {
 	m, e := decodeMap(r)
 	if e != nil {
 		httpx.Error(w, 400, "invalid JSON")
 		return
+	}
+	currentUpstream, e := h.store.GetUpstream(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
+	if e != nil {
+		statusErr(w, e)
+		return
+	}
+	if value, exists := m["protocol"]; exists {
+		protocol, ok := value.(string)
+		if !ok || ((protocol == "typesafe") != (currentUpstream.Protocol == "typesafe")) {
+			httpx.Error(w, 400, "Jev provider protocol cannot be changed")
+			return
+		}
 	}
 	sets := []string{}
 	args := []any{}
@@ -33,7 +55,32 @@ func (h *handler) patchUpstream(w http.ResponseWriter, r *http.Request) {
 			httpx.Error(w, 400, "config must be an object")
 			return
 		}
-		if e := protectModelConfig(h.deps.Secret, principal(r).TenantID, chi.URLParam(r, "id"), cfg); e != nil {
+		cur, err := h.store.GetUpstream(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
+		if err != nil {
+			statusErr(w, err)
+			return
+		}
+		curCfg := map[string]any{}
+		if json.Unmarshal(cur.Config, &curCfg) != nil || curCfg == nil {
+			httpx.Error(w, 400, "invalid stored upstream config")
+			return
+		}
+		oldEnvelope, _ := curCfg["credentialEnc"].(string)
+		// Normalize legacy plaintext before overlaying a blank/redacted client
+		// value, so a no-op save cannot accidentally erase its credential.
+		if err := protectModelConfig(h.deps.Secret, principal(r).TenantID, cur.ID, curCfg, oldEnvelope); err != nil {
+			statusErr(w, err)
+			return
+		}
+		oldEnvelope, _ = curCfg["credentialEnc"].(string)
+		delete(curCfg, "credentialEnc")
+		for key, value := range cfg {
+			if key != "credentialEnc" {
+				curCfg[key] = value
+			}
+		}
+		cfg = curCfg
+		if e := protectModelConfig(h.deps.Secret, principal(r).TenantID, chi.URLParam(r, "id"), cfg, oldEnvelope); e != nil {
 			statusErr(w, e)
 			return
 		}
@@ -47,13 +94,23 @@ func (h *handler) patchUpstream(w http.ResponseWriter, r *http.Request) {
 	}
 	sets = append(sets, "updated_at=?")
 	args = append(args, runtimeTimeString(h.store.now()), principal(r).TenantID, chi.URLParam(r, "id"))
-	res := h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE model_upstreams SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND id=?`, args...)
+	query := `UPDATE model_upstreams SET ` + strings.Join(sets, ",") + ` WHERE tenant_id=? AND id=?`
+	_, changesConfig := m["config"]
+	if changesConfig {
+		query += ` AND config_json=?`
+		args = append(args, string(currentUpstream.Config))
+	}
+	res := h.deps.Gorm.WithContext(r.Context()).Exec(query, args...)
 	if res.Error != nil {
 		statusErr(w, res.Error)
 		return
 	}
 	if res.RowsAffected == 0 {
-		statusErr(w, ErrNotFound)
+		if changesConfig {
+			httpx.Error(w, http.StatusConflict, "provider configuration changed; reload and retry")
+		} else {
+			statusErr(w, ErrNotFound)
+		}
 		return
 	}
 	u, e := h.store.GetUpstream(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
@@ -119,6 +176,27 @@ func (h *handler) patchModelRoute(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "invalid JSON")
 		return
 	}
+	current, e := h.loadModelRouteForTenant(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
+	if e != nil {
+		statusErr(w, e)
+		return
+	}
+	capability, upstreamID := current.Capability, current.UpstreamID
+	if value, exists := m["capability"]; exists {
+		capability, _ = value.(string)
+	}
+	if value, exists := m["upstreamId"]; exists {
+		upstreamID, _ = value.(string)
+	}
+	upstream, e := h.store.GetUpstream(r.Context(), principal(r).TenantID, upstreamID)
+	if e != nil {
+		statusErr(w, e)
+		return
+	}
+	if e := validateProviderCapability(upstream.Protocol, capability); e != nil {
+		httpx.Error(w, 400, e.Error())
+		return
+	}
 	sets := []string{}
 	args := []any{}
 	for k, col := range map[string]string{"name": "name", "slug": "slug", "capability": "capability", "alias": "alias", "upstreamId": "upstream_id", "model": "model", "priority": "priority", "weight": "weight", "isDefault": "is_default", "status": "status"} {
@@ -148,4 +226,153 @@ func (h *handler) patchModelRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.getModelRoute(w, r)
+}
+
+func (h *handler) loadModelRouteForTenant(ctx context.Context, tenant, id string) (ModelRoute, error) {
+	var row struct {
+		ID         string  `gorm:"column:id"`
+		Name       string  `gorm:"column:name"`
+		Slug       string  `gorm:"column:slug"`
+		Capability string  `gorm:"column:capability"`
+		Alias      *string `gorm:"column:alias"`
+		UpstreamID string  `gorm:"column:upstream_id"`
+		Model      string  `gorm:"column:model"`
+		Options    string  `gorm:"column:options_json"`
+		Priority   string  `gorm:"column:priority"`
+		Weight     string  `gorm:"column:weight"`
+		IsDefault  bool    `gorm:"column:is_default"`
+		Status     string  `gorm:"column:status"`
+		LastError  *string `gorm:"column:last_error"`
+		CreatedAt  string  `gorm:"column:created_at"`
+		UpdatedAt  string  `gorm:"column:updated_at"`
+	}
+	e := h.deps.Gorm.WithContext(ctx).Table("model_routes").Select("id,name,slug,capability,alias,upstream_id,model,options_json,priority,weight,is_default,status,last_error,created_at,updated_at").Where("tenant_id=? AND id=?", tenant, id).Take(&row).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
+		return ModelRoute{}, ErrNotFound
+	}
+	if e != nil {
+		return ModelRoute{}, e
+	}
+	x := ModelRoute{ID: row.ID, Name: row.Name, Slug: row.Slug, Capability: row.Capability, Alias: row.Alias, UpstreamID: row.UpstreamID, Model: row.Model, Options: json.RawMessage(row.Options), IsDefault: row.IsDefault, Status: row.Status, LastError: row.LastError, CreatedAt: parseTime(row.CreatedAt), UpdatedAt: parseTime(row.UpdatedAt)}
+	x.Priority, _ = strconv.Atoi(row.Priority)
+	x.Weight, _ = strconv.Atoi(row.Weight)
+	return x, nil
+}
+
+func (h *handler) setDefaultModelRoute(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Capability string `json:"capability"`
+		ModelID    string `json:"modelId"`
+		UpstreamID string `json:"upstreamId"`
+		RouteID    string `json:"routeId"`
+	}
+	if httpx.DecodeJSON(r, &b) != nil {
+		httpx.Error(w, 400, "invalid JSON")
+		return
+	}
+	tenant := principal(r).TenantID
+	capability := strings.TrimSpace(b.Capability)
+	if capability == "" {
+		capability = "chat"
+	}
+	if !validModelCapability(capability) {
+		httpx.Error(w, 400, "unsupported capability")
+		return
+	}
+	modelID := strings.TrimSpace(b.ModelID)
+	routeID := strings.TrimSpace(b.RouteID)
+	upstreamID := strings.TrimSpace(b.UpstreamID)
+	if modelID == "" {
+		httpx.Error(w, 400, "modelId required")
+		return
+	}
+	now := h.store.now()
+	targetID := ""
+	e := h.deps.Gorm.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+		if routeID != "" {
+			var count int64
+			if e := tx.Table("model_routes").Where("tenant_id=? AND id=? AND capability=?", tenant, routeID, capability).Count(&count).Error; e != nil {
+				return e
+			}
+			if count == 0 {
+				return ErrNotFound
+			}
+			targetID = routeID
+		} else {
+			var row struct {
+				ID string `gorm:"column:id"`
+			}
+			e := tx.Table("model_routes").Select("id").Where("tenant_id=? AND capability=? AND (alias=? OR model=?)", tenant, capability, modelID, modelID).Order("is_default DESC, CAST(priority AS INTEGER), id").Take(&row).Error
+			if e == nil {
+				targetID = row.ID
+			} else if !errors.Is(e, gorm.ErrRecordNotFound) {
+				return e
+			}
+		}
+		if targetID == "" {
+			if upstreamID == "" {
+				return ErrNotFound
+			}
+			var up struct {
+				Protocol string `gorm:"column:protocol"`
+			}
+			if e := tx.Table("model_upstreams").Select("protocol").Where("tenant_id=? AND id=?", tenant, upstreamID).Take(&up).Error; e != nil {
+				return e
+			}
+			if e := validateProviderCapability(up.Protocol, capability); e != nil {
+				return e
+			}
+			var modelCount int64
+			if e := tx.Table("upstream_models").Where("tenant_id=? AND upstream_id=? AND capability=? AND (native_model=? OR canonical_model=?)", tenant, upstreamID, capability, modelID, modelID).Count(&modelCount).Error; e != nil {
+				return e
+			}
+			if modelCount == 0 {
+				return ErrNotFound
+			}
+			targetID = h.store.id()
+			slug := slugify(modelID + "-" + capability)
+			if slug == "" {
+				slug = "model"
+			}
+			if e := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "tenant_id"}, {Name: "slug"}}, DoNothing: true}).Table("model_routes").Create(map[string]any{"id": targetID, "tenant_id": tenant, "name": modelID, "slug": slug, "capability": capability, "alias": modelID, "upstream_id": upstreamID, "model": modelID, "options_json": "{}", "priority": "100", "weight": "100", "is_default": false, "status": "ready", "last_error": nil, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error; e != nil {
+				return e
+			}
+			var created int64
+			if e := tx.Table("model_routes").Where("tenant_id=? AND id=?", tenant, targetID).Count(&created).Error; e != nil {
+				return e
+			}
+			if created == 0 {
+				var row struct {
+					ID string `gorm:"column:id"`
+				}
+				if e := tx.Table("model_routes").Select("id").Where("tenant_id=? AND capability=? AND (alias=? OR model=?)", tenant, capability, modelID, modelID).Take(&row).Error; e != nil {
+					return ErrNotFound
+				}
+				targetID = row.ID
+			}
+		}
+		var selected struct {
+			Protocol string `gorm:"column:protocol"`
+		}
+		if err := tx.Table("model_routes AS r").Select("u.protocol").Joins("JOIN model_upstreams AS u ON u.tenant_id=r.tenant_id AND u.id=r.upstream_id").Where("r.tenant_id=? AND r.id=?", tenant, targetID).Take(&selected).Error; err != nil {
+			return err
+		}
+		if err := validateProviderCapability(selected.Protocol, capability); err != nil {
+			return err
+		}
+		if e := tx.Table("model_routes").Where("tenant_id=? AND capability=?", tenant, capability).Update("is_default", false).Error; e != nil {
+			return e
+		}
+		return tx.Table("model_routes").Where("tenant_id=? AND id=?", tenant, targetID).Updates(map[string]any{"is_default": true, "updated_at": runtimeTimeString(now)}).Error
+	})
+	if e != nil {
+		statusErr(w, e)
+		return
+	}
+	dto, e := h.loadModelRouteForTenant(r.Context(), tenant, targetID)
+	if e != nil {
+		statusErr(w, e)
+		return
+	}
+	httpx.JSON(w, 200, dto)
 }

@@ -1,82 +1,81 @@
-# AI gateway performance refactor
+# AI gateway performance integration — 2026-10-26
 
-Baseline: `f57acf6` on `Moonrend/Zakura/main`. Environment: Linux amd64,
-Go 1.26.9, AMD EPYC 9V74, GOMAXPROCS=8. Results are medians of three runs on
-the same host, separately from the test suite. These are local microbenchmarks,
-not production latency claims.
+PR #22 is integrated with upstream `0d74e46b741eef70ff9310532e119ccb7481a74e`.
+The original PR head was `ecac8a3e9ea3481907677e6727694eb87d1ab641`.
+This is a merge into the existing fork branch, not a merge into upstream main.
 
-## Changes
+## Conflicts and semantic integration
 
-- Use a 4 KiB buffered first-event reader instead of one-byte reads. Replay
-  prefetched bytes, support LF/CRLF, and retain the 64 KiB first-event bound.
-- Flush each upstream stream chunk through `http.ResponseController`, set
-  `X-Accel-Buffering: no`, and reuse a 32 KiB copy buffer. Bound working memory
-  rather than truncating streams at 64 MiB total lifetime bytes.
-- Resolve upstreams in two database queries instead of 1+N. Deduplicate shared
-  upstreams and keep the cheap single-upstream lookup. Above 500 distinct
-  upstreams, use a tenant-scoped subquery to avoid bind-parameter limits.
-  No configuration cache is introduced: updates remain immediately visible.
-  Preserve weighted selection and ordered failover.
-- Remove the HTTP handler's full JSON decode/remarshal. Leave nested native
-  OpenAI payloads opaque and replace only the model. Copy validated raw values
-  directly, avoiding another validation/compaction pass. Protocol conversion
-  uses `UseNumber`, preserving integer precision. Reject non-object and
-  trailing/multiple JSON documents.
-- Increase reusable idle connections to 256 overall, 64 per host.
-- Close failed response bodies without waiting for a stalled error-body stream.
-  Unread errors may forfeit HTTP/1 connection reuse; successful response reuse
-  is unchanged. Retry waits respect cancellation, including transport errors,
-  with no delay after the last failure.
-- Check non-stream response size before writing headers. Return 502 on a
-  pre-commit read failure; abort partial responses on subsequent read/write
-  failures. Recovery middleware propagates `http.ErrAbortHandler` without
-  appending an error document to SSE output.
+| Conflicting file | Upstream changes | Resolution |
+|---|---|---|
+| `internal/runtime/gateway.go` | New protocol bridge, encrypted config loader, context cache/route affinity, structured provider errors, buffered commit barrier | Keep upstream behavior; reconnect native JSON fast path, 256/64 idle connection pool, cancellation-aware retries, exact first-event bound and prefetched-byte replay. Preserve first-event error detection. |
+| `internal/runtime/gateway_stream.go` (add/add) | File now owns SSE dialect decoder/encoder | Keep decoder/encoder; move original transport helpers into `gateway_transport.go`. Reset translated-stream size accounting per event rather than per connection. |
+| `internal/runtime/http.go` | Space authorization/scopes, model mapping/defaults, session capture, client headers and keepalive writer | Keep upstream request decoding and recording; add partial-SSE abort tracking underneath keepalive with atomic state. Propagate `http.ErrAbortHandler` through recovery middleware. |
 
-## Results
+The batch route lookup merged without textual conflicts. Tests retain tenant
+isolation, live status changes, shared upstream deduplication, weighted selection
+and the >500-upstream subquery path. No configuration cache is added.
 
-| Benchmark | Before | After | Interpretation |
-|---|---:|---:|---|
-| Read first 32 KiB SSE event | 445.198 µs | 28.844 µs | 15.44× faster parsing |
-| Native 60 KiB request, local HTTP round trip | 589.306 µs | 540.929 µs | 8.2% lower time |
-| Resolve 1 candidate | 49.244 µs | 49.591 µs | Essentially unchanged (+0.7%) |
-| Resolve 32 candidates | 796.446 µs | 359.790 µs | 2.21× faster |
-| Resolve 128 candidates | 2,784.406 µs | 1,247.169 µs | 2.23× faster |
+Native JSON bypass applies only when no dialect conversion or route defaults
+require decoding. Anthropic thinking sanitization, default tokens and cache
+breakpoints use the upstream converter. Integers keep `json.Number` precision.
+The HTTP handler intentionally retains its upstream decode/remarshal because
+model mapping and session recording now need decoded input.
 
-| Allocation bytes per operation | Before | After | Reduction |
-|---|---:|---:|---:|
-| Native 60 KiB request, local HTTP round trip | 300,055 | 181,935 | 39.4% |
-| Resolve 32 candidates | 293,249 | 138,708 | 52.7% |
-| Resolve 128 candidates | 1,158,098 | 522,093 | 54.9% |
+Retryable responses are closed immediately before retrying. Final failover error
+bodies are read up to 1 MiB with a 100 ms wait limit (also interrupted by context
+cancellation), preserving ordinary structured errors and Retry-After. Slow error
+bodies can lose diagnostic detail; unread bodies can forfeit HTTP/1 reuse.
+Successful SSE passthrough uses a pooled 32 KiB buffer and flushes every read.
+There is no connection-lifetime 64 MiB cutoff; translated events remain bounded
+individually and the first commit event remains bounded at 64 KiB.
 
-First-event allocated bytes are essentially unchanged (131,042 → 131,106),
-while allocation count falls from 13 to 7. Single-candidate allocation cost
-increases slightly (22,414 → 22,750 bytes, 303 → 306 allocations).
-The HTTP benchmark includes the mock provider and transport, so its allocation
-figures are not isolated gateway heap measurements. The first-event benchmark
-excludes network/provider generation time. Incremental delivery is verified
-with an upstream that waits for downstream receipt before completing.
+## Current measurements
 
-## Validation and reproduction
+Linux amd64, Go 1.26.9, AMD EPYC 9V74, `GOMAXPROCS=8`. Medians of three
+runs per version on this host. Baseline and integrated runs were executed
+sequentially, after tests; they are local microbenchmarks, not provider inference
+or end-to-end latency measurements. The same benchmark source and test fixture
+adapter were installed in a detached upstream worktree. No production code in
+the baseline was changed.
 
-Run from `apps/server`:
+| Benchmark | Main µs/op | Integrated µs/op | Speed ratio | B/op main / integrated | Allocs/op main / integrated |
+|---|---:|---:|---:|---:|---:|
+| First 32 KiB SSE event (complete commit barrier) | 68.611 | 54.374 | 1.26x | 237,931 / 237,931 | 16 / 19 |
+| Native 60 KiB payload + local HTTP round trip | 776.446 | 638.446 | 1.22x | 377,347 / 184,237 | 171 / 138 |
+| Resolve 1 candidate | 64.062 | 55.695 | 1.15x | 22,623 / 22,962 | 303 / 306 |
+| Resolve 32 candidates | 1071.596 | 378.048 | 2.83x | 299,257 / 144,708 | 5,240 / 2,586 |
+| Resolve 128 candidates | 3633.164 | 1266.342 | 2.87x | 1,181,415 / 545,980 | 20,516 / 9,511 |
+
+Raw output: [main](benchmarks/ai-gateway-20261026-main.txt),
+[integrated](benchmarks/ai-gateway-20261026-merged.txt).
+The first-event benchmark now calls the complete `commitStream` barrier,
+including error probing and replay wrapping. The original 15.44x comparison
+against `f57acf6` used a different helper-only benchmark and is historical;
+upstream already adopted buffered parsing, so it is not the current result.
+First-event bytes are unchanged and allocation count rises from 16 to 19.
+Single-candidate lookup adds three allocations; timing differences on a shared
+host are noisy. HTTP round-trip allocations include the mock provider and
+transport. SQLite results do not establish PostgreSQL production query plans.
+
+## Validation
+
+Passed with `GOMAXPROCS=8` from `apps/server`:
 
 ```sh
-go test ./...
+go test ./... -count=1 -timeout=180s
 go vet ./...
-go test -race ./internal/runtime -run 'TestGateway|TestCloudRunToolContinuation' -count=1
+go test ./internal/runtime -run 'TestGateway|TestCloudRunToolContinuation|TestContextCache' -count=1 -timeout=90s
+go test -race ./internal/runtime -run 'TestGateway|TestCloudRunToolContinuation|TestContextCache' -count=1 -timeout=180s
 go test -race ./internal/platform/httpx -count=1
 go test ./internal/runtime -run '^$' -bench BenchmarkGateway -benchmem -count=3
 ```
 
-Regression cases cover live HTTP incremental delivery, prefetch replay, LF/CRLF,
-long-line buffer boundaries, exact/oversized first events, incomplete first
-events, streams exceeding 64 MiB, pre/post-commit read failures, canceled retries,
-stalled HTTP 500 bodies, protocol normalization, integer precision, two-query
-resolution, immediate status updates, tenant isolation, shared upstreams, and
-catalogs beyond the bind-limit threshold. Existing failover/commit-barrier and
-cloud tool-continuation tests remain passing.
-
-Actual provider generation latency, network conditions, PostgreSQL query plans,
-reverse-proxy settings, and production concurrency have not been measured.
-No production deployment is part of this change. Measure gateway and provider
-latency separately when checking the deployed service.
+Coverage includes incremental live HTTP SSE, replay/framing/size boundaries,
+streams and translated readers exceeding 64 MiB lifetime, partial response
+abort, cancelable transport retries, stalled error bodies, native integer
+precision, route defaults, Anthropic cache conversion, upstream bridge/session
+and keepalive tests, batch-query counts and tenant isolation. PostgreSQL tests
+that require an external database retain their normal environment-based skips;
+no external PostgreSQL server, real provider, proxy or production concurrency
+was exercised. No upstream merge or production deployment was performed.

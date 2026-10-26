@@ -389,7 +389,7 @@ func (s *Service) socialAuthResult(ctx context.Context, u User, t Tenant, role, 
 	if err != nil {
 		return nil, err
 	}
-	next := map[bool]string{true: "/dashboard/agents", false: "/onboarding"}[t.OnboardingCompleted]
+	next := map[bool]string{true: "/chat", false: "/onboarding"}[t.OnboardingCompleted]
 	if required && len(methods) == 0 {
 		ticket, e := s.issueAuthToken(ctx, "mfa_enrollment", u.ID, map[string]any{"tenantId": t.ID, "role": role})
 		return map[string]any{"mfaEnrollmentRequired": true, "mfaEnrollmentTicket": ticket, "methods": []string{"totp"}, "code": "mfa_enrollment_required"}, e

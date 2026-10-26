@@ -4,10 +4,6 @@ package runtime
 import (
 	"bufio"
 	"context"
-	"crypto/hmac"
-	"crypto/sha1"
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,24 +11,47 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
 )
 
 type workspaceConnectionTicket struct {
-	TenantID string `json:"tenantId"`
-	UserID   string `json:"userId,omitempty"`
-	AgentID  string `json:"agentId"`
-	Kind     string `json:"kind"`
-	Adapter  string `json:"adapterId,omitempty"`
-	Expires  int64  `json:"exp"`
+	TenantID            string          `json:"tenantId"`
+	UserID              string          `json:"userId,omitempty"`
+	AgentID             string          `json:"agentId"`
+	Kind                string          `json:"kind"`
+	Adapter             string          `json:"adapterId,omitempty"`
+	Expires             int64           `json:"exp"`
+	SpaceID             string          `json:"spaceId,omitempty"`
+	ComputerID          string          `json:"computerId,omitempty"`
+	SessionID           string          `json:"sessionId,omitempty"`
+	RuntimeID           string          `json:"runtimeId,omitempty"`
+	Incarnation         string          `json:"incarnation,omitempty"`
+	NodeID              string          `json:"nodeId,omitempty"`
+	WorkspaceInstanceID string          `json:"workspaceInstanceId,omitempty"`
+	Authorization       *acpLoginTicket `json:"authorization,omitempty"`
 }
 
 type workspaceBridge struct {
-	conn    net.Conn
-	rw      *bufio.ReadWriter
-	writeMu sync.Mutex
+	conn         net.Conn
+	rw           *bufio.ReadWriter
+	writeMu      sync.Mutex
+	done         chan struct{}
+	cleanupErr   error
+	remoteClosed bool
+	journalID    string
+	streamOwner  string
+	remote       *remoteWorkspace
+	ready        func(string, string) error
+}
+
+func (b *workspaceBridge) allocated(id, closeMethod string) error {
+	if b.ready != nil {
+		return b.ready(id, closeMethod)
+	}
+	return nil
 }
 
 var liveWorkspaceBridges = struct {
@@ -43,42 +62,102 @@ var liveWorkspaceBridges = struct {
 func (b *workspaceBridge) write(opcode byte, payload []byte) error {
 	b.writeMu.Lock()
 	defer b.writeMu.Unlock()
-	return writeWSFrame(b.rw.Writer, opcode, payload)
+	if err := b.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return err
+	}
+	defer b.conn.SetWriteDeadline(time.Time{})
+	if err := writeWSFrame(b.rw.Writer, opcode, payload); err != nil {
+		_ = b.conn.Close()
+		return err
+	}
+	return nil
 }
 
-func (h *handler) verifyWorkspaceTicket(raw, agentID, kind string) (workspaceConnectionTicket, error) {
-	var ticket workspaceConnectionTicket
-	if len(raw) > 4096 {
-		return ticket, errors.New("invalid ticket")
+func (b *workspaceBridge) call(ctx context.Context, session *runnerSession, method string, params map[string]any, out any) error {
+	if b.remote != nil {
+		return b.remote.call(ctx, method, params, out)
 	}
-	body, signature, ok := strings.Cut(raw, ".")
-	if !ok || body == "" || signature == "" {
-		return ticket, errors.New("invalid ticket")
+	return session.call(ctx, method, params, out)
+}
+
+func (b *workspaceBridge) closeRemote(ctx context.Context, session *runnerSession, method, id string) {
+	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	var err error
+	if b.remote != nil {
+		err = closePinnedWorkspaceStream(cleanup, session, method, id, b.streamOwner, b.remote.workspace)
+	} else if b.streamOwner != "" {
+		err = closeWorkspaceStream(cleanup, session, method, id, b.streamOwner)
+	} else {
+		err = session.call(cleanup, method, map[string]any{"id": id}, nil)
 	}
-	given, err := base64.RawURLEncoding.DecodeString(signature)
 	if err != nil {
-		return ticket, errors.New("invalid ticket")
+		b.cleanupErr = errors.Join(b.cleanupErr, err)
+	} else {
+		b.remoteClosed = true
 	}
-	mac := hmac.New(sha256.New, h.deps.Secret)
-	_, _ = mac.Write([]byte("workspace:" + body))
-	expected := mac.Sum(nil)
-	if len(given) != len(expected) || subtle.ConstantTimeCompare(given, expected) != 1 {
-		return ticket, errors.New("invalid ticket")
+}
+
+// Closing a socket is not proof that its remote process has exited.
+func (h *handler) closeSpaceWorkspaceBridges(ctx context.Context, tenant, space string) error {
+	return h.closeOwnerWorkspaceBridges(ctx, tenant, space, "")
+}
+
+func (h *handler) closeOwnerWorkspaceBridges(ctx context.Context, tenant, space, computer string) error {
+	return h.closeMatchingWorkspaceBridges(ctx, tenant, space, computer, "")
+}
+
+func (h *handler) closeInstanceWorkspaceBridges(ctx context.Context, tenant, space, instance string) error {
+	if instance == "" {
+		return errors.New("workspace instance required")
 	}
-	payload, err := base64.RawURLEncoding.DecodeString(body)
-	if err != nil || json.Unmarshal(payload, &ticket) != nil || ticket.AgentID != agentID || ticket.Kind != kind || ticket.TenantID == "" || ticket.Expires <= h.store.now().Unix() {
-		return workspaceConnectionTicket{}, errors.New("invalid or expired ticket")
-	}
-	if ticket.Adapter != "" && kind != "terminal" {
-		return workspaceConnectionTicket{}, errors.New("invalid ticket")
-	}
-	if ticket.UserID != "" && ticket.UserID != "api-key" {
-		var active int64
-		if err := h.deps.Gorm.WithContext(context.Background()).Table("tenant_memberships AS m").Joins("JOIN users u ON u.id=m.user_id").Where("m.tenant_id=? AND m.user_id=? AND m.status='active' AND u.status='active'", ticket.TenantID, ticket.UserID).Count(&active).Error; err != nil || active == 0 {
-			return workspaceConnectionTicket{}, errors.New("membership is no longer active")
+	return h.closeMatchingWorkspaceBridges(ctx, tenant, space, "", instance)
+}
+
+// Retirement closes local access immediately without waiting for an offline
+// node. The durable instance tombstone remains responsible for remote writers.
+func (h *handler) disconnectInstanceWorkspaceBridges(tenant, space, instance string) {
+	liveWorkspaceBridges.Lock()
+	var bridges []*workspaceBridge
+	for bridge, ticket := range liveWorkspaceBridges.items {
+		if ticket.TenantID == tenant && ticket.SpaceID == space && ticket.WorkspaceInstanceID == instance {
+			bridges = append(bridges, bridge)
 		}
 	}
-	return ticket, nil
+	liveWorkspaceBridges.Unlock()
+	for _, bridge := range bridges {
+		_ = bridge.conn.Close()
+	}
+}
+
+func (h *handler) closeMatchingWorkspaceBridges(ctx context.Context, tenant, space, computer, instance string) error {
+	liveWorkspaceBridges.Lock()
+	var bridges []*workspaceBridge
+	for bridge, ticket := range liveWorkspaceBridges.items {
+		if ticket.TenantID == tenant && ticket.SpaceID == space && (computer == "" || ticket.ComputerID == computer) && (instance == "" || ticket.WorkspaceInstanceID == instance) {
+			bridges = append(bridges, bridge)
+		}
+	}
+	liveWorkspaceBridges.Unlock()
+	for _, bridge := range bridges {
+		_ = bridge.conn.Close()
+	}
+	var failures []error
+	for _, bridge := range bridges {
+		if bridge.done == nil {
+			failures = append(failures, errors.New("workspace connection cleanup cannot be confirmed"))
+			continue
+		}
+		select {
+		case <-bridge.done:
+			if bridge.journalID == "" {
+				failures = append(failures, bridge.cleanupErr)
+			}
+		case <-ctx.Done():
+			return errors.Join(append(failures, ctx.Err())...)
+		}
+	}
+	return errors.Join(failures...)
 }
 
 func (h *handler) desktopProxy(w http.ResponseWriter, r *http.Request) {
@@ -88,118 +167,55 @@ func (h *handler) terminalProxy(w http.ResponseWriter, r *http.Request) {
 	h.workspaceProxy(w, r, "terminal")
 }
 
+// Compatibility URLs use the same single-use Space ticket and allocation
+// journal. Historical HMAC-only tickets cannot bypass the canonical gate.
 func (h *handler) workspaceProxy(w http.ResponseWriter, r *http.Request, kind string) {
-	ticket, err := h.verifyWorkspaceTicket(r.URL.Query().Get("token"), chi.URLParam(r, "id"), kind)
-	if err != nil {
+	body, _, ok := strings.Cut(r.URL.Query().Get("token"), ".")
+	if !ok || len(body) > 4096 {
 		httpx.Error(w, http.StatusUnauthorized, "invalid ticket")
 		return
 	}
-	var nodeID, spaceID, workspaceKind string
-	var rec struct {
-		NodeID         string `gorm:"column:node_id"`
-		SpaceID        string `gorm:"column:space_id"`
-		WorkspaceKind  string `gorm:"column:workspace_kind"`
-		EnableComputer bool   `gorm:"column:enable_computer"`
-	}
-	err = h.deps.Gorm.WithContext(r.Context()).Table("agents AS a").Select("n.id AS node_id, s.id AS space_id, s.workspace_kind AS workspace_kind, s.enable_computer AS enable_computer").Joins("JOIN spaces s ON s.id=a.space_id").Joins("JOIN runtime_nodes n ON n.id=s.runtime_node_id").Where("a.tenant_id=? AND a.id=?", ticket.TenantID, ticket.AgentID).Take(&rec).Error
-	if err != nil || !rec.EnableComputer {
-		httpx.Error(w, http.StatusForbidden, "desktop unavailable")
+	raw, err := base64.RawURLEncoding.DecodeString(body)
+	var ticket acpLoginTicket
+	if err != nil || json.Unmarshal(raw, &ticket) != nil || ticket.Tenant == "" || ticket.Space == "" {
+		httpx.Error(w, http.StatusUnauthorized, "invalid ticket")
 		return
 	}
-	nodeID, spaceID, workspaceKind = rec.NodeID, rec.SpaceID, rec.WorkspaceKind
-	session, err := h.hub.get(nodeID)
-	if err != nil {
-		httpx.Error(w, http.StatusServiceUnavailable, err.Error())
+	a, err := h.store.GetAgent(r.Context(), ticket.Tenant, chi.URLParam(r, "id"))
+	if err != nil || a.SpaceID != ticket.Space {
+		httpx.Error(w, http.StatusUnauthorized, "invalid ticket")
 		return
 	}
-	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
-		httpx.Error(w, http.StatusUpgradeRequired, "websocket upgrade required")
-		return
-	}
-	key := r.Header.Get("Sec-WebSocket-Key")
-	hijacker, ok := w.(http.Hijacker)
-	if !ok || key == "" {
-		httpx.Error(w, http.StatusBadRequest, "invalid websocket handshake")
-		return
-	}
-	conn, rw, err := hijacker.Hijack()
-	if err != nil {
-		return
-	}
-	defer conn.Close()
-	acceptHash := sha1.Sum([]byte(key + wsGUID))
-	accept := base64.StdEncoding.EncodeToString(acceptHash[:])
-	_, _ = rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + accept + "\r\n\r\n")
-	if rw.Flush() != nil {
-		return
-	}
-	bridge := &workspaceBridge{conn: conn, rw: rw}
-	liveWorkspaceBridges.Lock()
-	liveWorkspaceBridges.items[bridge] = ticket
-	liveWorkspaceBridges.Unlock()
-	defer func() {
-		liveWorkspaceBridges.Lock()
-		delete(liveWorkspaceBridges.items, bridge)
-		liveWorkspaceBridges.Unlock()
-	}()
-	ctx, cancel := context.WithCancel(h.deps.RunContext())
-	defer cancel()
-	if kind == "desktop" {
-		h.bridgeDesktop(ctx, bridge, session, spaceID, workspaceKind)
-	} else {
-		h.bridgeTerminal(ctx, bridge, session, spaceID, workspaceKind, ticket.Adapter)
-	}
+	route := chi.NewRouteContext()
+	route.URLParams.Add("id", a.SpaceID)
+	h.spaceWorkspaceProxy(w, r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, route)), kind)
 }
 
-type runnerContainer struct {
-	DockerID string            `json:"dockerId"`
-	Labels   map[string]string `json:"labels"`
-}
-
-func workspaceDockerID(ctx context.Context, session *runnerSession, spaceID, adapterID string) (string, error) {
-	var containers []runnerContainer
-	if err := session.call(ctx, "docker.list", map[string]any{"label": "zakura.space=" + spaceID}, &containers); err != nil {
-		return "", err
-	}
-	for _, container := range containers {
-		purpose := container.Labels["zakura.purpose"]
-		if adapterID != "" && purpose == "acp-adapter" && container.Labels["zakura.adapter"] == adapterID {
-			return container.DockerID, nil
-		}
-		if adapterID == "" && (purpose == "workspace" || purpose == "") {
-			return container.DockerID, nil
-		}
-	}
-	return "", errors.New("workspace container is not running")
-}
-
-func (h *handler) bridgeDesktop(ctx context.Context, bridge *workspaceBridge, session *runnerSession, spaceID, workspaceKind string) {
-	if workspaceKind == "host" {
-		_ = bridge.write(0x8, []byte{0x03, 0xf3})
-		return
-	}
-	dockerID, err := workspaceDockerID(ctx, session, spaceID, "")
-	if err != nil {
-		_ = bridge.write(0x8, []byte{0x03, 0xf3})
-		return
-	}
+func (h *handler) bridgeDesktopContainer(ctx context.Context, bridge *workspaceBridge, session *runnerSession, dockerID string) {
 	var started struct {
 		ID string `json:"id"`
 	}
-	err = session.call(ctx, "docker.exec.start", map[string]any{"id": dockerID, "command": []string{"socat", "STDIO", "TCP:127.0.0.1:5900,connect-timeout=5"}, "workingDir": "/workspace"}, &started)
+	err := bridge.call(ctx, session, "docker.exec.start", map[string]any{"id": dockerID, "command": []string{"socat", "STDIO", "TCP:127.0.0.1:5900,connect-timeout=5"}, "workingDir": "/workspace"}, &started)
 	if err != nil || started.ID == "" {
+		bridge.cleanupErr = errors.New("desktop stream allocation could not be confirmed")
 		_ = bridge.write(0x8, []byte{0x03, 0xf3})
 		return
 	}
 	defer func() {
-		_ = session.call(context.WithoutCancel(ctx), "docker.exec.close", map[string]any{"id": started.ID}, nil)
+		bridge.closeRemote(ctx, session, "docker.exec.close", started.ID)
 	}()
+	if err := bridge.allocated(started.ID, "docker.exec.close"); err != nil {
+		bridge.cleanupErr = err
+		return
+	}
 	streamDone := make(chan struct{})
 	var once sync.Once
 	unsubscribe := session.onStream(started.ID, func(channel string, data []byte) {
 		if channel == "stdout" && len(data) > 0 {
-			_ = bridge.write(0x2, data)
-		} else if channel == "exit" {
+			if bridge.write(0x2, data) != nil {
+				_ = bridge.conn.Close()
+			}
+		} else if channel == "exit" || channel == "error" {
 			once.Do(func() { close(streamDone) })
 			_ = bridge.conn.Close()
 		}
@@ -219,7 +235,7 @@ func (h *handler) bridgeDesktop(ctx context.Context, bridge *workspaceBridge, se
 		}
 		if opcode == 0x1 || opcode == 0x2 {
 			encoded := base64.StdEncoding.EncodeToString(payload)
-			if session.call(ctx, "docker.exec.write", map[string]any{"id": started.ID, "base64": encoded}, nil) != nil {
+			if bridge.call(ctx, session, "docker.exec.write", map[string]any{"id": started.ID, "base64": encoded}, nil) != nil {
 				return
 			}
 		}
@@ -231,33 +247,58 @@ func (h *handler) bridgeDesktop(ctx context.Context, bridge *workspaceBridge, se
 	}
 }
 
-func (h *handler) bridgeTerminal(ctx context.Context, bridge *workspaceBridge, session *runnerSession, spaceID, workspaceKind, adapterID string) {
+func (h *handler) bridgeTerminalContainer(ctx context.Context, bridge *workspaceBridge, session *runnerSession, spaceID, workspaceKind, adapterID, dockerID string) {
 	method, writeMethod, closeMethod := "host.pty.start", "host.pty.write", "host.pty.close"
-	params := map[string]any{"spaceId": spaceID, "command": []string{"bash", "-l"}, "workingDir": "/workspace", "cols": 120, "rows": 30}
+	command := []string{"bash", "-l"}
+	if workspaceKind == "host" && adapterID == "" {
+		var info struct {
+			GOOS     string `json:"goos"`
+			HostInfo struct {
+				Platform string `json:"platform"`
+			} `json:"hostInfo"`
+		}
+		if err := session.call(ctx, "sys.info", map[string]any{}, &info); err != nil {
+			bridge.cleanupErr = err
+			_ = bridge.write(0x1, []byte(`{"type":"error","message":"terminal unavailable"}`))
+			return
+		}
+		if info.GOOS == "windows" || info.HostInfo.Platform == "windows" {
+			command = []string{"powershell.exe", "-NoLogo", "-NoProfile"}
+		}
+	}
+	params := map[string]any{"spaceId": spaceID, "command": command, "workingDir": "/workspace", "cols": 120, "rows": 30}
 	if workspaceKind != "host" || adapterID != "" {
-		dockerID, err := workspaceDockerID(ctx, session, spaceID, adapterID)
-		if err != nil {
+		if dockerID == "" {
+			bridge.cleanupErr = errors.New("canonical workspace container is required")
 			_ = bridge.write(0x1, []byte(`{"type":"error","message":"workspace container is not running"}`))
 			return
 		}
 		method, writeMethod, closeMethod = "docker.exec.start", "docker.exec.write", "docker.exec.close"
-		params = map[string]any{"id": dockerID, "command": []string{"bash", "-l"}, "workingDir": "/workspace"}
+		params = map[string]any{"id": dockerID, "command": []string{"bash", "-l"}, "workingDir": "/workspace", "tty": true, "cols": 120, "rows": 30}
 	}
 	var started struct {
 		ID string `json:"id"`
 	}
-	if err := session.call(ctx, method, params, &started); err != nil || started.ID == "" {
+	if err := bridge.call(ctx, session, method, params, &started); err != nil || started.ID == "" {
+		bridge.cleanupErr = errors.New("terminal stream allocation could not be confirmed")
 		_ = bridge.write(0x1, []byte(`{"type":"error","message":"terminal unavailable"}`))
 		return
 	}
 	defer func() {
-		_ = session.call(context.WithoutCancel(ctx), closeMethod, map[string]any{"id": started.ID}, nil)
+		bridge.closeRemote(ctx, session, closeMethod, started.ID)
 	}()
+	if err := bridge.allocated(started.ID, closeMethod); err != nil {
+		bridge.cleanupErr = err
+		return
+	}
 	unsubscribe := session.onStream(started.ID, func(channel string, data []byte) {
 		switch channel {
-		case "stdout":
+		case "stdout", "stderr":
 			raw, _ := json.Marshal(map[string]any{"type": "output", "data": string(data)})
 			_ = bridge.write(0x1, raw)
+		case "error":
+			_ = bridge.write(0x1, []byte(`{"type":"error","message":"terminal connection lost"}`))
+			_ = bridge.conn.Close()
 		case "exit":
 			raw, _ := json.Marshal(map[string]any{"type": "exit", "code": 0})
 			_ = bridge.write(0x1, raw)
@@ -265,7 +306,7 @@ func (h *handler) bridgeTerminal(ctx context.Context, bridge *workspaceBridge, s
 		}
 	})
 	defer unsubscribe()
-	ready, _ := json.Marshal(map[string]any{"type": "ready", "sessionId": started.ID, "command": "bash -l"})
+	ready, _ := json.Marshal(map[string]any{"type": "ready", "sessionId": started.ID, "command": strings.Join(command, " ")})
 	_ = bridge.write(0x1, ready)
 	for {
 		opcode, payload, err := readWSFrameSized(bridge.rw.Reader, 1<<20)
@@ -288,9 +329,17 @@ func (h *handler) bridgeTerminal(ctx context.Context, bridge *workspaceBridge, s
 			message.Type, message.Data = "input", string(payload)
 		}
 		if message.Type == "resize" {
-			_ = session.call(ctx, "host.pty.resize", map[string]any{"id": started.ID, "cols": message.Cols, "rows": message.Rows}, nil)
+			resizeMethod := "host.pty.resize"
+			if method == "docker.exec.start" {
+				resizeMethod = "docker.exec.resize"
+			}
+			if err := bridge.call(ctx, session, resizeMethod, map[string]any{"id": started.ID, "cols": message.Cols, "rows": message.Rows}, nil); err != nil {
+				return
+			}
 		} else if message.Type == "input" {
-			_ = session.call(ctx, writeMethod, map[string]any{"id": started.ID, "base64": base64.StdEncoding.EncodeToString([]byte(message.Data))}, nil)
+			if err := bridge.call(ctx, session, writeMethod, map[string]any{"id": started.ID, "base64": base64.StdEncoding.EncodeToString([]byte(message.Data))}, nil); err != nil {
+				return
+			}
 		}
 	}
 }

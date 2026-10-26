@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/Moonrend/Zakura/apps/server/internal/computers"
 )
 
 const (
@@ -18,6 +20,11 @@ const (
 )
 
 func (h *handler) runBuiltinToolDesktop(ctx context.Context, tenant, agent, name string, args map[string]any) (json.RawMessage, error) {
+	// Desktop control needs the display of the Space workspace container; the
+	// refusal is explicit instead of failing deeper in the transport.
+	if err := requireWorkspaceCapability(ctx, computers.Desktop, "desktop control"); err != nil {
+		return nil, err
+	}
 	switch name {
 	case "computer_screenshot":
 		return h.runComputerScreenshot(ctx, tenant, agent, args)

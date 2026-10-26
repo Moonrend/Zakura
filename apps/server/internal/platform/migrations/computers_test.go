@@ -9,6 +9,50 @@ import (
 	platformdb "github.com/Moonrend/Zakura/apps/server/internal/platform/db"
 )
 
+func TestComputerManifestMigrationAppliesTwice(t *testing.T) {
+	ctx := context.Background()
+	conn, err := platformdb.Open(ctx, "file:"+filepath.Join(t.TempDir(), "manifest.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.DB.Close()
+	for i := 0; i < 2; i++ {
+		if err := Apply(ctx, conn.DB, conn.Dialect, conn.Rebind); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var applied int
+	if err := conn.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version=8 AND name='computer_manifest'`).Scan(&applied); err != nil {
+		t.Fatal(err)
+	}
+	if applied != 1 {
+		t.Fatalf("manifest migration recorded %d times", applied)
+	}
+	rows, err := conn.DB.QueryContext(ctx, `PRAGMA table_info(computer_runtimes)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var def any
+		if err = rows.Scan(&cid, &name, &typ, &notnull, &def, &pk); err != nil {
+			t.Fatal(err)
+		}
+		if name == "manifest_json" {
+			found = true
+			if notnull != 1 {
+				t.Fatalf("manifest_json must be NOT NULL")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("manifest_json column missing after migration")
+	}
+}
+
 func TestComputersAdoptLegacyWorkspaceWithoutProvisioning(t *testing.T) {
 	ctx := context.Background()
 	conn, err := platformdb.Open(ctx, "file:"+filepath.Join(t.TempDir(), "adoption.db"))
@@ -47,25 +91,31 @@ func TestComputersAdoptLegacyWorkspaceWithoutProvisioning(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	var id, node, scope, kind, image, created string
-	err = conn.DB.QueryRow(`SELECT id,runtime_node_id,legacy_workspace_scope,legacy_workspace_kind,workspace_image,created_at FROM computers WHERE tenant_id='t' AND space_id='s'`).Scan(&id, &node, &scope, &kind, &image, &created)
+	var id, node, scope, kind, image, created, role string
+	err = conn.DB.QueryRow(`SELECT id,runtime_node_id,legacy_workspace_scope,legacy_workspace_kind,workspace_image,created_at,role FROM computers WHERE tenant_id='t' AND space_id='s'`).Scan(&id, &node, &scope, &kind, &image, &created, &role)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if id != "legacy:s" || node != "existing-node" || scope != "s" || kind != "docker" || image != "custom:image" || created != "before" {
-		t.Fatalf("legacy workspace changed: %s %s %s %s %s %s", id, node, scope, kind, image, created)
+	if id != "legacy:s" || node != "existing-node" || scope != "s" || kind != "docker" || image != "custom:image" || created != "before" || role != "server" {
+		t.Fatalf("legacy workspace changed: %s %s %s %s %s %s %s", id, node, scope, kind, image, created, role)
 	}
+	// Every Space owns exactly one server computer: the adopted legacy workspace
+	// keeps its identity, a Space that never enabled its computer gains one.
 	for _, check := range []struct {
 		query string
 		want  int
 	}{
-		{`SELECT COUNT(*) FROM computers`, 1},
+		{`SELECT COUNT(*) FROM computers`, 2},
+		{`SELECT COUNT(*) FROM computers WHERE role='server'`, 2},
+		{`SELECT COUNT(*) FROM computers WHERE id='server:disabled' AND space_id='disabled' AND provider='server' AND role='server'`, 1},
 		{`SELECT COUNT(*) FROM computer_runtimes`, 0},
 		{`SELECT COUNT(*) FROM session_computer_defaults`, 2},
 		{`SELECT COUNT(*) FROM session_computer_defaults WHERE session_id='chat-s' AND computer_id='legacy:s' AND tenant_id='t' AND space_id='s'`, 1},
 		{`SELECT COUNT(*) FROM session_computer_defaults WHERE session_id='chat-disabled' AND computer_id IS NULL AND tenant_id='t' AND space_id='disabled'`, 1},
 		{`SELECT COUNT(*) FROM space_computer_defaults WHERE computer_id='legacy:s' AND tenant_id='t' AND space_id='s'`, 1},
+		{`SELECT COUNT(*) FROM space_computer_defaults WHERE computer_id='server:disabled' AND tenant_id='t' AND space_id='disabled'`, 1},
 		{`SELECT COUNT(*) FROM schema_migrations WHERE version=5`, 1},
+		{`SELECT COUNT(*) FROM schema_migrations WHERE version=9`, 1},
 	} {
 		var n int
 		if err := conn.DB.QueryRow(check.query).Scan(&n); err != nil {

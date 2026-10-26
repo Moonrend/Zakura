@@ -57,6 +57,15 @@ func TestSpecFromInspectJSON(t *testing.T) {
 	}
 }
 
+func TestRecreatePreservesVolumeSubpath(t *testing.T) {
+	raw := []byte(`[{"Name":"/workspace","Config":{"Image":"image"},"HostConfig":{"Mounts":[{"Type":"volume","Source":"workspace-data","Target":"/workspace","VolumeOptions":{"Subpath":"disks/disk-1/workspace","NoCopy":true}}]},"Mounts":[{"Type":"volume","Name":"workspace-data","Source":"/daemon/volume","Destination":"/workspace","RW":true}]}]`)
+	spec, err := specFromInspectJSON(raw)
+	want := Volume{VolumeName: "workspace-data", VolumeSubpath: "disks/disk-1/workspace", ContainerPath: "/workspace", NoCopy: true}
+	if err != nil || len(spec.Volumes) != 1 || spec.Volumes[0] != want {
+		t.Fatalf("recreate broadened volume mount: %+v %v", spec.Volumes, err)
+	}
+}
+
 func TestIsZakura(t *testing.T) {
 	if !isZakura(map[string]string{"zakura.agent": "x"}) {
 		t.Fatal("zakura label")

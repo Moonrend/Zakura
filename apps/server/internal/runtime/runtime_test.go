@@ -28,7 +28,9 @@ import (
 	"gorm.io/gorm/schema"
 )
 
-func testDeps(t testing.TB) *appdeps.Dependencies {
+func testDeps(t *testing.T) *appdeps.Dependencies { return testDepsTB(t) }
+
+func testDepsTB(t testing.TB) *appdeps.Dependencies {
 	t.Helper()
 	db, e := sql.Open("sqlite3", "file:"+t.Name()+"?mode=memory&cache=shared")
 	if e != nil {
@@ -36,6 +38,8 @@ func testDeps(t testing.TB) *appdeps.Dependencies {
 	}
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	if _, e = db.Exec(`PRAGMA foreign_keys=ON`); e != nil {
 		t.Fatal(e)
 	}
@@ -47,17 +51,17 @@ func testDeps(t testing.TB) *appdeps.Dependencies {
 	if gerr != nil {
 		t.Fatal(gerr)
 	}
-	return &appdeps.Dependencies{DB: db, Gorm: gdb, Dialect: "sqlite", Rebind: appdeps.IdentityRebind, Clock: func() time.Time { return time.Now().UTC() }, NewID: func() string { return fmt.Sprintf("id-%06d", n.Add(1)) }, Secret: bytes.Repeat([]byte("s"), 32), PublicURL: "http://example.test"}
+	return &appdeps.Dependencies{Context: ctx, DB: db, Gorm: gdb, Dialect: "sqlite", Rebind: appdeps.IdentityRebind, Clock: func() time.Time { return time.Now().UTC() }, NewID: func() string { return fmt.Sprintf("id-%06d", n.Add(1)) }, Secret: bytes.Repeat([]byte("s"), 32), PublicURL: "http://example.test"}
 }
 func seedTenant(t testing.TB, d *appdeps.Dependencies, id string) string {
 	t.Helper()
 	now := d.Clock().Format(time.RFC3339Nano)
-	if _, e := d.DB.Exec(`INSERT INTO tenants(id,slug,name,created_at,updated_at) VALUES(?,?,?,?,?)`, id, id, id, now, now); e != nil {
+	if _, e := d.DB.Exec(d.Rebind(`INSERT INTO tenants(id,slug,name,created_at,updated_at) VALUES(?,?,?,?,?)`), id, id, id, now, now); e != nil {
 		t.Fatal(e)
 	}
 	token := "zk_" + id
 	sum := sha256.Sum256([]byte(token))
-	if _, e := d.DB.Exec(`INSERT INTO api_keys(id,tenant_id,name,key_prefix,key_hash,created_at) VALUES(?,?,?,?,?,?)`, "key-"+id, id, "test", token[:5], hex.EncodeToString(sum[:]), now); e != nil {
+	if _, e := d.DB.Exec(d.Rebind(`INSERT INTO api_keys(id,tenant_id,name,key_prefix,key_hash,created_at) VALUES(?,?,?,?,?,?)`), "key-"+id, id, "test", token[:5], hex.EncodeToString(sum[:]), now); e != nil {
 		t.Fatal(e)
 	}
 	return token
@@ -103,18 +107,36 @@ func TestHTTPDurabilityTenantIsolationAndQueue(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer test-key" {
 			t.Errorf("missing decrypted model credential: %q", r.Header.Get("Authorization"))
 		}
-		entered <- struct{}{}
-		<-release
+		var request struct {
+			Stream bool `json:"stream"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		if request.Stream {
+			select {
+			case entered <- struct{}{}:
+			case <-r.Context().Done():
+				return
+			}
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": "answer"}}}})
 	}))
 	defer provider.Close()
+	defer close(release)
 	router := chi.NewRouter()
 	RegisterRoutes(router, d)
 	server := httptest.NewServer(router)
 	defer server.Close()
 	client := server.Client()
-	code, out := doJSON(t, client, "POST", server.URL+"/api/spaces", tok1, map[string]any{"name": "Primary", "workspaceKind": "local"})
+	code, out := doJSON(t, client, "POST", server.URL+"/api/spaces", tok1, map[string]any{"name": "Primary"})
 	if code != 201 {
 		t.Fatalf("space: %d %#v", code, out)
 	}
@@ -245,7 +267,7 @@ func TestRunnerEnrollmentAndFileShare(t *testing.T) {
 	server := httptest.NewServer(router)
 	defer server.Close()
 	client := server.Client()
-	code, out := doJSON(t, client, "POST", server.URL+"/api/spaces", token, map[string]any{"name": "Files", "workspaceKind": "local"})
+	code, out := doJSON(t, client, "POST", server.URL+"/api/spaces", token, map[string]any{"name": "Files"})
 	if code != 201 {
 		t.Fatalf("space: %d %#v", code, out)
 	}
@@ -255,7 +277,7 @@ func TestRunnerEnrollmentAndFileShare(t *testing.T) {
 		t.Fatalf("agent: %d %#v", code, out)
 	}
 	agent := out["id"].(string)
-	code, out = doJSON(t, client, "POST", server.URL+"/api/runtime-nodes", token, map[string]any{"name": "runner", "kind": "computer", "storageRoot": t.TempDir()})
+	code, out = doJSON(t, client, "POST", server.URL+"/api/runtime-nodes", token, map[string]any{"name": "runner", "kind": "computer"})
 	if code != 201 {
 		t.Fatalf("node: %d %#v", code, out)
 	}

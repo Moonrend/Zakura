@@ -1,0 +1,40 @@
+name: generative-ui
+
+on:
+  pull_request:
+    paths:
+      - 'apps/web/**'
+      - 'packages/shared/**'
+      - 'apps/server/internal/runtime/generative_ui*'
+      - 'scripts/generate-ui-catalog.ts'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/generative-ui.yml'
+  push:
+    paths:
+      - 'apps/web/**'
+      - 'packages/shared/**'
+      - 'apps/server/internal/runtime/generative_ui*'
+      - 'scripts/generate-ui-catalog.ts'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/generative-ui.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  catalog-and-replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @zakura/shared build
+      - run: pnpm ui:catalog:check
+      - run: pnpm --filter @zakura/web typecheck
+      - name: UI compiler and conversation replay
+        run: pnpm --filter @zakura/shared exec tsx --tsconfig ../../apps/web/tsconfig.json --test ../../apps/web/src/lib/generative-ui.test.ts ../../apps/web/src/lib/cloud-agent.test.ts

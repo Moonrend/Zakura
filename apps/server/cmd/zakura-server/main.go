@@ -27,6 +27,12 @@ func main() {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
+	listener, err := net.Listen("tcp", cfg.ListenAddr)
+	if err != nil {
+		log.Error("server listen failed", "address", cfg.ListenAddr, "error", err)
+		os.Exit(1)
+	}
+	defer listener.Close()
 	conn, err := platformdb.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
 		log.Error("database connection failed", "error", err)
@@ -62,8 +68,8 @@ func main() {
 	}
 	serverResult := make(chan error, 1)
 	go func() {
-		log.Info("server listening", "address", cfg.ListenAddr)
-		serverResult <- srv.ListenAndServe()
+		log.Info("server listening", "address", listener.Addr().String())
+		serverResult <- srv.Serve(listener)
 	}()
 	serveFailed := false
 	select {

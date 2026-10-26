@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   BookmarkCheck,
+  Bot,
+  Info,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -14,7 +16,6 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { AskUserCard } from "@/components/chat/ask-user-card";
-import { ToolApprovalCard } from "@/components/chat/tool-approval-card";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -42,7 +43,7 @@ import type {
   TimelineMemoryItem,
 } from "@/lib/cloud-agent";
 import { collectTurnSharedFiles, collectTurnSources } from "@/lib/cloud-agent";
-import { ChatMarkdown } from "@/components/markdown/chat-markdown";
+import { GeneratedUIContent, type UIContinue } from "./generative-ui/content";
 import { ToolActivity, type ActivityStep } from "./tool-activity";
 import { AnswerSourcesSheet, AnswerSourcesTrigger } from "./answer-sources";
 import { UserAvatar } from "@/components/user-avatar";
@@ -192,6 +193,21 @@ const STATUS_LABEL: Record<string, string> = {
   streaming: "生成中…",
   tool: "使用工具…",
 };
+
+function UserMessageBody({ content, context }: { content: string; context?: { prefix?: string; suffix?: string } }) {
+  if (!context?.prefix && !context?.suffix) return <div className={USER_BUBBLE_BODY}>{content}</div>;
+  return <details className="group/details">
+    <summary aria-label="查看消息详情" className={cn(USER_BUBBLE_BODY, "cursor-pointer list-none [&::-webkit-details-marker]:hidden")}>
+      {content}<Info className="ml-2 inline size-3 text-muted-foreground" />
+    </summary>
+    <div className="space-y-3 border-t border-border/50 px-4 py-3 text-xs">
+      {([["前置提示", context.prefix], ["后置提示", context.suffix]] as const).map(([label, text]) => text ? <div key={label}>
+        <div className="mb-1 font-medium text-muted-foreground">{label}</div>
+        <div className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{text}</div>
+      </div> : null)}
+    </div>
+  </details>;
+}
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -499,6 +515,8 @@ function renderRunItems(
   opts: {
     showStatus: boolean;
     canAct: boolean;
+    onUIContinue?: UIContinue;
+    readOnly?: boolean;
     onRetry: () => void;
     onOpenFile?: (path: string) => void;
     agentId?: string | null;
@@ -510,11 +528,6 @@ function renderRunItems(
       cancelled?: boolean;
       selected?: string[];
       text?: string;
-    }) => void;
-    onToolApproval?: (input: {
-      requestId: string;
-      decision: "approved" | "denied";
-      alwaysAllow?: boolean;
     }) => void;
   },
 ) {
@@ -628,7 +641,20 @@ function renderRunItems(
           {it.attachments?.length ? (
             <AttachmentChips attachments={it.attachments} onOpenFile={opts.onOpenFile} />
           ) : null}
-          <div className={cn(USER_BUBBLE_FRAME, USER_BUBBLE_BODY)}>{it.content}</div>
+          <div className={USER_BUBBLE_FRAME}><UserMessageBody content={it.content} context={it.context} /></div>
+        </div>,
+      );
+    } else if (it.kind === "bot") {
+      blocks.push(
+        <div key={`bot-${it.id}`} className="my-2 flex max-w-[92%] items-start gap-2.5">
+          <Bot aria-hidden="true" className="mt-1 size-4 shrink-0 text-muted-foreground" />
+          <div className="min-w-0 space-y-1">
+            <div className="text-xs text-muted-foreground">{it.botName || "Bot"}<span className="ml-2">{it.platform === "zakurabot" ? "Zakura Bot" : it.platform}</span></div>
+            <div className="rounded-2xl rounded-tl-sm bg-muted/50 px-4 py-2.5">
+              <GeneratedUIContent content={it.content} final messageId={it.id} runId={it.runId} canSubmit={false} readOnly />
+            </div>
+            <CopyButton text={it.content} />
+          </div>
         </div>,
       );
     } else if (it.kind === "assistant") {
@@ -637,7 +663,7 @@ function renderRunItems(
           key={`a-${it.id}-${it.seq}`}
           className="mt-1.5 flex w-full flex-col items-start"
         >
-          <ChatMarkdown content={it.content} final={it.final} fade={false} />
+          <GeneratedUIContent content={it.content} final={it.final} messageId={it.id} runId={it.runId} agentId={opts.agentId} sessionId={opts.sessionId} snapshots={it.uiStates} canSubmit={opts.canAct} readOnly={opts.readOnly} onContinue={opts.onUIContinue} />
         </div>,
       );
     } else if (it.kind === "plan") {
@@ -669,27 +695,7 @@ function renderRunItems(
                 : ""}
             </div>
           ) : (
-            <div className="flex flex-wrap gap-1.5">
-              {it.options.map((opt) => (
-                <Button
-                  key={opt.optionId}
-                  type="button"
-                  size="sm"
-                  variant={String(opt.kind).startsWith("allow") ? "default" : "outline"}
-                  onClick={() => opts.onPermission?.(it.requestId, opt.optionId)}
-                >
-                  {opt.name}
-                </Button>
-              ))}
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                onClick={() => opts.onPermission?.(it.requestId, undefined, true)}
-              >
-                取消
-              </Button>
-            </div>
+            <p className="text-xs text-muted-foreground">旧授权请求已失效，请重新发起任务。</p>
           )}
         </div>,
       );
@@ -710,13 +716,8 @@ function renderRunItems(
         />,
       );
     } else if (it.kind === "tool_approval") {
-      blocks.push(
-        <ToolApprovalCard
-          key={`approval-${it.id}`}
-          item={it}
-          onResolve={opts.onToolApproval}
-        />,
-      );
+      // Pending approvals live above the composer; resolved ones stay in the audit log.
+      continue;
     } else if (it.kind === "error") {
       blocks.push(
         <div
@@ -835,7 +836,8 @@ export function ChatMessages({
   onPermission,
   onElicitation,
   onAskUser,
-  onToolApproval,
+  onUIContinue,
+  readOnly,
 }: {
   turns: ConversationTurn[];
   runActive: boolean;
@@ -844,6 +846,8 @@ export function ChatMessages({
   agentId?: string | null;
   sessionId?: string | null;
   canAct: boolean;
+  onUIContinue?: UIContinue;
+  readOnly?: boolean;
   /** 正在下方 Composer 编辑的消息 id */
   editingMessageId?: string | null;
   onRegenerate: (messageId: string) => void;
@@ -864,11 +868,6 @@ export function ChatMessages({
     cancelled?: boolean;
     selected?: string[];
     text?: string;
-  }) => void;
-  onToolApproval?: (input: {
-    requestId: string;
-    decision: "approved" | "denied";
-    alwaysAllow?: boolean;
   }) => void;
 }) {
   const [sourcesFor, setSourcesFor] = useState<{
@@ -975,9 +974,7 @@ export function ChatMessages({
                     </div>
                     )}
                     <div className={cn("relative", USER_BUBBLE_FRAME)}>
-                      <div className={USER_BUBBLE_BODY}>
-                        {turn.message.content}
-                      </div>
+                      <UserMessageBody content={turn.message.content} context={userItem?.kind === "user" ? userItem.context : undefined} />
                       {turn.message.userId ? (
                         <Tooltip>
                           <TooltipTrigger
@@ -1027,7 +1024,8 @@ export function ChatMessages({
                 onPermission,
                 onElicitation,
                 onAskUser,
-                onToolApproval,
+                onUIContinue,
+                readOnly,
               })}
 
               {sharedFiles.length > 0 && (

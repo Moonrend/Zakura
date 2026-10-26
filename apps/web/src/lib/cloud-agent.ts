@@ -1,7 +1,9 @@
 "use client";
 
+import type { UISnapshot } from "./generative-ui";
 import type {
   CloudAgentAttachment,
+  CloudAgentMessageContext,
   CloudAgentConfig,
   CloudAgentContextSourceItem,
   CloudAgentContextSourceKind,
@@ -22,6 +24,7 @@ export { lastCancelledRunId };
 
 export type {
   CloudAgentAttachment,
+  CloudAgentMessageContext,
   CloudAgentContextSourceItem,
   CloudAgentContextSourceKind,
   CloudAgentFollowUpMode,
@@ -102,6 +105,7 @@ export type RunLogEntry = {
 export type TimelineItem =
   | {
       kind: "user";
+      context?: CloudAgentMessageContext;
       id: string;
       content: string;
       seq: number;
@@ -110,9 +114,19 @@ export type TimelineItem =
       userName?: string;
     }
   | {
+      kind: "bot";
+      id: string;
+      content: string;
+      platform: string;
+      botName?: string;
+      seq: number;
+      runId?: string | null;
+    }
+  | {
       kind: "assistant";
       id: string;
       content: string;
+      uiStates?: Record<number, UISnapshot>;
       final: boolean;
       seq: number;
       runId?: string | null;
@@ -506,14 +520,39 @@ export function collectTurnSharedFiles(
   return out;
 }
 
+function parseMessageContext(raw: unknown): CloudAgentMessageContext | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
+  const value = raw as Record<string, unknown>;
+  const prefix = typeof value.prefix === "string" ? value.prefix : undefined;
+  const suffix = typeof value.suffix === "string" ? value.suffix : undefined;
+  return prefix || suffix ? { prefix, suffix } : undefined;
+}
+
 /** 将事件日志还原为 UI 时间线（多设备重连后可确定性重建） */
 export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
+  const uiStates = new Map<string, Record<number, UISnapshot>>();
+  for (const event of events) {
+    if (event.type !== "ui_state_updated") continue;
+    const snapshot = event.payload as UISnapshot;
+    if (typeof snapshot.messageId !== "string" || !Number.isInteger(snapshot.blockIndex) || !snapshot.state) continue;
+    const states = uiStates.get(snapshot.messageId) ?? {};
+    if (!states[snapshot.blockIndex] || states[snapshot.blockIndex]!.revision < snapshot.revision) states[snapshot.blockIndex] = snapshot;
+    uiStates.set(snapshot.messageId, states);
+  }
   const items: TimelineItem[] = [];
   const toolMap = new Map<string, TimelineToolCall>();
   /** toolCallId → 所属 runId，用于 Run 结束时只收尾自己的工具调用 */
   const toolRunIds = new Map<string, string | null>();
   /** 被 assistant_rollback 丢弃的流式消息（模型中断重试），其 delta 不渲染 */
   const rolledBack = new Set<string>();
+  const deliveredSources = new Set<string>();
+  const deliveredTools = new Set<string>();
+  for (const event of events) {
+    const p = event.payload as Record<string, unknown>;
+    if (event.type !== "bot_message") continue;
+    if (typeof p.sourceMessageId === "string") deliveredSources.add(p.sourceMessageId);
+    if (typeof p.toolCallId === "string") deliveredTools.add(p.toolCallId);
+  }
   for (const ev of events) {
     if (ev.type === "assistant_rollback") {
       const p = ev.payload as Record<string, unknown>;
@@ -541,6 +580,7 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
       kind: "assistant",
       id: currentAssistant.id,
       content: currentAssistant.content,
+      uiStates: uiStates.get(currentAssistant.id),
       final: currentAssistant.final,
       seq: currentAssistant.seq,
       runId: currentAssistant.runId,
@@ -570,11 +610,21 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
         kind: "user",
         id: typeof p.messageId === "string" ? p.messageId : ev.id,
         content: typeof p.content === "string" ? p.content : "",
+        context: parseMessageContext(p.context),
         seq: ev.seq,
         ...(attachments.length ? { attachments } : {}),
         ...(typeof p.userId === "string" ? { userId: p.userId } : {}),
         ...(typeof p.userName === "string" ? { userName: p.userName } : {}),
       });
+      continue;
+    }
+    if (ev.type === "bot_message") {
+      flushReasoning();
+      flushAssistant();
+      items.push({ kind: "bot", id: typeof p.messageId === "string" ? p.messageId : ev.id,
+        content: typeof p.content === "string" ? p.content : "",
+        platform: typeof p.platform === "string" ? p.platform : "bot",
+        botName: typeof p.botName === "string" ? p.botName : undefined, seq: ev.seq, runId: ev.runId });
       continue;
     }
     if (ev.type === "reasoning_delta") {
@@ -596,7 +646,7 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
     if (ev.type === "assistant_delta") {
       flushReasoning();
       const mid = typeof p.messageId === "string" ? p.messageId : ev.id;
-      if (rolledBack.has(mid)) continue;
+      if (rolledBack.has(mid) || deliveredSources.has(mid)) continue;
       if (!currentAssistant || currentAssistant.id !== mid) {
         flushAssistant();
         currentAssistant = {
@@ -613,7 +663,7 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
     if (ev.type === "assistant_message") {
       flushReasoning();
       const mid = typeof p.messageId === "string" ? p.messageId : ev.id;
-      if (rolledBack.has(mid)) continue;
+      if (rolledBack.has(mid) || deliveredSources.has(mid)) continue;
       if (!currentAssistant || currentAssistant.id !== mid) {
         flushAssistant();
         currentAssistant = {
@@ -664,6 +714,7 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
         toolCallId: id,
         name,
         title: typeof p.title === "string" ? p.title : undefined,
+        arguments: typeof p.arguments === "string" ? p.arguments : undefined,
         status: "running",
       };
       toolMap.set(id, call);
@@ -847,6 +898,8 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
       continue;
     }
     if (ev.type === "permission_request") {
+      const requestId = typeof p.requestId === "string" ? p.requestId : ev.id;
+      if (items.some(item => item.kind === "tool_approval" && item.requestId === requestId)) continue;
       flushReasoning();
       flushAssistant();
       items.push({
@@ -994,10 +1047,16 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
             degraded?: boolean;
           }
         | undefined;
+      const requestId = typeof p.requestId === "string" ? p.requestId : ev.id;
+      const duplicate = items.findIndex(item => (item.kind === "permission" || item.kind === "tool_approval") && item.requestId === requestId);
+      const existing = items[duplicate];
+      // A replayed request must never reopen an already resolved approval.
+      if (existing?.kind === "tool_approval" && existing.resolved) continue;
+      if (duplicate >= 0) items.splice(duplicate, 1);
       items.push({
         kind: "tool_approval",
         id: ev.id,
-        requestId: typeof p.requestId === "string" ? p.requestId : ev.id,
+        requestId,
         toolCallId: typeof p.toolCallId === "string" ? p.toolCallId : undefined,
         toolName: typeof p.toolName === "string" ? p.toolName : "",
         qualifiedName: typeof p.qualifiedName === "string" ? p.qualifiedName : undefined,
@@ -1095,7 +1154,7 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
   }
   flushAssistant();
   flushReasoning();
-  return items;
+  return items.filter((item) => item.kind !== "tool" || !deliveredTools.has(item.id));
 }
 
 // —— 消息树（分支 / 重新生成变体） ——
@@ -1202,6 +1261,20 @@ export function buildConversationTurns(
       lastRunId = rid;
       continue;
     }
+    if ((ev.type === "context_compacting" || ev.type === "context_compacted") && !ev.runId && typeof p.anchorRunId === "string") {
+      const list = eventsByRun.get(p.anchorRunId) ?? [];
+      list.push(ev);
+      eventsByRun.set(p.anchorRunId, list);
+      continue;
+    }
+    if (ev.type === "ui_state_updated") {
+      const messageId = typeof p.messageId === "string" ? p.messageId : "";
+      const rid = ev.runId ?? `orphan:${messageId}`;
+      const list = eventsByRun.get(rid) ?? [];
+      list.push(ev);
+      eventsByRun.set(rid, list);
+      continue;
+    }
     // Gateway 等无 Run 的事件流：assistant_message.runId 为空，合成一条 run 挂到上一用户消息
     if (ev.type === "assistant_message" && !ev.runId) {
       const mid = typeof p.messageId === "string" ? p.messageId : ev.id;
@@ -1222,6 +1295,7 @@ export function buildConversationTurns(
       (ev.type === "assistant_delta" ||
         ev.type === "reasoning_delta" ||
         ev.type === "assistant_message" ||
+        ev.type === "bot_message" ||
         ev.type === "assistant_rollback" ||
         ev.type === "tool_call_start" ||
         ev.type === "tool_call_args" ||
@@ -1348,6 +1422,73 @@ export function eventsToRunLogs(events: CloudAgentEvent[]): RunLogEntry[] {
   return logs;
 }
 
+export function gatewaySpaceId(owner: string): string | null {
+  return owner.startsWith("gateway:") ? owner.slice("gateway:".length) : null;
+}
+
+function sessionBase(owner: string): string {
+  const space = gatewaySpaceId(owner);
+  return space ? `/api/spaces/${encodeURIComponent(space)}/gateway/sessions` : `/api/agents/${owner}/cloud/sessions`;
+}
+
+/** Gateway tool loops are a single chronological transcript, without branches. */
+export function buildGatewayConversationTurns(events: CloudAgentEvent[]): ConversationTurn[] {
+  const turns: ConversationTurn[] = [];
+  const continuations = new Set(events.filter(ev => ev.type === "user_message" && (ev.payload as Record<string, unknown>).continue === true).map(ev => ev.seq));
+  let pending: TimelineItem[] = [];
+  const flushPending = () => {
+    if (!pending.length) return;
+    const first = pending[0]!;
+    turns.push({
+      message: { id: `gateway-continuation-${first.id}`, content: "", seq: first.seq, parentKey: "", continue: true },
+      siblings: [], siblingIndex: 0, variants: [], variantIndex: 0,
+      activeRunId: null, items: pending,
+    });
+    pending = [];
+  };
+  // Tools can flush the streaming answer before its final snapshot arrives.
+  // Place that snapshot at the first delta and suppress its later duplicate.
+  const answers = new Map<string, CloudAgentEvent>();
+  for (const ev of events) {
+    const p = ev.payload as Record<string, unknown>;
+    if (ev.type === "assistant_message" && typeof p.messageId === "string") answers.set(p.messageId, ev);
+  }
+  const emitted = new Set<string>();
+  const projected = events.flatMap(ev => {
+    const p = ev.payload as Record<string, unknown>;
+    if ((ev.type !== "assistant_delta" && ev.type !== "assistant_message") || typeof p.messageId !== "string") return [ev];
+    const final = answers.get(p.messageId);
+    if (!final) return [ev];
+    if (emitted.has(p.messageId)) return [];
+    emitted.add(p.messageId);
+    return [{ ...final, seq: ev.seq }];
+  });
+  for (const item of eventsToTimeline(projected)) {
+    if (item.kind === "user") {
+      // A paginated tail can start halfway through a response. Do not attach
+      // that response to the next user turn or discard a page with no user.
+      if (pending.some(entry => entry.kind !== "sources")) flushPending();
+      const turn: ConversationTurn = {
+        message: { id: item.id, content: item.content, seq: item.seq, parentKey: "", ...(continuations.has(item.seq) ? { continue: true } : {}) },
+        siblings: [item.id], siblingIndex: 0, variants: [], variantIndex: 0,
+        activeRunId: null, items: [item, ...pending],
+      };
+      pending = [];
+      turns.push(turn);
+    } else if (turns.length) {
+      turns[turns.length - 1]!.items.push(item);
+    } else pending.push(item);
+  }
+  flushPending();
+  let latestRun: string | null = null;
+  for (const ev of events) {
+    if (ev.type === "run_start") latestRun = ev.runId;
+    else if (ev.type === "run_end" && ev.runId === latestRun) latestRun = null;
+  }
+  if (latestRun && turns.length) turns[turns.length - 1]!.activeRunId = latestRun;
+  return turns;
+}
+
 export async function listCloudSessions(
   agentId: string,
   opts?: { kinds?: SessionKindsFilter; limit?: number },
@@ -1359,7 +1500,7 @@ export async function listCloudSessions(
   if (opts?.limit) params.set("limit", String(opts.limit));
   const qs = params.toString();
   return api<{ sessions: CloudSession[] }>(
-    `/api/agents/${agentId}/cloud/sessions${qs ? `?${qs}` : ""}`,
+    `${sessionBase(agentId)}${qs ? `?${qs}` : ""}`,
     { cacheTtlMs: false },
   );
 }
@@ -1411,7 +1552,7 @@ export async function getCloudSession(
     hasMoreAfter?: boolean;
     /** 服务端排队中的后续消息（跨设备同步） */
     queue?: CloudAgentQueuedMessage[];
-  }>(`/api/agents/${agentId}/cloud/sessions/${sessionId}?${qs}`, {
+  }>(`${sessionBase(agentId)}/${sessionId}?${qs}`, {
     cacheTtlMs: false,
   });
 }
@@ -1465,13 +1606,17 @@ export async function forkCloudSession(agentId: string, sessionId: string, title
 }
 
 export async function deleteCloudSession(agentId: string, sessionId: string) {
-  return api(`/api/agents/${agentId}/cloud/sessions/${sessionId}`, { method: "DELETE" });
+  return api(`${sessionBase(agentId)}/${sessionId}`, { method: "DELETE" });
 }
 
 export async function fetchComposerCapabilities(agentId: string) {
   return api<ComposerCapabilities>(`/api/agents/${agentId}/cloud/composer`, {
     cacheTtlMs: false,
   });
+}
+
+export async function saveGeneratedUIState(agentId: string, sessionId: string, input: Omit<UISnapshot, "revision"> & { expectedRevision: number }) {
+  return api<UISnapshot>(`/api/agents/${encodeURIComponent(agentId)}/cloud/sessions/${encodeURIComponent(sessionId)}/ui-state`, { method: "PUT", json: input });
 }
 
 export async function sendCloudMessage(
@@ -1482,8 +1627,10 @@ export async function sendCloudMessage(
   attachments?: CloudAgentAttachment[],
   options?: CloudAgentRunOptions,
   followUp?: CloudAgentFollowUpMode,
+  messageId?: string,
+  context?: CloudAgentMessageContext,
 ) {
-  const json: Record<string, unknown> = { content };
+  const json: Record<string, unknown> = { content, ...(context ? { context } : {}), ...(messageId ? { messageId } : {}) };
   if (parentRunId !== undefined) json.parentRunId = parentRunId;
   if (attachments?.length) json.attachments = attachments;
   if (options && Object.keys(options).length > 0) json.options = options;
@@ -1584,6 +1731,9 @@ export async function interruptWithQueuedMessage(
 }
 
 export type CloudSessionCompactionResult = {
+  compacted: boolean;
+  beforeTokens: number;
+  afterTokens: number;
   summary: string;
   beforeChars: number;
   afterChars: number;
@@ -1592,10 +1742,10 @@ export type CloudSessionCompactionResult = {
   systemSessionId?: string;
 };
 
-export async function compactCloudSession(agentId: string, sessionId: string) {
+export async function compactCloudSession(agentId: string, sessionId: string, runId?: string) {
   return api<CloudSessionCompactionResult>(
     `/api/agents/${agentId}/cloud/sessions/${sessionId}/compact`,
-    { method: "POST" },
+    { method: "POST", json: runId ? { runId } : {} },
   );
 }
 
@@ -1642,7 +1792,7 @@ export async function updateCloudSession(
     origin?: CloudAgentSessionOrigin;
   },
 ) {
-  return api<CloudSession>(`/api/agents/${agentId}/cloud/sessions/${sessionId}`, {
+  return api<CloudSession>(`${sessionBase(agentId)}/${sessionId}`, {
     method: "PATCH",
     json: patch,
   });
@@ -1701,19 +1851,15 @@ export async function listModelsByCapability(
 ): Promise<ChatModelOption[]> {
   try {
     const res = await api<{
-      routes: Array<{
-        alias?: string;
-        id?: string;
-        name?: string;
-        isDefault?: boolean;
-        meta?: {
-          reasoning?: boolean;
-          reasoningLevels?: string[];
-          defaultReasonLevel?: string;
-          contextLimit?: number;
-        };
-        upstream?: { id?: string; name?: string } | null;
-      }>;
+      routes?: Array<{
+        alias?: unknown;
+        model?: unknown;
+        id?: unknown;
+        name?: unknown;
+        isDefault?: unknown;
+        meta?: unknown;
+        upstream?: { name?: unknown } | null;
+      } | null>;
     }>(`/api/model-routes?capability=${encodeURIComponent(capability)}`);
     const byAlias = new Map<
       string,
@@ -1727,47 +1873,56 @@ export async function listModelsByCapability(
         reasoningFlags: boolean[];
         levels: string[][];
         defaultReasonLevel?: string;
-        contextLimits: number[];
+        contextLimit?: number;
       }
     >();
-    for (const r of res.routes ?? []) {
-      const alias = r.alias?.trim();
+    for (const r of Array.isArray(res.routes) ? res.routes : []) {
+      if (!r || typeof r !== "object") continue;
+      const alias = (typeof r.alias === "string" ? r.alias.trim() : "") ||
+        (typeof r.model === "string" ? r.model.trim() : "");
       if (!alias) continue;
+      const name = typeof r.name === "string" ? r.name : "";
+      const upstreamName = typeof r.upstream?.name === "string" ? r.upstream.name : "";
+      const routeId = typeof r.id === "string" ? r.id : "";
+      const meta = r.meta && typeof r.meta === "object" && !Array.isArray(r.meta)
+        ? r.meta as Record<string, unknown>
+        : undefined;
       const entry =
         byAlias.get(alias) ??
         {
           alias,
-          name: r.name || alias,
+          name: name || alias,
           upstreams: [],
           providers: [],
           isDefault: false,
           reasoningFlags: [],
           levels: [],
-          contextLimits: [],
         };
-      if (r.name && entry.name === alias) entry.name = r.name;
-      if (r.upstream?.name && !entry.upstreams.includes(r.upstream.name)) {
-        entry.upstreams.push(r.upstream.name);
+      if (name && entry.name === alias) entry.name = name;
+      if (upstreamName && !entry.upstreams.includes(upstreamName)) {
+        entry.upstreams.push(upstreamName);
       }
-      const providerName = r.upstream?.name || r.name || alias;
-      if (r.id && !entry.providers.some((p) => p.id === r.id)) {
-        entry.providers.push({ id: r.id, name: providerName });
+      const providerName = upstreamName || name || alias;
+      if (routeId && !entry.providers.some((p) => p.id === routeId)) {
+        entry.providers.push({ id: routeId, name: providerName });
       }
-      if (r.isDefault) {
+      if (r.isDefault === true) {
         entry.isDefault = true;
-        if (r.id) entry.defaultRouteId = r.id;
+        if (routeId) entry.defaultRouteId = routeId;
       }
-      if (typeof r.meta?.reasoning === "boolean") {
-        entry.reasoningFlags.push(r.meta.reasoning);
+      if (typeof meta?.reasoning === "boolean") {
+        entry.reasoningFlags.push(meta.reasoning);
       }
-      if (Array.isArray(r.meta?.reasoningLevels)) {
-        entry.levels.push(r.meta.reasoningLevels.map(String).filter(Boolean));
+      if (Array.isArray(meta?.reasoningLevels)) {
+        entry.levels.push(meta.reasoningLevels
+          .filter((level): level is string => typeof level === "string")
+          .map((level) => level.trim()).filter(Boolean));
       }
-      if (!entry.defaultReasonLevel && r.meta?.defaultReasonLevel) {
-        entry.defaultReasonLevel = r.meta.defaultReasonLevel;
+      if (!entry.defaultReasonLevel && typeof meta?.defaultReasonLevel === "string") {
+        entry.defaultReasonLevel = meta.defaultReasonLevel.trim() || undefined;
       }
-      if (typeof r.meta?.contextLimit === "number" && r.meta.contextLimit > 0) {
-        entry.contextLimits.push(r.meta.contextLimit);
+      if (typeof meta?.contextLimit === "number" && Number.isFinite(meta.contextLimit) && meta.contextLimit > 0) {
+        entry.contextLimit = Math.min(entry.contextLimit ?? meta.contextLimit, meta.contextLimit);
       }
       byAlias.set(alias, entry);
     }
@@ -1796,7 +1951,7 @@ export async function listModelsByCapability(
               : undefined,
         reasoningLevels,
         defaultReasonLevel: entry.defaultReasonLevel,
-        contextLimit: entry.contextLimits.length ? Math.min(...entry.contextLimits) : undefined,
+        contextLimit: entry.contextLimit,
       };
     });
   } catch {
@@ -1810,6 +1965,7 @@ export async function listChatModels(): Promise<ChatModelOption[]> {
 }
 
 export async function getCloudConfig(agentId: string) {
+  if (gatewaySpaceId(agentId)) return { cloud: {} as CloudAgentConfig, hasChatRoute: false };
   return api<{ cloud: CloudAgentConfig; hasChatRoute: boolean }>(
     `/api/agents/${agentId}/cloud/config`,
   );

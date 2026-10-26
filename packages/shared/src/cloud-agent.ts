@@ -50,7 +50,9 @@ export const CLOUD_AGENT_EVENT_TYPES = [
   "reasoning_delta",
   "assistant_delta",
   "assistant_message",
+  "bot_message",
   "assistant_rollback",
+  "ui_state_updated",
   "tool_call_start",
   "tool_call_args",
   "tool_call_progress",
@@ -69,6 +71,8 @@ export const CLOUD_AGENT_EVENT_TYPES = [
   "session_update",
   /** 服务端后续消息队列快照（每次变更全量广播，多设备同步） */
   "queue_update",
+  "queue.authorization_required",
+  "acp.runtime.updated",
   /** ACP：第三方 Agent 请求工具授权 */
   "permission_request",
   "permission_resolved",
@@ -132,6 +136,9 @@ export type CloudAgentSessionOrigin = {
   source?: "agent_loop" | "mcp" | "api" | "system" | "remote";
   /** API 接入通道，例如 OpenAI 兼容中间件 */
   channel?: string;
+  /** Gateway client family and owning Space. */
+  harness?: string;
+  spaceId?: string;
   /** 外部客户端会话关联键（Claude Code / Codex 等自带的 session id） */
   clientSessionKey?: string;
   /** 创建该 Gateway 会话的 API Key id（无客户端 session 时用于粘会话） */
@@ -177,6 +184,8 @@ export function parseCloudAgentSessionOrigin(raw: unknown): CloudAgentSessionOri
   for (const key of [
     "channel",
     "clientSessionKey",
+    "harness",
+    "spaceId",
     "apiKeyId",
     "parentSessionId",
     "parentRunId",
@@ -212,7 +221,24 @@ export type CloudAgentAttachment = {
   kind: "image" | "file";
 };
 
+/** Visible text stays in content; wrappers are sent upstream in prefix/content/suffix order. */
+export type CloudAgentMessageContext = {
+  prefix?: string;
+  suffix?: string;
+};
+
+export type CloudAgentBotMessagePayload = {
+  messageId: string;
+  content: string;
+  platform: string;
+  botName?: string;
+  replyTo?: string;
+  toolCallId?: string;
+  sourceMessageId?: string;
+};
+
 export type CloudAgentUserMessagePayload = {
+  context?: CloudAgentMessageContext;
   messageId: string;
   content: string;
   /**
@@ -246,6 +272,7 @@ export type CloudAgentFollowUpMode = "steer" | "queue";
  * 逐条开新回合（一次一条），mode=steer 的条目在活跃 Run 的下一工具批后注入。
  */
 export type CloudAgentQueuedMessage = {
+  context?: CloudAgentMessageContext;
   messageId: string;
   content: string;
   attachments?: CloudAgentAttachment[];
@@ -552,8 +579,19 @@ export type CloudAgentAcpPlanPayload = {
   entries: CloudAgentAcpPlanEntry[];
 };
 
+export type CloudAgentUIStatePayload = {
+  messageId: string;
+  blockIndex: number;
+  catalogVersion: number;
+  contentHash: string;
+  revision: number;
+  state: Record<string, string | number | boolean | null>;
+};
+
 export type CloudAgentEventPayload =
+  | CloudAgentUIStatePayload
   | CloudAgentUserMessagePayload
+  | CloudAgentBotMessagePayload
   | CloudAgentRunStartPayload
   | CloudAgentReasoningDeltaPayload
   | CloudAgentAssistantDeltaPayload
@@ -581,7 +619,9 @@ export type CloudAgentEventPayload =
   | CloudAgentAskUserResolvedPayload
   | CloudAgentToolApprovalRequestPayload
   | CloudAgentToolApprovalResolvedPayload
-  | CloudAgentAcpPlanPayload;
+  | CloudAgentAcpPlanPayload
+  | { messageId: string; error: string }
+  | import("./acp.js").AcpRuntimeStatus;
 
 export type CloudAgentEvent = {
   id: string;

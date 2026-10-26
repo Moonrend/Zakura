@@ -3,15 +3,10 @@ package runtime
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,17 +19,21 @@ import (
 )
 
 func (h *handler) projectDir(r *http.Request) (workspaceFS, string, error) {
-	f, e := h.workspaceFor(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
+	f, e := h.requestWorkspace(r)
 	if e != nil {
 		return f, "", e
 	}
 	slug := chi.URLParam(r, "slug")
+	space, e := h.workspaceRequestSpace(r)
+	if e != nil {
+		return f, "", e
+	}
 	var count int64
-	e = h.deps.Gorm.WithContext(r.Context()).Table("space_projects AS p").Joins("JOIN agents a ON a.space_id = p.space_id").Where("p.tenant_id = ? AND a.id = ? AND p.slug = ?", principal(r).TenantID, chi.URLParam(r, "id"), slug).Count(&count).Error
+	e = h.deps.Gorm.WithContext(r.Context()).Table("space_projects").Where("tenant_id = ? AND space_id = ? AND slug = ?", principal(r).TenantID, space, slug).Count(&count).Error
 	if e != nil || count == 0 {
 		return f, "", ErrNotFound
 	}
-	dir, e := f.resolve(filepath.Join("projects", slug), false)
+	dir, e := f.resolve(filepath.Join("projects", slug), true)
 	return f, dir, e
 }
 func atomicWrite(path string, data []byte, mode os.FileMode) error {
@@ -62,47 +61,7 @@ func atomicWrite(path string, data []byte, mode os.FileMode) error {
 	return os.Rename(name, path)
 }
 func projectConfigSnapshot(slug, dir string) map[string]any {
-	instructions := map[string]any{"file": nil, "content": "", "claudeFallback": false}
-	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
-		if raw, err := os.ReadFile(filepath.Join(dir, name)); err == nil {
-			instructions["file"], instructions["content"], instructions["claudeFallback"] = name, string(raw), name == "CLAUDE.md"
-			break
-		}
-	}
-	events := map[string]any{}
-	hookFile := any(nil)
-	if raw, err := os.ReadFile(filepath.Join(dir, ".zakura", "hooks.json")); err == nil {
-		_ = json.Unmarshal(raw, &events)
-		hookFile = ".zakura/hooks.json"
-	}
-	skills := []map[string]any{}
-	skillRoot := filepath.Join(dir, ".zakura", "skills")
-	entries, _ := os.ReadDir(skillRoot)
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		raw, err := os.ReadFile(filepath.Join(skillRoot, name, "SKILL.md"))
-		if err != nil {
-			continue
-		}
-		description := ""
-		for _, line := range strings.Split(string(raw), "\n") {
-			line = strings.TrimSpace(line)
-			if line != "" && !strings.HasPrefix(line, "#") {
-				description = line
-				break
-			}
-		}
-		skills = append(skills, map[string]any{"name": name, "title": name, "description": description, "path": ".zakura/skills/" + name + "/SKILL.md"})
-	}
-	return map[string]any{"slug": slug, "exists": true, "instructions": instructions, "skills": skills, "hooks": map[string]any{"file": hookFile, "events": events, "sources": func() []map[string]any {
-		if hookFile != nil {
-			return []map[string]any{{"file": hookFile, "events": events}}
-		}
-		return []map[string]any{}
-	}()}}
+	return projectSnapshotFromReader(slug, localProjectReader(dir))
 }
 
 func (h *handler) putProjectHooks(w http.ResponseWriter, r *http.Request) {
@@ -114,7 +73,7 @@ func (h *handler) putProjectHooks(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "valid JSON hooks required")
 		return
 	}
-	file := ".zakura/hooks.json"
+	file := ".agents/hooks.json"
 	if body.File != nil && strings.TrimSpace(*body.File) != "" {
 		file = *body.File
 	}
@@ -128,6 +87,12 @@ func (h *handler) putProjectHooks(w http.ResponseWriter, r *http.Request) {
 		writeRemoteError(w, err)
 		return
 	} else if selected {
+		var err error
+		raw, err = projectHooksContent(remote.projectReader(r.Context(), chi.URLParam(r, "slug")), filepath.ToSlash(clean), body.Events)
+		if err != nil {
+			httpx.Error(w, 400, err.Error())
+			return
+		}
 		if _, err = remote.write(r.Context(), projectRemotePath(chi.URLParam(r, "slug"), filepath.ToSlash(clean)), raw); err != nil {
 			writeRemoteError(w, err)
 			return
@@ -140,7 +105,12 @@ func (h *handler) putProjectHooks(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, err)
 		return
 	}
-	if err = atomicWrite(filepath.Join(dir, clean), raw, 0o640); err != nil {
+	raw, err = projectHooksContent(localProjectReader(dir), filepath.ToSlash(clean), body.Events)
+	if err != nil {
+		httpx.Error(w, 400, err.Error())
+		return
+	}
+	if err = writeProjectFile(dir, clean, raw); err != nil {
 		statusErr(w, err)
 		return
 	}
@@ -176,7 +146,7 @@ func (h *handler) putProjectSkill(w http.ResponseWriter, r *http.Request) {
 		writeRemoteError(w, err)
 		return
 	} else if selected {
-		if _, err = remote.write(r.Context(), projectRemotePath(chi.URLParam(r, "slug"), ".zakura", "skills", name, "SKILL.md"), []byte(content)); err != nil {
+		if _, err = remote.write(r.Context(), projectRemotePath(chi.URLParam(r, "slug"), projectSkillDirectory(remote.projectReader(r.Context(), chi.URLParam(r, "slug")), name), "SKILL.md"), []byte(content)); err != nil {
 			writeRemoteError(w, err)
 			return
 		}
@@ -185,7 +155,7 @@ func (h *handler) putProjectSkill(w http.ResponseWriter, r *http.Request) {
 				return body.Name
 			}
 			return name
-		}(), "description": body.Description, "path": ".zakura/skills/" + name + "/SKILL.md"}
+		}(), "description": body.Description, "path": projectSkillDirectory(remote.projectReader(r.Context(), chi.URLParam(r, "slug")), name) + "/SKILL.md"}
 		httpx.JSON(w, http.StatusOK, map[string]any{"skill": skill, "config": remote.projectSnapshot(r.Context(), chi.URLParam(r, "slug"))})
 		return
 	}
@@ -194,8 +164,8 @@ func (h *handler) putProjectSkill(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, err)
 		return
 	}
-	target := filepath.Join(dir, ".zakura", "skills", name, "SKILL.md")
-	if err = atomicWrite(target, []byte(content), 0o640); err != nil {
+	target := filepath.Join(projectSkillDirectory(localProjectReader(dir), name), "SKILL.md")
+	if err = writeProjectFile(dir, target, []byte(content)); err != nil {
 		statusErr(w, err)
 		return
 	}
@@ -204,7 +174,7 @@ func (h *handler) putProjectSkill(w http.ResponseWriter, r *http.Request) {
 			return body.Name
 		}
 		return name
-	}(), "description": body.Description, "path": ".zakura/skills/" + name + "/SKILL.md"}
+	}(), "description": body.Description, "path": filepath.ToSlash(target)}
 	httpx.JSON(w, http.StatusOK, map[string]any{"skill": skill, "config": projectConfigSnapshot(chi.URLParam(r, "slug"), dir)})
 }
 func (h *handler) deleteProjectSkill(w http.ResponseWriter, r *http.Request) {
@@ -217,9 +187,9 @@ func (h *handler) deleteProjectSkill(w http.ResponseWriter, r *http.Request) {
 		writeRemoteError(w, err)
 		return
 	} else if selected {
-		params, _ := remotePathParams(remote.spaceID, projectRemotePath(chi.URLParam(r, "slug"), ".zakura", "skills", name))
+		params, _ := remotePathParams(remote.spaceID, projectRemotePath(chi.URLParam(r, "slug"), projectSkillDirectory(remote.projectReader(r.Context(), chi.URLParam(r, "slug")), name)))
 		params["recursive"] = true
-		if err = remote.runner.call(r.Context(), "host.fs.remove", params, nil); err != nil {
+		if err = remote.call(r.Context(), "host.fs.remove", params, nil); err != nil {
 			writeRemoteError(w, err)
 			return
 		}
@@ -231,7 +201,13 @@ func (h *handler) deleteProjectSkill(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, err)
 		return
 	}
-	if err = os.RemoveAll(filepath.Join(dir, ".zakura", "skills", name)); err != nil {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		statusErr(w, err)
+		return
+	}
+	defer root.Close()
+	if err = root.RemoveAll(projectSkillDirectory(localProjectReader(dir), name)); err != nil {
 		statusErr(w, err)
 		return
 	}
@@ -252,12 +228,12 @@ func (h *handler) getProjectSkillFile(w http.ResponseWriter, r *http.Request) {
 		writeRemoteError(w, err)
 		return
 	} else if selected {
-		raw, _, err := remote.read(r.Context(), projectRemotePath(chi.URLParam(r, "slug"), ".zakura", "skills", name, filepath.ToSlash(clean)), 1<<20)
+		raw, _, err := remote.read(r.Context(), projectRemotePath(chi.URLParam(r, "slug"), projectSkillDirectory(remote.projectReader(r.Context(), chi.URLParam(r, "slug")), name), filepath.ToSlash(clean)), 1<<20)
 		if err != nil {
 			writeRemoteError(w, err)
 			return
 		}
-		httpx.JSON(w, http.StatusOK, map[string]any{"path": filepath.ToSlash(filepath.Join(".zakura", "skills", name, clean)), "content": string(raw)})
+		httpx.JSON(w, http.StatusOK, map[string]any{"path": filepath.ToSlash(filepath.Join(".agents", "skills", name, clean)), "content": string(raw)})
 		return
 	}
 	_, dir, err := h.projectDir(r)
@@ -265,7 +241,7 @@ func (h *handler) getProjectSkillFile(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, err)
 		return
 	}
-	raw, err := os.ReadFile(filepath.Join(dir, ".zakura", "skills", name, clean))
+	raw, err := localProjectReader(dir).read(filepath.Join(projectSkillDirectory(localProjectReader(dir), name), clean))
 	if errors.Is(err, os.ErrNotExist) {
 		statusErr(w, ErrNotFound)
 		return
@@ -274,7 +250,7 @@ func (h *handler) getProjectSkillFile(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, err)
 		return
 	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"path": filepath.ToSlash(filepath.Join(".zakura", "skills", name, clean)), "content": string(raw)})
+	httpx.JSON(w, http.StatusOK, map[string]any{"path": filepath.ToSlash(filepath.Join(".agents", "skills", name, clean)), "content": string(raw)})
 }
 func (h *handler) agentDesktop(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
@@ -327,29 +303,25 @@ func (h *handler) agentDesktop(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) workspaceTicket(w http.ResponseWriter, r *http.Request, kind string) {
 	p := principal(r)
-	agent := chi.URLParam(r, "id")
-	var rec struct {
-		EnableComputer bool `gorm:"column:enable_computer"`
-	}
-	if e := h.deps.Gorm.WithContext(r.Context()).Table("agents AS a").Select("s.enable_computer AS enable_computer").Joins("JOIN spaces s ON s.id = a.space_id").Where("a.tenant_id = ? AND a.id = ?", p.TenantID, agent).Take(&rec).Error; e != nil {
-		statusErr(w, e)
+	agentID := chi.URLParam(r, "id")
+	if err := httpx.AuthorizeResource(r.Context(), h.deps, p, "", agentID); err != nil {
+		statusErr(w, ErrNotFound)
 		return
 	}
-	if !rec.EnableComputer {
-		httpx.Error(w, http.StatusConflict, "Desktop is disabled")
+	a, err := h.store.GetAgent(r.Context(), p.TenantID, agentID)
+	if err != nil {
+		statusErr(w, err)
 		return
 	}
-	expires := h.store.now().Add(45 * time.Second)
-	payloadMap := map[string]any{"tenantId": p.TenantID, "userId": p.UserID, "agentId": agent, "kind": kind, "exp": expires.Unix()}
-	if adapterID := strings.TrimSpace(r.URL.Query().Get("adapterId")); adapterID != "" && kind == "terminal" {
-		payloadMap["adapterId"] = adapterID
+	route := chi.NewRouteContext()
+	if adapter := strings.TrimSpace(r.URL.Query().Get("adapterId")); adapter != "" && kind == "terminal" {
+		route.URLParams.Add("spaceId", a.SpaceID)
+		route.URLParams.Add("profileId", adapter)
+		h.acpTerminalTicket(w, r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, route)))
+		return
 	}
-	payload, _ := json.Marshal(payloadMap)
-	body := base64.RawURLEncoding.EncodeToString(payload)
-	mac := hmac.New(sha256.New, h.deps.Secret)
-	mac.Write([]byte("workspace:" + body))
-	token := body + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-	httpx.JSON(w, http.StatusOK, map[string]any{"ticket": token, "url": strings.TrimRight(h.deps.PublicURL, "/") + "/api/agents/" + url.PathEscape(agent) + "/" + kind + "-proxy?token=" + url.QueryEscape(token)})
+	route.URLParams.Add("id", a.SpaceID)
+	h.issueSpaceWorkspaceTicket(w, r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, route)), kind)
 }
 func (h *handler) desktopTicket(w http.ResponseWriter, r *http.Request) {
 	h.workspaceTicket(w, r, "desktop")
@@ -425,12 +397,11 @@ func migrationFromModel(m models.WorkspaceMigration) migrationRow {
 }
 func (h *handler) listWorkspaceMigrations(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	var agent models.Agent
-	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", p.TenantID, chi.URLParam(r, "id")).Take(&agent).Error; e != nil {
-		statusErr(w, ErrNotFound)
+	space, err := h.workspaceRequestSpace(r)
+	if err != nil {
+		statusErr(w, err)
 		return
 	}
-	space := agent.SpaceID
 	var ms []models.WorkspaceMigration
 	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND space_id = ?", p.TenantID, space).Order("created_at DESC").Find(&ms).Error; e != nil {
 		statusErr(w, e)
@@ -459,16 +430,16 @@ func (h *handler) createWorkspaceMigration(w http.ResponseWriter, r *http.Reques
 		httpx.Error(w, 400, "targetNodeId required")
 		return
 	}
-	var rec struct {
-		SpaceID       string  `gorm:"column:space_id"`
-		RuntimeNodeID *string `gorm:"column:runtime_node_id"`
+	space, e := h.workspaceRequestSpace(r)
+	if e != nil || httpx.AuthorizeResource(r.Context(), h.deps, p, space, "") != nil {
+		statusErr(w, ErrNotFound)
+		return
 	}
-	e := h.deps.Gorm.WithContext(r.Context()).Table("agents AS a").Select("a.space_id AS space_id, s.runtime_node_id AS runtime_node_id").Joins("JOIN spaces s ON s.id = a.space_id").Where("a.tenant_id = ? AND a.id = ?", p.TenantID, chi.URLParam(r, "id")).Take(&rec).Error
+	record, e := h.store.GetSpace(r.Context(), p.TenantID, space)
 	source := ""
-	if rec.RuntimeNodeID != nil {
-		source = *rec.RuntimeNodeID
+	if record.RuntimeNodeID != nil {
+		source = *record.RuntimeNodeID
 	}
-	space := rec.SpaceID
 	if e != nil || source == "" {
 		httpx.Error(w, 409, "source runtime node required")
 		return
@@ -482,15 +453,40 @@ func (h *handler) createWorkspaceMigration(w http.ResponseWriter, r *http.Reques
 		statusErr(w, ErrNotFound)
 		return
 	}
+	for _, node := range []string{source, b.TargetRuntimeNodeID} {
+		if e = h.authorizeLocalNode(r.Context(), p, node); e != nil {
+			statusErr(w, e)
+			return
+		}
+	}
 	id := h.store.id()
 	now := runtimeTimeString(h.store.now())
 	phase := "queued"
 	m := models.WorkspaceMigration{ID: &id, TenantID: p.TenantID, SpaceID: space, SourceNodeID: source, TargetNodeID: b.TargetRuntimeNodeID, Status: "pending", Phase: &phase, ProgressPct: 0, ExcludePatternsJSON: "[]", SourceRetained: false, CreatedAt: now, UpdatedAt: now}
-	if e = h.deps.Gorm.WithContext(r.Context()).Create(&m).Error; e != nil {
+	lease, e := h.acquireSpaceWorkspace(r.Context(), p.TenantID, space, "migrating", false, &workspaceConfig{RuntimeNodeID: &b.TargetRuntimeNodeID})
+	if e != nil {
+		h.serverComputerLifecycleError(w, e)
+		return
+	}
+	if lease.Space.RuntimeNodeID == nil || *lease.Space.RuntimeNodeID != source {
+		lease.release()
+		statusErr(w, ErrConflict)
+		return
+	}
+	if e = h.migrationPreflight(r.Context(), lease.Space, b.TargetRuntimeNodeID); e != nil {
+		lease.release()
+		httpx.Error(w, http.StatusConflict, e.Error())
+		return
+	}
+	manifest := migrationManifest{Version: 1, Source: source, Target: b.TargetRuntimeNodeID, PreviousStatus: lease.Intent.PreviousStatus}
+	rawManifest := string(rawJSON(manifest))
+	m.ManifestJSON, m.SourceRetained = &rawManifest, true
+	if e = lease.fenced(r.Context(), func(tx *gorm.DB) error { return tx.Create(&m).Error }); e != nil {
+		lease.release()
 		statusErr(w, e)
 		return
 	}
-	go h.runWorkspaceMigration(h.deps.RunContext(), id, p.TenantID, space, source, b.TargetRuntimeNodeID)
+	go h.runLeasedWorkspaceMigration(httpx.WithPrincipal(h.deps.RunContext(), p), id, lease, b.TargetRuntimeNodeID)
 	httpx.JSON(w, http.StatusCreated, map[string]any{"migration": map[string]any{"id": id, "status": "pending"}})
 }
 func (h *handler) createInstanceMigration(w http.ResponseWriter, r *http.Request) {
@@ -631,56 +627,45 @@ func (h *handler) createInstanceMigration(w http.ResponseWriter, r *http.Request
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "runtimeNodeId": request.TargetRuntimeNodeID})
 }
 func (h *handler) runWorkspaceMigration(ctx context.Context, id, tenant, space, source, target string) {
-	now := runtimeTimeString(h.store.now())
-	h.deps.Gorm.WithContext(ctx).Model(&models.WorkspaceMigration{}).Where("id = ?", id).Updates(map[string]any{"status": "running", "phase": "exporting", "progress_pct": 10, "started_at": now, "updated_at": now})
-	sourceRunner, e := h.hub.get(source)
-	if e != nil {
-		h.failMigration(ctx, id, errors.New("source runtime node is offline"))
+	lease, err := h.acquireSpaceWorkspace(ctx, tenant, space, "migrating", false, &workspaceConfig{RuntimeNodeID: &target})
+	if err != nil {
+		h.failMigration(ctx, id, err)
 		return
 	}
-	targetRunner, e := h.hub.get(target)
-	if e != nil {
-		h.failMigration(ctx, id, errors.New("target runtime node is offline"))
+	if lease.Space.RuntimeNodeID == nil || *lease.Space.RuntimeNodeID != source {
+		lease.release()
+		h.failMigration(ctx, id, ErrConflict)
 		return
 	}
-	archive, e := (&remoteWorkspace{runner: sourceRunner, spaceID: space}).archive(ctx, []string{"/"})
-	if e != nil {
-		h.failMigration(ctx, id, e)
+	if err := h.migrationPreflight(ctx, lease.Space, target); err != nil {
+		lease.release()
+		h.failMigration(ctx, id, err)
 		return
 	}
-	digest := sha256.Sum256(archive)
-	h.deps.Gorm.WithContext(ctx).Model(&models.WorkspaceMigration{}).Where("id = ?", id).Updates(map[string]any{"phase": "transferring", "progress_pct": 50, "archive_size": fmt.Sprint(len(archive)), "archive_sha256": hex.EncodeToString(digest[:]), "manifest_json": fmt.Sprintf(`{"format":"tar.gz","filesRoot":"/","sourceNodeId":%q}`, source), "updated_at": runtimeTimeString(h.store.now())})
-	targetWorkspace := &remoteWorkspace{runner: targetRunner, spaceID: space}
-	h.deps.Gorm.WithContext(ctx).Model(&models.WorkspaceMigration{}).Where("id = ?", id).Updates(map[string]any{"phase": "importing", "progress_pct": 75, "updated_at": runtimeTimeString(h.store.now())})
-	tempPath := "/.zakura-migration-" + id + ".tar.gz"
-	if _, e = targetWorkspace.write(ctx, tempPath, archive); e == nil {
-		e = targetWorkspace.extract(ctx, tempPath, "/")
-	}
-	params, _ := remotePathParams(space, tempPath)
-	_ = targetRunner.call(h.deps.RunContext(), "host.fs.remove", params, nil)
-	if e != nil {
-		h.failMigration(ctx, id, e)
-		return
-	}
-	e = h.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if e := tx.Table("spaces").Where("tenant_id = ? AND id = ?", tenant, space).Updates(map[string]any{"runtime_node_id": target, "workspace_status": "ready", "updated_at": runtimeTimeString(h.store.now())}).Error; e != nil {
-			return e
-		}
-		return tx.Model(&models.WorkspaceMigration{}).Where("id = ?", id).Updates(map[string]any{"status": "completed", "phase": "completed", "progress_pct": 100, "source_retained": true, "completed_at": runtimeTimeString(h.store.now()), "updated_at": runtimeTimeString(h.store.now())}).Error
-	})
-	if e != nil {
-		h.failMigration(ctx, id, e)
-	}
+	h.runLeasedWorkspaceMigration(ctx, id, lease, target)
 }
 func (h *handler) failMigration(ctx context.Context, id string, e error) {
 	now := runtimeTimeString(h.store.now())
 	h.deps.Gorm.WithContext(ctx).Model(&models.WorkspaceMigration{}).Where("id = ?", id).Updates(map[string]any{"status": "failed", "phase": "failed", "error": e.Error(), "completed_at": now, "updated_at": now})
 }
+func (h *handler) authorizeWorkspaceMigration(r *http.Request, space string) error {
+	if requested, ok := r.Context().Value(spaceWorkspaceRequestKey{}).(string); ok && requested != space {
+		return ErrNotFound
+	}
+	if err := httpx.AuthorizeResource(r.Context(), h.deps, principal(r), space, ""); err != nil {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (h *handler) getWorkspaceMigration(w http.ResponseWriter, r *http.Request) {
 	var m models.WorkspaceMigration
 	e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", principal(r).TenantID, chi.URLParam(r, "jobId")).Take(&m).Error
 	if errors.Is(e, gorm.ErrRecordNotFound) {
 		e = ErrNotFound
+	}
+	if e == nil {
+		e = h.authorizeWorkspaceMigration(r, m.SpaceID)
 	}
 	if e != nil {
 		statusErr(w, e)
@@ -694,6 +679,9 @@ func (h *handler) workspaceMigrationEvents(w http.ResponseWriter, r *http.Reques
 		var m models.WorkspaceMigration
 		if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", tenant, id).Take(&m).Error; e != nil {
 			return migrationRow{}, e
+		}
+		if err := h.authorizeWorkspaceMigration(r, m.SpaceID); err != nil {
+			return migrationRow{}, err
 		}
 		return migrationFromModel(m), nil
 	}

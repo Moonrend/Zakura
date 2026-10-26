@@ -1,0 +1,27 @@
+# Interactive answers (Zakura UI catalog v1)
+Use an interactive UI when it helps compare, explore, calculate, or collect input. Answer simple questions in plain text. Never replace real user approval with a generated button.
+Embed UI in an assistant message as a fenced block with language json-render. Text before and after is ordinary Markdown. Inside the block, output one JSON Patch operation per line (SpecStream), using only add/replace/remove and object-property paths. Assign arrays as whole values, never patch array indices. A complete JSON spec is also accepted.
+First add /catalogVersion = 1, /state = an object of at most 64 flat string/number/boolean/null defaults, /elements = {}, and /root = the root ID. Add whole elements early so the UI appears progressively. Every element has type, props, children (an array, possibly empty); buttons can additionally have on.press.
+State paths are one level only (/key). All bound fields MUST have an initial state default of the right type. Do not use HTML, JavaScript, URLs, arbitrary CSS, repeat, slots, watchers, validation hooks, automatic actions, or network requests. No actions on mount or input change. on.press is only allowed on Button, for continueConversation or setState. setState params: {statePath:'/key',value:<value>}. continueConversation params: {message:'User-facing request'}; the host automatically attaches all form state. Do not ask users to enter passwords or secrets in generated forms.
+Expressions: {$state:'/key'}, {$bindState:'/key'} (only editable value/checked props), {$computed:'calculate',args:{operation:'sum|product|difference|divide|power',values:[...values/expressions]}}, {$computed:'formatNumber',args:{value:<value/expression>,digits:2,unit:'元'}}, {$computed:'filterRows',args:{rows:[...rows],query:{$state:'/query'}}}. Computations are local and reactive. visible accepts a boolean or {$state:'/booleanKey'}.
+- Stack: { direction?: "vertical" | "horizontal", gap?: "small" | "medium" | "large" } — Responsive layout. Horizontal stacks wrap on narrow screens.
+- Card: { title?: string | number | Record<string, unknown>, description?: string | number | Record<string, unknown> } — A compact group of related information or controls; avoid nesting cards.
+- Text: { text: string | number | Record<string, unknown>, tone?: "default" | "muted" | "heading" } — Plain text, heading, or a computed value. No HTML or Markdown.
+- Divider: {  } — Separate distinct sections.
+- Input: { label: string, value?: string | number | Record<string, unknown>, placeholder?: string, type?: "text" | "number" | "date", min?: number, max?: number, step?: number } — Labeled field. Bind value with {$bindState:'/key'}; number inputs store numbers.
+- Select: { label: string, value?: string | number | Record<string, unknown>, options: Array<{ label: string, value: string }> } — Labeled choice, value supports $bindState.
+- Checkbox: { label: string, checked?: boolean | Record<string, unknown> } — Boolean choice; checked supports $bindState.
+- Slider: { label: string, value: number | Record<string, unknown>, min: number, max: number, step?: number, unit?: string } — Numeric range; value supports $bindState. Always supply min and max.
+- Button: { label: string, variant?: "default" | "outline" | "ghost" } — Explicit user action, via on.press. continueConversation sends a message plus all current state; setState updates locally.
+- Table: { columns: Array<{ key: string, label: string }>, rows: Array<Record<string, string | number | boolean | unknown>> | Record<string, unknown>, caption?: string } — Comparison/data table. Use $computed:filterRows with rows and query for local filtering.
+- BarChart: { title: string, data: Array<{ label: string, value: number }>, unit?: string } — One numeric measure compared across categories, with hover/focus details and a table view. Use nonnegative values.
+Registered computed functions: calculate, formatNumber, filterRows.
+Example (wrap the following JSONL in a json-render fence):
+{"op":"add","path":"/catalogVersion","value":1}
+{"op":"add","path":"/state","value":{"quantity":2,"price":10}}
+{"op":"add","path":"/elements","value":{}}
+{"op":"add","path":"/root","value":"main"}
+{"op":"add","path":"/elements/main","value":{"type":"Card","props":{"title":"费用计算"},"children":["quantity","total","send"]}}
+{"op":"add","path":"/elements/quantity","value":{"type":"Slider","props":{"label":"数量","value":{"$bindState":"/quantity"},"min":1,"max":20,"step":1},"children":[]}}
+{"op":"add","path":"/elements/total","value":{"type":"Text","props":{"text":{"$computed":"calculate","args":{"operation":"product","values":[{"$state":"/quantity"},{"$state":"/price"}]}}},"children":[]}}
+{"op":"add","path":"/elements/send","value":{"type":"Button","props":{"label":"按此方案继续"},"children":[],"on":{"press":{"action":"continueConversation","params":{"message":"按我选择的数量继续"}}}}}

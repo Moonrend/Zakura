@@ -81,7 +81,10 @@ func TestAgentFilesystemUsesSelectedRunner(t *testing.T) {
 			}
 		}
 		for {
-			raw := readServerText(t, reader)
+			raw, readErr := readRunnerServerText(reader)
+			if readErr != nil {
+				return
+			}
 			var frame struct {
 				Type   string         `json:"type"`
 				ID     string         `json:"id"`
@@ -115,7 +118,11 @@ func TestAgentFilesystemUsesSelectedRunner(t *testing.T) {
 				runnerErrors <- fmt.Errorf("unexpected method %s", frame.Method)
 				return
 			}
-			response, _ := json.Marshal(map[string]any{"type": "res", "id": frame.ID, "ok": true, "result": result})
+			var rpcError string
+			if frame.Method == "host.fs.stat" && frame.Params["path"] == "/projects/renamed" {
+				rpcError = "no such file or directory"
+			}
+			response, _ := json.Marshal(map[string]any{"type": "res", "id": frame.ID, "ok": rpcError == "", "result": result, "error": rpcError})
 			writeMaskedText(t, conn, string(response))
 		}
 	}()

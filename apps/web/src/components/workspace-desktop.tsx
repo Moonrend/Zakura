@@ -8,7 +8,15 @@ import { workspaceSocketUrl } from "@/lib/workspace-socket-url";
 
 type Ticket = { url: string; ticket: string };
 
-export function WorkspaceDesktop({ agentId, active }: { agentId: string; active: boolean }) {
+export function WorkspaceDesktop({ agentId, spaceId, ticketPath, active }: {
+  agentId?: string;
+  spaceId?: string;
+  ticketPath?: string;
+  active: boolean;
+}) {
+  const path = ticketPath ?? (spaceId
+    ? `/api/spaces/${encodeURIComponent(spaceId)}/desktop-ticket`
+    : agentId ? `/api/agents/${encodeURIComponent(agentId)}/desktop-ticket` : "");
   const hostRef = useRef<HTMLDivElement>(null);
   const rfbRef = useRef<{ disconnect: () => void; scaleViewport: boolean; resizeSession: boolean } | null>(null);
   const [state, setState] = useState<"idle" | "connecting" | "connected" | "error">("idle");
@@ -16,7 +24,7 @@ export function WorkspaceDesktop({ agentId, active }: { agentId: string; active:
   const [message, setMessage] = useState("等待连接");
   const retries = useRef(0);
   const manualDisconnect = useRef(false);
-  useEffect(() => { retries.current = 0; }, [agentId, active]);
+  useEffect(() => { retries.current = 0; }, [path, active]);
 
   const reconnect = () => {
     retries.current = 0;
@@ -25,7 +33,7 @@ export function WorkspaceDesktop({ agentId, active }: { agentId: string; active:
   };
 
   useEffect(() => {
-    if (!active || !hostRef.current) {
+    if (!active || !path || !hostRef.current) {
       setState("idle");
       setMessage("工作区未运行");
       return;
@@ -55,7 +63,7 @@ export function WorkspaceDesktop({ agentId, active }: { agentId: string; active:
     let connectTimer = setTimeout(() => failed("桌面准备超时"), 50_000);
     void Promise.all([
       import("@novnc/novnc"),
-      api<Ticket>(`/api/agents/${agentId}/desktop-ticket`, { method: "POST", signal: controller.signal }),
+      api<Ticket>(path, { method: "POST", signal: controller.signal }),
     ]).then(([{ default: RFB }, ticket]) => {
       if (disposed || retryScheduled || !hostRef.current) return;
       clearTimeout(connectTimer);
@@ -90,7 +98,7 @@ export function WorkspaceDesktop({ agentId, active }: { agentId: string; active:
       rfb?.disconnect();
       if (rfbRef.current === rfb) rfbRef.current = null;
     };
-  }, [active, agentId, attempt]);
+  }, [active, path, attempt]);
 
   return <div className="overflow-hidden rounded-md border">
     <div className="flex items-center gap-2 border-b bg-muted/30 px-3 py-2">

@@ -16,11 +16,11 @@ import (
 	"strings"
 	"time"
 
+	protocol "github.com/Moonrend/Zakura/apps/agent/workspace"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 type mcpInstance struct {
@@ -42,7 +42,7 @@ func (h *handler) protectMCPConfig(id string, raw json.RawMessage) (string, stri
 		return "", "", errors.New("invalid MCP config")
 	}
 	secret := map[string]any{}
-	for _, key := range []string{"token", "apiKey", "accessToken", "headers", "credentials", "secret"} {
+	for _, key := range []string{"token", "apiKey", "accessToken", "access_token", "headers", "credentials", "secret", "env", "clientSecret"} {
 		if value, ok := config[key]; ok {
 			secret[key] = value
 			delete(config, key)
@@ -116,6 +116,7 @@ func (h *handler) migrateLegacyComponentConfigs(ctx context.Context) {
 }
 
 func (h *handler) registerMCP(r chi.Router) {
+	h.registerSpaceMCP(r)
 	r.Get("/mcp/tools", h.listMCPTools)
 	r.Get("/instances/{id}/tools", h.listInstanceTools)
 	r.Get("/mcp/policies", h.listMCPPolicies)
@@ -177,9 +178,10 @@ func (h *handler) getMCPInstance(ctx context.Context, tenant, id string) (mcpIns
 }
 func (h *handler) mcpRPC(ctx context.Context, inst mcpInstance, method string, params any) (json.RawMessage, error) {
 	var cfg struct {
-		URL           string            `json:"url"`
-		RuntimeNodeID string            `json:"runtimeNodeId"`
-		Headers       map[string]string `json:"headers"`
+		URL             string            `json:"url"`
+		RuntimeNodeID   string            `json:"runtimeNodeId"`
+		Headers         map[string]string `json:"headers"`
+		WorkspaceTarget *protocol.Target  `json:"workspaceTarget"`
 	}
 	var sec struct {
 		Headers          map[string]string `json:"headers"`
@@ -192,10 +194,37 @@ func (h *handler) mcpRPC(ctx context.Context, inst mcpInstance, method string, p
 	if json.Unmarshal(inst.Config, &cfg) != nil || cfg.URL == "" {
 		return nil, errors.New("MCP instance has no HTTP URL")
 	}
+	if cfg.WorkspaceTarget != nil {
+		if cfg.WorkspaceTarget.TenantID != inst.TenantID || cfg.WorkspaceTarget.NodeID != cfg.RuntimeNodeID {
+			return nil, errors.New("MCP workspace identity mismatch")
+		}
+		if _, _, err := h.workspaceStore().Resolve(ctx, *cfg.WorkspaceTarget); err != nil {
+			return nil, err
+		}
+		run, _ := ctx.Value(computerRunKey{}).(string)
+		accepted, hasAccepted := ctx.Value(workspaceRequestTargetKey{}).(Space)
+		if run != "" || hasAccepted && accepted.TenantID == inst.TenantID && accepted.ID == cfg.WorkspaceTarget.SpaceID {
+			computer, err := h.serverComputerRecord(ctx, inst.TenantID, cfg.WorkspaceTarget.SpaceID)
+			if err != nil {
+				return nil, err
+			}
+			exec, err := h.resolveWorkspaceExecution(ctx, computer, run)
+			if err != nil {
+				return nil, err
+			}
+			if exec.workspace == nil || exec.workspace.Target != *cfg.WorkspaceTarget {
+				return nil, errors.New("MCP run workspace changed")
+			}
+		}
+	}
 	_ = json.Unmarshal(inst.Secret, &sec)
 	if sec.Enc != "" {
-		if raw, err := openSecretBox(h.deps.Secret, "mcp:"+inst.ID, sec.Enc); err == nil {
-			_ = json.Unmarshal(raw, &sec)
+		raw, err := openSecretBox(h.deps.Secret, "mcp:"+inst.ID, sec.Enc)
+		if err != nil {
+			return nil, errors.New("MCP credentials could not be decrypted")
+		}
+		if json.Unmarshal(raw, &sec) != nil {
+			return nil, errors.New("invalid MCP credential payload")
 		}
 	}
 	u, e := url.Parse(cfg.URL)
@@ -238,6 +267,11 @@ func (h *handler) mcpRPC(ctx context.Context, inst mcpInstance, method string, p
 		body   []byte
 	}
 	call := func(callMethod string, callParams any, sid string, notification bool) (callResult, error) {
+		if cfg.WorkspaceTarget != nil {
+			if _, _, err := h.workspaceStore().Resolve(ctx, *cfg.WorkspaceTarget); err != nil {
+				return callResult{}, err
+			}
+		}
 		requestID := any(h.store.id())
 		if notification {
 			requestID = nil
@@ -362,7 +396,14 @@ func (h *handler) mcpRPC(ctx context.Context, inst mcpInstance, method string, p
 	return result.result, err
 }
 func (h *handler) listInstanceTools(w http.ResponseWriter, r *http.Request) {
-	inst, e := h.getMCPInstance(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
+	p := principal(r)
+	space, agent, e := h.authorizeMCPScope(r.Context(), p, r.URL.Query().Get("spaceId"), r.URL.Query().Get("agentId"))
+	if e != nil {
+		statusErr(w, e)
+		return
+	}
+	p = mcpScopedPrincipal(p, space, agent)
+	inst, e := h.accessibleMCPInstance(r, p, space, chi.URLParam(r, "id"))
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -391,46 +432,28 @@ func (h *handler) listInstanceTools(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) listMCPTools(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	type instanceRow struct {
-		ID           string  `gorm:"column:id"`
-		Name         string  `gorm:"column:name"`
-		ComponentRef string  `gorm:"column:component_ref"`
-		Status       string  `gorm:"column:status"`
-		AgentID      *string `gorm:"column:agent_id"`
-	}
-	var instanceRows []instanceRow
-	if e := h.deps.Gorm.WithContext(r.Context()).Table("component_instances").Select("id,name,component_ref,status,agent_id").Where("tenant_id=? AND component_type='mcp' AND status IN ('ready','running')", p.TenantID).Order("name").Find(&instanceRows).Error; e != nil {
+	space, agent, e := h.authorizeMCPScope(r.Context(), p, r.URL.Query().Get("spaceId"), r.URL.Query().Get("agentId"))
+	if e != nil {
 		statusErr(w, e)
 		return
 	}
-	instances := []mcpInstance{}
-	for _, row := range instanceRows {
-		instances = append(instances, mcpInstance{ID: row.ID, Name: row.Name, Ref: row.ComponentRef, Status: row.Status, TenantID: p.TenantID, AgentID: row.AgentID})
+	tools, e := h.exposedMCPTools(r, p, agent, space)
+	if e != nil {
+		statusErr(w, e)
+		return
 	}
 	out := []map[string]any{}
-	for _, summary := range instances {
-		instance, err := h.getMCPInstance(r.Context(), p.TenantID, summary.ID)
-		if err != nil {
-			continue
-		}
-		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-		result, err := h.mcpRPC(ctx, instance, "tools/list", map[string]any{})
-		cancel()
-		if err != nil {
-			continue
-		}
-		var listed struct {
-			Tools []map[string]any `json:"tools"`
-		}
-		_ = json.Unmarshal(result, &listed)
-		for _, tool := range listed.Tools {
-			local, _ := tool["name"].(string)
-			tool["qualifiedName"], tool["localName"], tool["instanceId"], tool["providerId"] = slugify(summary.Ref)+"__"+local, local, summary.ID, summary.Ref
-			out = append(out, tool)
-		}
+	for _, tool := range tools {
+		item := tool.Tool
+		item["qualifiedName"] = tool.Name
+		item["localName"] = tool.LocalName
+		item["instanceId"] = tool.Instance.ID
+		item["providerId"] = tool.Instance.Ref
+		out = append(out, item)
 	}
-	httpx.JSON(w, http.StatusOK, out)
+	httpx.JSON(w, 200, out)
 }
+
 func (h *handler) listMCPPolicies(w http.ResponseWriter, r *http.Request) {
 	type policyRow struct {
 		ID         string  `gorm:"column:id"`
@@ -442,7 +465,14 @@ func (h *handler) listMCPPolicies(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt  string  `gorm:"column:updated_at"`
 	}
 	var policyRows []policyRow
-	if e := h.deps.Gorm.WithContext(r.Context()).Table("mcp_policies").Select("id,agent_id,space_id,name,policy_json,created_at,updated_at").Where("tenant_id=?", principal(r).TenantID).Order("created_at").Find(&policyRows).Error; e != nil {
+	query := h.deps.Gorm.WithContext(r.Context()).Table("mcp_policies").Select("id,agent_id,space_id,name,policy_json,created_at,updated_at").Where("tenant_id=?", principal(r).TenantID)
+	p := principal(r)
+	if p.APIKey && p.AgentID != "" {
+		query = query.Where("agent_id=?", p.AgentID)
+	} else if p.APIKey && p.SpaceID != "" {
+		query = query.Where("space_id=?", p.SpaceID)
+	}
+	if e := query.Order("created_at").Find(&policyRows).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
@@ -461,6 +491,14 @@ func (h *handler) createMCPPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	if httpx.DecodeJSON(r, &b) != nil || b.Name == "" {
 		httpx.Error(w, 400, "name required")
+		return
+	}
+	if err := h.authorizeMCPPolicy(r.Context(), principal(r), b.SpaceID, b.AgentID); err != nil {
+		statusErr(w, err)
+		return
+	}
+	if err := validateMCPPolicy(b.Policy); err != nil {
+		httpx.Error(w, 400, err.Error())
 		return
 	}
 	now := h.store.now()
@@ -482,6 +520,22 @@ func (h *handler) updateMCPPolicy(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "name required")
 		return
 	}
+	space, agent, err := h.authorizeMCPPolicyID(r.Context(), principal(r), chi.URLParam(r, "id"))
+	if err != nil {
+		statusErr(w, err)
+		return
+	}
+	if b.SpaceID != nil {
+		space = b.SpaceID
+	}
+	if err = h.authorizeMCPPolicy(r.Context(), principal(r), space, agent); err != nil {
+		statusErr(w, err)
+		return
+	}
+	if err = validateMCPPolicy(b.Policy); err != nil {
+		httpx.Error(w, 400, err.Error())
+		return
+	}
 	updates := map[string]any{"name": b.Name, "policy_json": validJSON(b.Policy, "{}"), "updated_at": runtimeTimeString(h.store.now())}
 	if b.SpaceID != nil {
 		updates["space_id"] = b.SpaceID
@@ -498,6 +552,10 @@ func (h *handler) updateMCPPolicy(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, map[string]any{"ok": true})
 }
 func (h *handler) deleteMCPPolicy(w http.ResponseWriter, r *http.Request) {
+	if _, _, err := h.authorizeMCPPolicyID(r.Context(), principal(r), chi.URLParam(r, "id")); err != nil {
+		statusErr(w, err)
+		return
+	}
 	res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id=? AND id=?", principal(r).TenantID, chi.URLParam(r, "id")).Delete(&models.McpPolicy{})
 	if res.Error != nil {
 		statusErr(w, res.Error)
@@ -529,6 +587,12 @@ func (h *handler) probeMCP(w http.ResponseWriter, r *http.Request) {
 
 type stdioImportBody struct {
 	Name, Slug, URL, Token, Command, PackageManager, Image, WorkingDir string
+	MCPURL                                                             string            `json:"mcpUrl"`
+	APIKey                                                             string            `json:"apiKey"`
+	HeaderName                                                         string            `json:"headerName"`
+	AuthMode                                                           string            `json:"authMode"`
+	ClientID                                                           string            `json:"clientId"`
+	ClientSecret                                                       string            `json:"clientSecret"`
 	AgentID                                                            *string           `json:"agentId"`
 	AgentIDs                                                           []string          `json:"agentIds"`
 	SpaceID                                                            *string           `json:"spaceId"`
@@ -586,102 +650,167 @@ func (h *handler) stdioBodyForInstance(instance mcpInstance) (stdioImportBody, b
 
 func (h *handler) importMCP(w http.ResponseWriter, r *http.Request) {
 	var body stdioImportBody
-	if httpx.DecodeJSON(r, &body) != nil || strings.TrimSpace(body.Name) == "" {
-		httpx.Error(w, http.StatusBadRequest, "name required")
+	if httpx.DecodeJSON(r, &body) != nil {
+		httpx.Error(w, 400, "invalid MCP import")
 		return
 	}
-	p := principal(r)
+	result, err := h.installMCP(r.Context(), principal(r), body)
+	if err != nil {
+		statusErr(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusCreated, result)
+}
+
+// All installers share validation, encryption, ownership, provisioning and probe.
+func (h *handler) installMCP(ctx context.Context, p httpx.Principal, body stdioImportBody) (map[string]any, error) {
+	body.Name = strings.TrimSpace(body.Name)
+	if body.URL == "" {
+		body.URL = body.MCPURL
+	}
+	if body.APIKey != "" {
+		if body.HeaderName == "" || strings.EqualFold(body.HeaderName, "Authorization") {
+			body.Token = body.APIKey
+		} else {
+			if body.Headers == nil {
+				body.Headers = map[string]string{}
+			}
+			body.Headers[body.HeaderName] = body.APIKey
+		}
+	}
+	if body.AuthMode == "oauth" {
+		stopped := false
+		body.Start = &stopped
+	}
+	if body.Name == "" || body.Command == "" && body.URL == "" {
+		return nil, errors.New("name and command or url required")
+	}
+	if body.Command != "" && body.URL != "" {
+		return nil, errors.New("choose command or url, not both")
+	}
 	if body.Command != "" && body.Image != "" && !p.IsPlatformAdmin && p.Role != "owner" && p.Role != "admin" {
-		httpx.Error(w, http.StatusForbidden, "custom stdio images require an administrator")
-		return
+		return nil, errors.New("custom stdio images require an administrator")
 	}
-	now := h.store.now()
+	if body.All {
+		return nil, errors.New("explicit Space bindings required; all is not supported")
+	}
+	agents := append([]string{}, body.AgentIDs...)
+	if body.AgentID != nil {
+		agents = append(agents, *body.AgentID)
+	}
+	agents = uniqueStrings(agents)
+	spaces := append([]string{}, body.SpaceIDs...)
+	if body.SpaceID != nil {
+		spaces = append(spaces, *body.SpaceID)
+	}
+	for _, id := range agents {
+		a, err := h.store.GetAgent(ctx, p.TenantID, id)
+		if err != nil {
+			return nil, ErrNotFound
+		}
+		if _, _, err = h.authorizeMCPScope(ctx, p, a.SpaceID, id); err != nil {
+			return nil, err
+		}
+		spaces = append(spaces, a.SpaceID)
+	}
+	spaces = uniqueStrings(spaces)
+	if len(spaces) == 0 && p.SpaceID != "" {
+		spaces = append(spaces, p.SpaceID)
+	}
+	if len(spaces) == 0 {
+		return nil, errors.New("owning Space required")
+	}
+	for _, space := range spaces {
+		if _, _, err := h.authorizeMCPScope(ctx, p, space, p.AgentID); err != nil {
+			return nil, err
+		}
+	}
+	if body.Command != "" && len(spaces) != 1 {
+		return nil, errors.New("stdio MCP requires exactly one owning Space")
+	}
+	if body.URL != "" {
+		if _, err := safeProviderURL(body.URL, ""); err != nil {
+			return nil, err
+		}
+	}
+	body.SpaceIDs = spaces
 	id := h.store.id()
 	slug := slugify(body.Slug)
 	if slug == "" {
 		slug = slugify(body.Name)
 	}
-	if body.Command == "" && body.URL == "" {
-		httpx.Error(w, http.StatusBadRequest, "command or url required")
-		return
+	ownerSpace := spaces[0]
+	if body.SpaceID != nil && *body.SpaceID != "" {
+		ownerSpace = *body.SpaceID
 	}
-	if body.AgentID != nil {
-		body.AgentIDs = append(body.AgentIDs, *body.AgentID)
+	if body.Command == "" && len(spaces) > 1 && (body.SpaceID == nil || *body.SpaceID == "") {
+		return nil, errors.New("remote MCP with multiple consumers requires an explicit owning spaceId")
 	}
-	body.AgentIDs = uniqueStrings(body.AgentIDs)
-	spaceIDs := append([]string{}, body.SpaceIDs...)
-	if body.SpaceID != nil {
-		spaceIDs = append(spaceIDs, *body.SpaceID)
-	}
-	if len(body.AgentIDs) > 0 {
-		var agentSpaceIDs []string
-		if e := h.deps.Gorm.WithContext(r.Context()).Table("agents").Where("tenant_id=? AND id IN ?", p.TenantID, body.AgentIDs).Pluck("space_id", &agentSpaceIDs).Error; e == nil {
-			spaceIDs = append(spaceIDs, agentSpaceIDs...)
-		}
-	}
-	if body.All {
-		var allSpaceIDs []string
-		if e := h.deps.Gorm.WithContext(r.Context()).Model(&models.Space{}).Where("tenant_id=?", p.TenantID).Pluck("id", &allSpaceIDs).Error; e == nil {
-			spaceIDs = append(spaceIDs, allSpaceIDs...)
-		}
-	}
-	spaceIDs = uniqueStrings(spaceIDs)
-	body.SpaceIDs = spaceIDs
-	cfg := map[string]any{"url": body.URL}
+	cfg := map[string]any{"url": body.URL, "transport": "http", "ownerSpaceId": ownerSpace}
 	if body.Command != "" {
-		envKeys := make([]string, 0, len(body.Env))
-		for key := range body.Env {
-			envKeys = append(envKeys, key)
+		exec, err := h.resolveServerComputer(ctx, p.TenantID, spaces[0])
+		if err != nil {
+			return nil, err
 		}
-		slices.Sort(envKeys)
-		cfg = map[string]any{"command": body.Command, "args": body.Args, "environmentVariables": envKeys, "workingDir": body.WorkingDir, "packageManager": body.PackageManager, "runtimeNodeId": body.RuntimeNodeID}
+		if body.RuntimeNodeID != nil && *body.RuntimeNodeID != "" && *body.RuntimeNodeID != exec.nodeID {
+			return nil, errors.New("stdio runtime node must be the owning Space server computer")
+		}
+		cfg = map[string]any{"ownerSpaceId": spaces[0], "serverComputerId": exec.computer.ID, "command": body.Command, "args": body.Args, "workingDir": body.WorkingDir, "packageManager": body.PackageManager, "bridgeImage": body.Image}
 	}
+	envKeys := make([]string, 0, len(body.Env))
+	for key := range body.Env {
+		envKeys = append(envKeys, key)
+	}
+	slices.Sort(envKeys)
+	cfg["environmentVariables"] = envKeys
 	cfgRaw, _ := json.Marshal(cfg)
 	secretPayload, _ := json.Marshal(map[string]any{"token": body.Token, "headers": body.Headers, "env": body.Env})
-	enc, encErr := secretBox(h.deps.Secret, "mcp:"+id, secretPayload)
-	if encErr != nil {
-		statusErr(w, encErr)
-		return
-	}
-	sec, _ := json.Marshal(map[string]any{"enc": enc, "hasToken": body.Token != "", "hasHeaders": len(body.Headers) > 0, "environmentVariables": cfg["environmentVariables"]})
-	status := "ready"
-	if body.Command != "" {
-		status = "stopped"
-	}
-	err := h.deps.Gorm.WithContext(r.Context()).Table("component_instances").Create(map[string]any{"id": id, "tenant_id": p.TenantID, "agent_id": nil, "component_type": "mcp", "component_ref": slug, "name": body.Name, "config_json": string(cfgRaw), "secret_json": string(sec), "status": status, "last_error": nil, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
+	enc, err := secretBox(h.deps.Secret, "mcp:"+id, secretPayload)
 	if err != nil {
-		statusErr(w, err)
-		return
+		return nil, err
 	}
-	for _, spaceID := range spaceIDs {
-		_ = h.deps.Gorm.WithContext(r.Context()).
-			Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "space_id"}, {Name: "instance_id"}},
-				DoUpdates: clause.AssignmentColumns([]string{"agent_id"}),
-			}).
-			Table("agent_bindings").
-			Create(map[string]any{"id": h.store.id(), "tenant_id": p.TenantID, "space_id": spaceID, "agent_id": nil, "instance_id": id, "created_at": runtimeTimeString(now)}).Error
+	sec, _ := json.Marshal(map[string]any{"enc": enc, "hasToken": body.Token != "", "hasHeaders": len(body.Headers) > 0, "environmentVariables": envKeys})
+	now := runtimeTimeString(h.store.now())
+	err = h.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if e := tx.Table("component_instances").Create(map[string]any{"id": id, "tenant_id": p.TenantID, "agent_id": nil, "component_type": "mcp", "component_ref": slug, "name": body.Name, "config_json": string(cfgRaw), "secret_json": string(sec), "status": "stopped", "last_error": nil, "created_at": now, "updated_at": now}).Error; e != nil {
+			return e
+		}
+		for _, space := range spaces {
+			if e := tx.Table("agent_bindings").Create(map[string]any{"id": h.store.id(), "tenant_id": p.TenantID, "space_id": space, "agent_id": nil, "instance_id": id, "created_at": now}).Error; e != nil {
+				return e
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	started := body.Command == ""
+	started := false
 	startError := ""
-	start := body.Start == nil || *body.Start
-	if body.Command != "" && start {
-		if err = h.provisionStdioMCP(r.Context(), p.TenantID, id, body); err != nil {
+	if body.Start == nil || *body.Start {
+		if err = h.startMCPInstance(ctx, p.TenantID, id); err != nil {
 			startError = err.Error()
-			_ = h.deps.Gorm.WithContext(r.Context()).Model(&models.ComponentInstance{}).Where("id=?", id).Updates(map[string]any{"status": "error", "last_error": startError, "updated_at": runtimeTimeString(h.store.now())}).Error
 		} else {
 			started = true
 		}
 	}
-	instance, _ := h.getInstance(r.Context(), p.TenantID, id)
-	result := h.instanceDTO(r.Context(), p.TenantID, instance, false)
-	result["slug"] = slug
-	response := map[string]any{"instance": result, "started": started, "boundAgentIds": body.AgentIDs, "boundSpaceIds": spaceIDs}
-	if startError != "" {
-		response["startError"] = startError
+	instance, err := h.getInstance(ctx, p.TenantID, id)
+	if err != nil {
+		return nil, err
 	}
-	httpx.JSON(w, http.StatusCreated, response)
+	result := h.instanceDTO(ctx, p.TenantID, instance, false)
+	result["slug"] = slug
+	out := map[string]any{"instance": result, "started": started, "boundAgentIds": agents, "boundSpaceIds": spaces}
+	if body.AuthMode == "oauth" {
+		out["authRequired"] = true
+		out["oauth"] = map[string]any{"ok": false, "needsByoClient": true, "error": "Install saved. Authorize this instance before starting."}
+	}
+	if startError != "" {
+		out["startError"] = startError
+	}
+	return out, nil
 }
+
 func uniqueStrings(values []string) []string {
 	seen := map[string]bool{}
 	out := []string{}
@@ -694,20 +823,46 @@ func uniqueStrings(values []string) []string {
 	return out
 }
 func (h *handler) provisionStdioMCP(ctx context.Context, tenant, instanceID string, body stdioImportBody) error {
-	nodeID := ""
-	if body.RuntimeNodeID != nil {
-		nodeID = *body.RuntimeNodeID
+	inst, err := h.getMCPInstance(ctx, tenant, instanceID)
+	if err != nil {
+		return err
 	}
-	if nodeID == "" && len(body.SpaceIDs) > 0 {
-		_ = h.deps.Gorm.WithContext(ctx).Raw(`SELECT COALESCE(runtime_node_id,'') AS runtime_node_id FROM spaces WHERE tenant_id=? AND id=?`, tenant, body.SpaceIDs[0]).Scan(&nodeID).Error
+	owner, err := h.mcpOwnerSpace(ctx, inst)
+	if err != nil {
+		return err
 	}
+	if err = h.requireSpaceInfrastructureAvailable(ctx, tenant, owner); err != nil {
+		return err
+	}
+	lease, err := h.acquireSpaceInfrastructure(ctx, tenant, owner)
+	if err != nil {
+		return err
+	}
+	defer lease.release()
+	return h.provisionStdioMCPWithLease(ctx, tenant, instanceID, body, owner, lease)
+}
+
+func (h *handler) provisionStdioMCPWithLease(ctx context.Context, tenant, instanceID string, body stdioImportBody, owner string, lease *workspaceLease) error {
+	if err := lease.check(ctx); err != nil {
+		return err
+	}
+	ctx = context.WithValue(ctx, workspaceRequestTargetKey{}, lease.Space)
+	exec, err := h.resolveServerComputer(ctx, tenant, owner)
+	if err != nil {
+		return err
+	}
+	nodeID := exec.nodeID
 	if nodeID == "" {
-		return errors.New("bind the space to a runtime node before starting stdio MCP")
+		return errors.New("bind the owning Space server computer to a runtime node before starting stdio MCP")
+	}
+	if body.RuntimeNodeID != nil && *body.RuntimeNodeID != "" && *body.RuntimeNodeID != nodeID {
+		return errors.New("stdio runtime node must match the owning Space server computer")
 	}
 	runner, err := h.hub.get(nodeID)
 	if err != nil {
 		return err
 	}
+	remote := h.executionRemote(runner, exec)
 	packageManager := strings.ToLower(strings.TrimSpace(body.PackageManager))
 	if packageManager == "" {
 		if body.Command == "docker" || body.Command == "podman" {
@@ -715,6 +870,9 @@ func (h *handler) provisionStdioMCP(ctx context.Context, tenant, instanceID stri
 		} else {
 			packageManager = "npm"
 		}
+	}
+	if exec.workspace != nil && packageManager == "oci" {
+		return errors.New("OCI stdio MCP is unavailable on managed disks because nested Docker writers are not tracked")
 	}
 	envName := map[string]string{"npm": "ZAKURA_STDIO_NODE_IMAGE", "pypi": "ZAKURA_STDIO_PYTHON_IMAGE", "oci": "ZAKURA_STDIO_OCI_IMAGE", "binary": "ZAKURA_STDIO_BINARY_IMAGE"}[packageManager]
 	if envName == "" {
@@ -733,27 +891,7 @@ func (h *handler) provisionStdioMCP(ctx context.Context, tenant, instanceID stri
 	if body.WorkingDir == "" {
 		body.WorkingDir = "/data"
 	}
-	var dataSpaceRow struct {
-		SpaceID string `gorm:"column:space_id"`
-	}
-	dataSpaceID := ""
-	if len(body.SpaceIDs) > 0 {
-		dataSpaceID = body.SpaceIDs[0]
-	}
-	if dataSpaceID == "" {
-		err = h.deps.Gorm.WithContext(ctx).
-			Table("agent_bindings b").
-			Select("b.space_id AS space_id").
-			Joins("JOIN spaces s ON s.id=b.space_id AND s.tenant_id=b.tenant_id").
-			Where("b.tenant_id = ? AND b.instance_id = ?", tenant, instanceID).
-			Order("b.created_at").
-			Limit(1).
-			Take(&dataSpaceRow).Error
-		if err != nil {
-			return errors.New("bind the stdio MCP instance to a space in the selected runtime node before starting")
-		}
-		dataSpaceID = dataSpaceRow.SpaceID
-	}
+	dataSpaceID := owner
 	dataPath := "/.zakura/components/" + instanceID
 	var nodeRow struct {
 		HostInfoJSON     string `gorm:"column:host_info_json"`
@@ -774,18 +912,24 @@ func (h *handler) provisionStdioMCP(ctx context.Context, tenant, instanceID stri
 	args, _ := json.Marshal(body.Args)
 	env["MCP_ARGS"] = string(args)
 	for key, value := range body.Env {
+		if strings.HasPrefix(key, "MCP_") || key == "DOCKER_HOST" {
+			return errors.New("stdio environment cannot override bridge control variables")
+		}
 		env[key] = value
 	}
 	var dataRoot struct {
 		Abs string `json:"abs"`
 	}
-	if err = runner.call(ctx, "host.fs.mkdir", map[string]any{"spaceId": dataSpaceID, "path": dataPath}, &dataRoot); err != nil {
-		return fmt.Errorf("prepare stdio data directory: %w", err)
+	var volumes []map[string]any
+	if exec.workspace == nil {
+		if err = remote.call(ctx, "host.fs.mkdir", map[string]any{"spaceId": dataSpaceID, "path": dataPath}, &dataRoot); err != nil {
+			return fmt.Errorf("prepare stdio data directory: %w", err)
+		}
+		if dataRoot.Abs == "" {
+			return errors.New("runner returned no stdio data directory")
+		}
+		volumes = []map[string]any{{"hostPath": dataRoot.Abs, "containerPath": "/data"}}
 	}
-	if dataRoot.Abs == "" {
-		return errors.New("runner returned no stdio data directory")
-	}
-	volumes := []map[string]any{{"hostPath": dataRoot.Abs, "containerPath": "/data"}}
 	if packageManager == "oci" {
 		platform, _ := host["platform"].(string)
 		dockerCap, _ := capabilities["docker"].(bool)
@@ -802,15 +946,31 @@ func (h *handler) provisionStdioMCP(ctx context.Context, tenant, instanceID stri
 			Protocol                string
 		} `json:"ports"`
 	}
-	err = runner.call(ctx, "docker.run", map[string]any{"name": "zakura-stdio-" + instanceID, "image": image, "command": []string{"/usr/local/bin/zakura-stdio-bridge"}, "env": env, "labels": map[string]string{"zakura.instance": instanceID, "zakura.purpose": "component"}, "ports": []map[string]any{{"containerPort": 3100, "protocol": "tcp"}}, "volumes": volumes, "workingDir": body.WorkingDir, "restart": "unless-stopped"}, &running)
-	if err != nil {
+	if err = lease.check(ctx); err != nil {
 		return err
 	}
-	cleanup := func() {
-		_ = runner.call(context.WithoutCancel(ctx), "docker.stop", map[string]any{"id": running.DockerID, "remove": true}, nil)
+	createParams := map[string]any{"name": "zakura-stdio-" + instanceID, "image": image, "command": []string{"/usr/local/bin/zakura-stdio-bridge"}, "env": env, "labels": map[string]string{"zakura.instance": instanceID, "zakura.purpose": "component", "zakura.space": owner, "zakura.computer": exec.computer.ID, "zakura.tenant": tenant}, "ports": []map[string]any{{"containerPort": 3100, "protocol": "tcp"}}, "volumes": volumes, "workingDir": body.WorkingDir, "restart": "unless-stopped"}
+	if exec.workspace != nil {
+		createParams["name"] = "zakura-stdio-" + h.store.id()
+		err = h.createWorkspaceSidecar(ctx, runner, exec, createParams, &running)
+	} else {
+		err = runner.call(ctx, "docker.create", createParams, &running)
+	}
+	if err != nil {
+		// A failed RPC may have created the process before its response was lost.
+		// Retain the durable intent until recovery observes the remote state.
+		return lease.uncertain(fmt.Errorf("create stdio bridge: %w", err))
 	}
 	if running.DockerID == "" {
-		return errors.New("runner returned no stdio bridge container ID")
+		return lease.uncertain(errors.New("runner returned no stdio bridge container ID"))
+	}
+	cleanup := func(cause error) error {
+		cleanupCtx, cancel := mcpCleanupContext(ctx)
+		defer cancel()
+		if stopErr := cleanupWorkspaceContainer(cleanupCtx, runner, remote, running.DockerID); stopErr != nil {
+			return lease.uncertain(fmt.Errorf("%w; stdio bridge cleanup failed: %v", cause, stopErr))
+		}
+		return cause
 	}
 	bridgeReady := false
 	var inspected struct {
@@ -820,12 +980,11 @@ func (h *handler) provisionStdioMCP(ctx context.Context, tenant, instanceID stri
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
-				cleanup()
-				return ctx.Err()
+				return cleanup(ctx.Err())
 			case <-time.After(250 * time.Millisecond):
 			}
 		}
-		if inspectErr := runner.call(ctx, "docker.inspect", map[string]any{"id": running.DockerID}, &inspected); inspectErr == nil && strings.EqualFold(inspected.Status, "running") {
+		if inspectErr := remote.call(ctx, "docker.inspect", map[string]any{"id": running.DockerID}, &inspected); inspectErr == nil && strings.EqualFold(inspected.Status, "running") {
 			bridgeReady = true
 			break
 		}
@@ -834,9 +993,8 @@ func (h *handler) provisionStdioMCP(ctx context.Context, tenant, instanceID stri
 		var logs struct {
 			Logs string `json:"logs"`
 		}
-		_ = runner.call(ctx, "docker.logs", map[string]any{"id": running.DockerID, "tail": 50}, &logs)
-		cleanup()
-		return fmt.Errorf("stdio bridge container did not stay running (image must contain /usr/local/bin/zakura-stdio-bridge and the requested runtime): %s", strings.TrimSpace(logs.Logs))
+		_ = remote.call(ctx, "docker.logs", map[string]any{"id": running.DockerID, "tail": 50}, &logs)
+		return cleanup(fmt.Errorf("stdio bridge container did not stay running (image must contain /usr/local/bin/zakura-stdio-bridge and the requested runtime): %s", strings.TrimSpace(logs.Logs)))
 	}
 	port := 0
 	for _, candidate := range running.Ports {
@@ -845,41 +1003,46 @@ func (h *handler) provisionStdioMCP(ctx context.Context, tenant, instanceID stri
 		}
 	}
 	if port == 0 {
-		cleanup()
-		return errors.New("runner did not publish stdio bridge port")
+		return cleanup(errors.New("runner did not publish stdio bridge port"))
 	}
 	hostname, _ := host["primaryIp"].(string)
 	if hostname == "" {
 		hostname, _ = host["hostname"].(string)
 	}
 	if hostname == "" {
-		cleanup()
-		return errors.New("runtime node did not report an address")
+		return cleanup(errors.New("runtime node did not report an address"))
 	}
 	endpoint := fmt.Sprintf("http://%s:%d/mcp", hostname, port)
 	if err = h.probeStdioBridge(ctx, endpoint); err != nil {
-		cleanup()
-		return fmt.Errorf("stdio bridge readiness failed: %w", err)
+		return cleanup(fmt.Errorf("stdio bridge readiness failed: %w", err))
 	}
 	envKeys := make([]string, 0, len(body.Env))
 	for key := range body.Env {
 		envKeys = append(envKeys, key)
 	}
 	slices.Sort(envKeys)
-	cfg, _ := json.Marshal(map[string]any{"url": endpoint, "runtimeNodeId": nodeID, "dataSpaceId": dataSpaceID, "dataPath": dataPath, "command": body.Command, "args": body.Args, "environmentVariables": envKeys, "workingDir": body.WorkingDir, "packageManager": packageManager, "bridgeImage": image})
+	config := map[string]any{"url": endpoint, "ownerSpaceId": owner, "serverComputerId": exec.computer.ID, "runtimeNodeId": nodeID, "dataSpaceId": dataSpaceID, "dataPath": dataPath, "command": body.Command, "args": body.Args, "environmentVariables": envKeys, "workingDir": body.WorkingDir, "packageManager": packageManager, "bridgeImage": image}
+	if exec.workspace != nil {
+		config["workspaceTarget"] = exec.workspace.Target
+	}
+	cfg, _ := json.Marshal(config)
 	now := h.store.now()
 	labels, _ := json.Marshal(map[string]string{"zakura.instance": instanceID, "zakura.purpose": "component"})
 	ports, _ := json.Marshal(running.Ports)
-	err = h.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err = lease.fenced(ctx, func(tx *gorm.DB) error {
 		if e := tx.Exec(`UPDATE component_instances SET config_json=?,status='running',last_error=NULL,updated_at=? WHERE id=? AND tenant_id=?`, string(cfg), runtimeTimeString(now), instanceID, tenant).Error; e != nil {
 			return e
 		}
-		return tx.Table("managed_containers").Create(map[string]any{"id": h.store.id(), "tenant_id": tenant, "instance_id": instanceID, "space_id": dataSpaceID, "docker_id": running.DockerID, "name": running.Name, "image": image, "purpose": "component", "status": "running", "labels_json": string(labels), "ports_json": string(ports), "runtime_node_id": nodeID, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
+		row := map[string]any{"id": h.store.id(), "tenant_id": tenant, "instance_id": instanceID, "space_id": dataSpaceID, "docker_id": running.DockerID, "name": running.Name, "image": image, "purpose": "component", "status": "running", "labels_json": string(labels), "ports_json": string(ports), "runtime_node_id": nodeID, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}
+		if exec.workspace != nil {
+			row["workspace_instance_id"] = exec.workspace.Target.InstanceID
+		}
+		return tx.Table("managed_containers").Create(row).Error
 	})
 	if err != nil {
-		cleanup()
+		return cleanup(err)
 	}
-	return err
+	return nil
 }
 
 func (h *handler) probeStdioBridge(ctx context.Context, endpoint string) error {
@@ -937,8 +1100,16 @@ func (h *handler) probeStdioBridge(ctx context.Context, endpoint string) error {
 	if err != nil {
 		return err
 	}
-	if initResp.StatusCode < 200 || initResp.StatusCode >= 300 || !bytes.Contains(initRaw, []byte(`"result"`)) {
-		return fmt.Errorf("initialize status %d: %s", initResp.StatusCode, string(initRaw))
+	if initResp.StatusCode < 200 || initResp.StatusCode >= 300 {
+		return fmt.Errorf("initialize status %d", initResp.StatusCode)
+	}
+	initResult, decodeErr := decodeMCPProbeResult(initRaw)
+	var initialized struct {
+		ProtocolVersion string         `json:"protocolVersion"`
+		Capabilities    map[string]any `json:"capabilities"`
+	}
+	if decodeErr != nil || json.Unmarshal(initResult, &initialized) != nil || initialized.ProtocolVersion == "" || initialized.Capabilities == nil {
+		return errors.New("invalid stdio MCP initialize result")
 	}
 	sid := initResp.Header.Get("Mcp-Session-Id")
 	if sid != "" {
@@ -962,8 +1133,15 @@ func (h *handler) probeStdioBridge(ctx context.Context, endpoint string) error {
 	if err != nil {
 		return err
 	}
-	if listResp.StatusCode < 200 || listResp.StatusCode >= 300 || !bytes.Contains(listRaw, []byte(`"result"`)) {
-		return fmt.Errorf("tools/list status %d: %s", listResp.StatusCode, string(listRaw))
+	if listResp.StatusCode < 200 || listResp.StatusCode >= 300 {
+		return fmt.Errorf("tools/list status %d", listResp.StatusCode)
+	}
+	listResult, decodeErr := decodeMCPProbeResult(listRaw)
+	var listed struct {
+		Tools json.RawMessage `json:"tools"`
+	}
+	if decodeErr != nil || json.Unmarshal(listResult, &listed) != nil || len(listed.Tools) == 0 || listed.Tools[0] != '[' {
+		return errors.New("invalid stdio MCP tools/list result")
 	}
 	return nil
 }
@@ -985,33 +1163,122 @@ func (h *handler) mcpOperation(w http.ResponseWriter, r *http.Request, method st
 		httpx.Error(w, 400, "invalid JSON")
 		return
 	}
-	id, _ := b["instanceId"].(string)
-	if id == "" {
-		httpx.Error(w, 400, "instanceId required")
-		return
-	}
-	inst, e := h.getMCPInstance(r.Context(), principal(r).TenantID, id)
+	p := principal(r)
+	space, _ := b["spaceId"].(string)
+	agent, _ := b["agentId"].(string)
+	space, agent, e = h.authorizeMCPScope(r.Context(), p, space, agent)
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
-	start := time.Now()
-	result, e := h.mcpRPC(r.Context(), inst, method, params(b))
-	status := "ok"
-	errText := ""
-	if e != nil {
-		status = "error"
-		errText = e.Error()
+	p = mcpScopedPrincipal(p, space, agent)
+	r = r.WithContext(httpx.WithPrincipal(r.Context(), p))
+	id, _ := b["instanceId"].(string)
+	callParams, _ := params(b).(map[string]any)
+	if callParams == nil {
+		httpx.Error(w, 400, "operation params required")
+		return
 	}
-	h.auditToolCall(r.Context(), principal(r), inst, method, b, status, errText, time.Since(start))
+	if method == "tools/call" {
+		name, _ := callParams["name"].(string)
+		if name == "" {
+			callParams["name"] = b["qualifiedName"]
+		}
+	}
+	if method == "resources/read" {
+		uri, _ := callParams["uri"].(string)
+		if strings.HasPrefix(uri, "zakura-mcp:") {
+			resourceID, upstream, err := decodeMCPResourceURI(uri)
+			if err != nil || id != "" && id != resourceID {
+				httpx.Error(w, 400, "invalid resource instance")
+				return
+			}
+			id = resourceID
+			callParams["uri"] = upstream
+		}
+	}
+	if id == "" && method == "tools/call" {
+		name, _ := callParams["name"].(string)
+		tools, err := h.exposedMCPTools(r, p, agent, space)
+		if err != nil {
+			statusErr(w, err)
+			return
+		}
+		for _, tool := range tools {
+			if name == tool.Name || name == "re_"+tool.Name || name == tool.Instance.ID+":"+tool.LocalName {
+				id = tool.Instance.ID
+				callParams["name"] = tool.LocalName
+				break
+			}
+		}
+	}
+	if id == "" {
+		httpx.Error(w, 400, "instanceId required")
+		return
+	}
+	inst, e := h.accessibleMCPInstance(r, p, space, id)
+	if e != nil {
+		statusErr(w, e)
+		return
+	}
+	if method == "tools/call" || method == "prompts/get" {
+		name, _ := callParams["name"].(string)
+		callParams["name"] = localMCPName(inst, name)
+	}
+	if method == "completion/complete" {
+		ref, _ := callParams["ref"].(map[string]any)
+		if ref == nil {
+			httpx.Error(w, 400, "completion ref required")
+			return
+		}
+		if name, ok := ref["name"].(string); ok {
+			ref["name"] = localMCPName(inst, name)
+		}
+		if uri, ok := ref["uri"].(string); ok && strings.HasPrefix(uri, "zakura-mcp:") {
+			resourceID, upstream, err := decodeMCPResourceURI(uri)
+			if err != nil || resourceID != inst.ID {
+				httpx.Error(w, 400, "invalid completion resource")
+				return
+			}
+			ref["uri"] = upstream
+		}
+	}
+	result, e := h.authorizedMCPRPC(r, p, space, inst, method, callParams)
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
 	var v any
 	_ = json.Unmarshal(result, &v)
-	httpx.JSON(w, 200, map[string]any{"result": v})
+	httpx.JSON(w, 200, map[string]any{"ok": true, "result": v})
 }
+func (h *handler) authorizedMCPRPC(r *http.Request, p httpx.Principal, space string, inst mcpInstance, method string, params map[string]any) (json.RawMessage, error) {
+	start := time.Now()
+	policies, e := h.effectiveMCPPolicies(r.Context(), p.TenantID, p.AgentID, space)
+	policyMethod, name := mcpOperationName(method, params)
+	if policyMethod == "tools/call" {
+		cfg := map[string]any{}
+		_ = json.Unmarshal(inst.Config, &cfg)
+		if toolExposureOf(cfg, name) == "hidden" {
+			e = ErrNotFound
+		}
+	}
+	if e == nil && !policies.operationAllowed(inst, policyMethod, name) {
+		e = ErrNotFound
+	}
+	var result json.RawMessage
+	if e == nil {
+		result, e = h.mcpRPC(r.Context(), inst, method, params)
+	}
+	status, errText := "ok", ""
+	if e != nil {
+		status = "error"
+		errText = e.Error()
+	}
+	h.auditToolCall(r.Context(), mcpScopedPrincipal(p, space, p.AgentID), inst, method, params, status, errText, time.Since(start))
+	return result, e
+}
+
 func (h *handler) auditToolCall(ctx context.Context, p httpx.Principal, inst mcpInstance, method string, args map[string]any, status, errText string, d time.Duration) {
 	raw, _ := json.Marshal(args)
 	result := ""
@@ -1019,7 +1286,7 @@ func (h *handler) auditToolCall(ctx context.Context, p httpx.Principal, inst mcp
 	if isError {
 		result = errText
 	}
-	_ = h.deps.Gorm.WithContext(ctx).Table("tool_call_logs").Create(map[string]any{"id": h.store.id(), "tenant_id": p.TenantID, "api_key_id": nil, "agent_id": inst.AgentID, "qualified_name": inst.Ref + ":" + method, "local_name": method, "provider_id": inst.Ref, "instance_id": inst.ID, "args_json": string(raw), "result_json": result, "is_error": isError, "duration_ms": d.Milliseconds(), "created_at": runtimeTimeString(h.store.now())}).Error
+	_ = h.deps.Gorm.WithContext(ctx).Table("tool_call_logs").Create(map[string]any{"id": h.store.id(), "tenant_id": p.TenantID, "api_key_id": nullString(p.APIKeyID), "actor_user_id": nullString(p.UserID), "space_id": nullString(p.SpaceID), "agent_id": nullString(p.AgentID), "qualified_name": inst.Ref + ":" + method, "local_name": method, "provider_id": inst.Ref, "instance_id": nullString(inst.ID), "args_json": string(raw), "result_json": result, "is_error": isError, "duration_ms": d.Milliseconds(), "created_at": runtimeTimeString(h.store.now())}).Error
 }
 
 func (h *handler) listMCPSources(w http.ResponseWriter, r *http.Request) {
@@ -1130,12 +1397,24 @@ func (h *handler) getMCPStoreEntry(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) installMCPStoreEntry(w http.ResponseWriter, r *http.Request) {
 	var b struct {
-		ID      string          `json:"id"`
-		AgentID *string         `json:"agentId"`
-		Config  json.RawMessage `json:"config"`
+		ID           string            `json:"id"`
+		Name         string            `json:"name"`
+		Store        string            `json:"store"`
+		Prefer       string            `json:"prefer"`
+		RemoteURL    string            `json:"remoteUrl"`
+		PackageIndex *int              `json:"packageIndex"`
+		DisplayName  string            `json:"displayName"`
+		SpaceID      *string           `json:"spaceId"`
+		SpaceIDs     []string          `json:"spaceIds"`
+		AgentID      *string           `json:"agentId"`
+		AgentIDs     []string          `json:"agentIds"`
+		All          bool              `json:"all"`
+		Start        *bool             `json:"start"`
+		Config       json.RawMessage   `json:"config"`
+		Env          map[string]string `json:"env"`
 	}
-	if httpx.DecodeJSON(r, &b) != nil || b.ID == "" {
-		httpx.Error(w, 400, "id required")
+	if httpx.DecodeJSON(r, &b) != nil || b.ID == "" && b.Name == "" {
+		httpx.Error(w, 400, "id or name required")
 		return
 	}
 	var entry struct {
@@ -1143,30 +1422,64 @@ func (h *handler) installMCPStoreEntry(w http.ResponseWriter, r *http.Request) {
 		Ref      string `gorm:"column:ref"`
 		MetaJSON string `gorm:"column:meta_json"`
 	}
-	e := h.deps.Gorm.WithContext(r.Context()).Table("store_catalog_entries").Select("name,ref,meta_json").Where("(tenant_id IS NULL OR tenant_id=?) AND id=?", principal(r).TenantID, b.ID).Take(&entry).Error
+	query := h.deps.Gorm.WithContext(r.Context()).Table("store_catalog_entries").Select("name,ref,meta_json").Where("(tenant_id IS NULL OR tenant_id=?) AND kind='mcp'", principal(r).TenantID)
+	if b.ID != "" {
+		query = query.Where("id=?", b.ID)
+	} else {
+		query = query.Where("name=?", b.Name)
+		if b.Store != "" {
+			query = query.Where("source_id=?", b.Store)
+		}
+	}
+	e := query.Take(&entry).Error
 	if errors.Is(e, gorm.ErrRecordNotFound) {
-		statusErr(w, ErrNotFound)
-		return
+		e = ErrNotFound
 	}
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
-	cfg := b.Config
-	if len(cfg) == 0 {
-		cfg = json.RawMessage(entry.MetaJSON)
-	}
-	now := h.store.now()
-	id := h.store.id()
-	configStored, secretStored, protectErr := h.protectMCPConfig(id, cfg)
-	if protectErr != nil {
-		statusErr(w, protectErr)
+	cfg := map[string]any{}
+	if json.Unmarshal([]byte(entry.MetaJSON), &cfg) != nil {
+		httpx.Error(w, 400, "invalid store entry")
 		return
 	}
-	e = h.deps.Gorm.WithContext(r.Context()).Table("component_instances").Create(map[string]any{"id": id, "tenant_id": principal(r).TenantID, "agent_id": b.AgentID, "component_type": "mcp", "component_ref": entry.Ref, "name": entry.Name, "config_json": configStored, "secret_json": secretStored, "status": "ready", "last_error": nil, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
+	if len(b.Config) > 0 {
+		var overrides map[string]any
+		if json.Unmarshal(b.Config, &overrides) != nil {
+			httpx.Error(w, 400, "invalid config")
+			return
+		}
+		for k, v := range overrides {
+			cfg[k] = v
+		}
+	}
+	body, e := mcpStoreInstallBody(cfg, b.Prefer, b.RemoteURL, b.PackageIndex)
+	if e != nil {
+		httpx.Error(w, 400, e.Error())
+		return
+	}
+	body.Name = entry.Name
+	if b.DisplayName != "" {
+		body.Name = b.DisplayName
+	}
+	body.Slug = entry.Ref
+	body.SpaceID = b.SpaceID
+	body.SpaceIDs = b.SpaceIDs
+	body.AgentID = b.AgentID
+	body.AgentIDs = b.AgentIDs
+	body.All = b.All
+	body.Start = b.Start
+	if body.Env == nil {
+		body.Env = map[string]string{}
+	}
+	for k, v := range b.Env {
+		body.Env[k] = v
+	}
+	result, e := h.installMCP(r.Context(), principal(r), body)
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
-	httpx.JSON(w, 201, map[string]any{"instance": map[string]any{"id": id, "name": entry.Name, "status": "ready"}})
+	httpx.JSON(w, 201, result)
 }

@@ -82,6 +82,18 @@ export default function AgentSkillsPage() {
   }
 
   async function remove(skill: AgentSkillRecord) {
+    setBusy(skill.name);
+    try {
+      await setAgentSkillEnabled(id, skill.name, false);
+      await load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function legacyRemove(skill: AgentSkillRecord) {
     if (
       !(await confirm({
         title: `卸载 ${skill.name}？`,
@@ -143,14 +155,15 @@ export default function AgentSkillsPage() {
               {enabled}/{skills.length} 启用
             </p>
           )}
+          <Link href={`/dashboard/spaces/${agent?.spaceId}/settings/skills`} className="text-xs text-muted-foreground hover:text-foreground">管理 Space 安装</Link>
         </div>
         <Button
           size="sm"
           nativeButton={false}
-          render={<Link href={`/dashboard/agents/${id}/skills/add`} />}
+          render={<Link href={`/dashboard/spaces/${agent?.spaceId}/settings/skills`} />}
         >
           <Plus className="size-3.5" />
-          添加
+          管理安装
         </Button>
       </div>
 
@@ -220,15 +233,15 @@ export default function AgentSkillsPage() {
                     )}
                   </span>
                   <span className="block truncate text-xs text-muted-foreground">
-                    {skill.status === "error"
-                      ? skill.error ?? "安装失败"
+                    {skill.status !== "installed"
+                      ? skill.error ?? "安装冲突"
                       : skill.description}
                   </span>
                 </button>
 
                 <Switch
                   checked={skill.enabled}
-                  disabled={busy === skill.name}
+                  disabled={busy === skill.name || skill.status === "conflict"}
                   onCheckedChange={(v) => void toggle(skill, v)}
                 />
                 <button
@@ -239,15 +252,15 @@ export default function AgentSkillsPage() {
                 >
                   <FileText className="size-3.5" />
                 </button>
-                <button
+                {skill.enabled ? <button
                   type="button"
-                  title="卸载"
+                  title="停用"
                   disabled={busy === skill.name}
                   onClick={() => void remove(skill)}
-                  className="shrink-0 p-1 text-muted-foreground hover:text-destructive disabled:opacity-50"
+                  className="shrink-0 p-1 text-muted-foreground hover:text-foreground disabled:opacity-50"
                 >
                   <Trash2 className="size-3.5" />
-                </button>
+                </button> : null}
               </div>
             ))}
           </div>

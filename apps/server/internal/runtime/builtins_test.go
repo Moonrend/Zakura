@@ -55,7 +55,7 @@ func TestBuiltinSkillDefinitions(t *testing.T) {
 		if !builtinVersionPattern.MatchString(d.Version()) {
 			t.Fatalf("bad version %q for %s", d.Version(), d.Name)
 		}
-		manifest := d.Manifest()
+		manifest := strings.ReplaceAll(d.Manifest(), "\r\n", "\n")
 		if strings.Contains(manifest, "${") {
 			t.Fatalf("unresolved placeholder in %s", d.Name)
 		}
@@ -129,6 +129,7 @@ func TestBuiltinSkillSyncAndAutoUpdate(t *testing.T) {
 }
 
 func TestInstallRecommendedBuiltinSkills(t *testing.T) {
+	t.Setenv("ZAKURA_WORKSPACE_ROOT", t.TempDir())
 	d := testDeps(t)
 	seedTenant(t, d, "tenant")
 	store := NewStore(d)
@@ -152,6 +153,7 @@ func TestInstallRecommendedBuiltinSkills(t *testing.T) {
 }
 
 func TestInstallBuiltinSkillViaAPI(t *testing.T) {
+	t.Setenv("ZAKURA_WORKSPACE_ROOT", t.TempDir())
 	d := testDeps(t)
 	token := seedTenant(t, d, "tenant")
 	router := chi.NewRouter()
@@ -159,7 +161,7 @@ func TestInstallBuiltinSkillViaAPI(t *testing.T) {
 	server := httptest.NewServer(router)
 	defer server.Close()
 	client := server.Client()
-	code, out := doJSON(t, client, "POST", server.URL+"/api/spaces", token, map[string]any{"name": "S", "workspaceKind": "local"})
+	code, out := doJSON(t, client, "POST", server.URL+"/api/spaces", token, map[string]any{"name": "S"})
 	if code != 201 {
 		t.Fatalf("space: %d %#v", code, out)
 	}
@@ -168,7 +170,7 @@ func TestInstallBuiltinSkillViaAPI(t *testing.T) {
 		t.Fatalf("agent: %d %#v", code, out)
 	}
 	code, out = doJSON(t, client, "POST", server.URL+"/api/skills/install", token, map[string]any{"source": "builtin:find-skills", "all": true})
-	if code != 200 {
+	if code != 201 {
 		t.Fatalf("install builtin: %d %#v", code, out)
 	}
 	skills, _ := out["skills"].([]any)

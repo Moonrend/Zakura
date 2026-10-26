@@ -264,27 +264,34 @@ func (s *Service) consent(w http.ResponseWriter, r *http.Request) {
 	code := "zac_" + mustToken(32)
 	h := sha256.Sum256([]byte(code))
 	var agentID *string
-	slug := strings.TrimSpace(b.AgentSlug)
-	if slug == "" && b.Resource != "" {
-		if resourceURL, parseErr := url.Parse(b.Resource); parseErr == nil {
-			parts := strings.Split(strings.Trim(resourceURL.Path, "/"), "/")
-			if len(parts) >= 3 && parts[0] == "mcp" && parts[1] == "agents" {
-				slug, _ = url.PathUnescape(parts[2])
-			}
+	if slug := strings.TrimSpace(b.AgentSlug); slug != "" {
+		var resolved string
+		if queryErr := s.gdb(r.Context()).Table("agents").Select("id").Where("tenant_id = ? AND slug = ?", p.TenantID, slug).Take(&resolved).Error; queryErr != nil {
+			oauthError(w, 400, "invalid_target", "unknown Agent resource")
+			return
+		}
+		agentID = &resolved
+	}
+	requestedAgent := ""
+	if agentID != nil {
+		requestedAgent = *agentID
+	}
+	binding, err := httpx.ResolveOAuthMCPResource(r.Context(), s.deps, s.deps.DB, p.TenantID, strings.TrimSpace(b.Resource), requestedAgent)
+	if err != nil {
+		oauthError(w, 400, "invalid_target", err.Error())
+		return
+	}
+	if binding.SpaceID != "" {
+		if err = httpx.AuthorizeResource(r.Context(), s.deps, p, binding.SpaceID, binding.AgentID); err != nil {
+			oauthError(w, 403, "access_denied", "resource not authorized")
+			return
 		}
 	}
-	if slug != "" {
-		var resolved string
-		if queryErr := s.gdb(r.Context()).Table("agents").Select("id").Where("tenant_id = ? AND slug = ?", p.TenantID, slug).Take(&resolved).Error; queryErr == nil {
-			agentID = &resolved
-		}
+	if binding.AgentID != "" {
+		agentID = &binding.AgentID
 	}
 	scope := normalizeOAuthScope(defaultString(b.Scope, c.Scope), c.ID)
-	var resourcePtr *string
-	resource := strings.TrimSpace(b.Resource)
-	if resource != "" {
-		resourcePtr = &resource
-	}
+	resourcePtr := oauthStoredResource(binding)
 	challenge := b.CodeChallenge
 	methodS256 := "S256"
 	codeID := s.deps.NewID()

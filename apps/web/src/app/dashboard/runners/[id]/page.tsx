@@ -748,7 +748,7 @@ export default function RunnerDetailPage() {
             variant="destructive"
             size="sm"
             onClick={async () => {
-              if (!(await confirm({ title: `删除 Runner「${node.name}」？`, description: "将解绑相关 Agent 并清理节点记录。远程文件和容器保留；进行中的迁移需先结束。", confirmLabel: "删除" }))) {
+              if (!(await confirm({ title: `删除 Runner「${node.name}」？`, description: "撤销节点连接并停止同步待清理任务。远端文件和容器不会被自动删除，保留盘不可再用于重建。请先删除或迁移当前工作区。", confirmLabel: "删除" }))) {
                 return;
               }
               try {

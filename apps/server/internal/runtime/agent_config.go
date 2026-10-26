@@ -14,7 +14,17 @@ import (
 // updateAgentConfig is for internal field-scoped settings saves. UpdateAgent
 // retains the public API's deliberate whole-config replacement semantics.
 func (s *Store) updateAgentConfig(ctx context.Context, tenant, id string, columns map[string]any, mutate func(map[string]any) error) (Agent, error) {
-	_, err := agentconfig.Update(ctx, s.deps.Gorm, tenant, id, runtimeTimeString(s.now()), columns, mutate)
+	_, err := agentconfig.Update(ctx, s.deps.Gorm, tenant, id, runtimeTimeString(s.now()), columns, func(cfg map[string]any) error {
+		if err := protectAgentApprovals(s.deps.Secret, tenant, id, cfg); err != nil {
+			return err
+		}
+		encrypted, _ := approvalGate(cfg, false)["jevMigrationEnc"].(string)
+		if err := mutate(cfg); err != nil {
+			return err
+		}
+		preserveApprovalMigration(cfg, encrypted)
+		return protectAgentApprovals(s.deps.Secret, tenant, id, cfg)
+	})
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		err = ErrNotFound
 	} else if errors.Is(err, agentconfig.ErrConflict) {

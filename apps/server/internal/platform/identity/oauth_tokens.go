@@ -109,9 +109,11 @@ func (s *Service) exchangeCode(w http.ResponseWriter, r *http.Request, c oauthCl
 		if n != 1 {
 			return errors.New("authorization code already used")
 		}
-		if requested := strings.TrimSpace(v.Get("resource")); requested != "" {
-			resource = sql.NullString{String: requested, Valid: true}
+		binding, e := s.oauthGrantBinding(r.Context(), tx, tenantID, agentID.String, resource.String, strings.TrimSpace(v.Get("resource")))
+		if e != nil {
+			return e
 		}
+		agentID, resource = oauthBindingValues(binding)
 		out, issueErr = s.issueOAuthTokensTx(r.Context(), tx, key, c.ID, userID, tenantID, nullString(agentID), scope, nullString(resource), "")
 		return issueErr
 	})
@@ -149,9 +151,11 @@ func (s *Service) exchangeRefresh(w http.ResponseWriter, r *http.Request, c oaut
 		if n != 1 {
 			return errors.New("refresh token already used")
 		}
-		if requested := strings.TrimSpace(v.Get("resource")); requested != "" {
-			resource = sql.NullString{String: requested, Valid: true}
+		binding, e := s.oauthGrantBinding(r.Context(), tx, tenantID, agentID.String, resource.String, strings.TrimSpace(v.Get("resource")))
+		if e != nil {
+			return e
 		}
+		agentID, resource = oauthBindingValues(binding)
 		out, issueErr = s.issueOAuthTokensTx(r.Context(), tx, key, c.ID, userID, tenantID, nullString(agentID), scope, nullString(resource), family)
 		return issueErr
 	})
@@ -170,12 +174,21 @@ func (s *Service) issueOAuthTokensTx(ctx context.Context, tx *sql.Tx, key *oauth
 	if tx.QueryRowContext(ctx, s.q(`SELECT u.email,COALESCE(u.name,''),m.role FROM users u JOIN tenant_memberships m ON m.user_id=u.id JOIN tenants t ON t.id=m.tenant_id WHERE u.id=? AND m.tenant_id=? AND u.status='active' AND m.status='active' AND t.status='active'`), userID, tenantID).Scan(&email, &name, &role) != nil {
 		return nil, errors.New("inactive account")
 	}
+	agent, _ := agentID.(string)
+	stored, _ := resource.(string)
+	binding, err := s.oauthGrantBinding(ctx, tx, tenantID, agent, stored, "")
+	if err != nil {
+		return nil, err
+	}
+	agentID = nullIfEmpty(binding.AgentID)
+	storedResource := oauthStoredResource(binding)
+	resource = nullIfEmpty(binding.Resource)
 	now := s.deps.Clock().UTC()
 	audience := any(clientID)
 	if resource != nil && resource != "" {
 		audience = resource
 	}
-	claims := jwt.MapClaims{"iss": s.deps.PublicURL, "sub": userID, "aud": audience, "tid": tenantID, "cid": clientID, "aid": agentID, "resource": resource, "scope": scope, "iat": now.Unix(), "exp": now.Add(time.Hour).Unix(), "jti": s.deps.NewID()}
+	claims := jwt.MapClaims{"iss": s.deps.PublicURL, "sub": userID, "aud": audience, "tid": tenantID, "cid": clientID, "aid": agentID, "spaceId": nullIfEmpty(binding.SpaceID), "resource": resource, "scope": scope, "iat": now.Unix(), "exp": now.Add(time.Hour).Unix(), "jti": s.deps.NewID()}
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 	token.Header["kid"] = key.Kid
 	token.Header["typ"] = "at+jwt"
@@ -188,7 +201,7 @@ func (s *Service) issueOAuthTokensTx(ctx context.Context, tx *sql.Tx, key *oauth
 	if family == "" {
 		family = s.deps.NewID()
 	}
-	_, err = tx.ExecContext(ctx, s.q(`INSERT INTO oauth_refresh_tokens(id,family_id,token_hash,client_id,user_id,tenant_id,agent_id,scope,resource,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`), s.deps.NewID(), family, hex.EncodeToString(h[:]), clientID, userID, tenantID, agentID, scope, resource, now.Add(30*24*time.Hour).Format(time.RFC3339Nano), s.now())
+	_, err = tx.ExecContext(ctx, s.q(`INSERT INTO oauth_refresh_tokens(id,family_id,token_hash,client_id,user_id,tenant_id,agent_id,scope,resource,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`), s.deps.NewID(), family, hex.EncodeToString(h[:]), clientID, userID, tenantID, agentID, scope, nullableString(storedResource), now.Add(30*24*time.Hour).Format(time.RFC3339Nano), s.now())
 	if err != nil {
 		return nil, err
 	}

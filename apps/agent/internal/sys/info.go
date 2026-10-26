@@ -38,6 +38,7 @@ type InfoResult struct {
 	GOOS         string         `json:"goos"`
 	GOARCH       string         `json:"goarch"`
 	SHA256       string         `json:"sha256,omitempty"`
+	StreamOwner  string         `json:"streamOwner,omitempty"`
 }
 
 // VersionInfo does not invoke Docker, scan disks or probe the network.
@@ -67,8 +68,14 @@ func Collect(kind, storageRoot string) InfoResult {
 		Capabilities: map[string]any{
 			"host":   true,
 			"docker": d.OK,
-			// Windows 走管道伪终端（见 pty_windows.go），三端都有交互壳。
-			"pty": true,
+			// Windows and Unix both provide a real interactive terminal.
+			"pty":                          true,
+			"privateAtomicFS":              true,
+			"boundedExecOutput":            true,
+			"boundedDockerExecInputOutput": true,
+			"filesystemNoFollowStat":       true,
+			"filesystemWorkspaceMigration": true,
+			"dockerCreateReceipts":         true,
 		},
 		HostInfo:    hi,
 		StorageRoot: storageRoot,

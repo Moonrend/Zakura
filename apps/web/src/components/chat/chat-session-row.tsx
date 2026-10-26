@@ -177,7 +177,7 @@ export function ChatSessionRow({
               <MoreHorizontal className="h-3.5 w-3.5" />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="min-w-28">
-              {s.origin?.channel === "openai-gateway" ? (
+              {s.origin?.channel === "openai-gateway" && !agentId?.startsWith("gateway:") ? (
                 <DropdownMenuItem onClick={() => void onFork(s.id)}>
                   <GitFork />
                   Fork 后续聊
@@ -198,7 +198,7 @@ export function ChatSessionRow({
                 重命名
               </DropdownMenuItem>
               <DropdownMenuSub>
-                <DropdownMenuSubTrigger>移到项目</DropdownMenuSubTrigger>
+                <DropdownMenuSubTrigger disabled={agentId?.startsWith("gateway:")}>移到项目</DropdownMenuSubTrigger>
                 <DropdownMenuSubContent className="min-w-32">
                   {projects.map((p) => (
                     <DropdownMenuItem key={p.slug} onClick={() => void onMove(s.id, p.slug)}>

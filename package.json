@@ -17,7 +17,9 @@
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
     "setup": "pnpm install",
-    "acp:sync-registry": "node scripts/acp-sync-registry.mjs"
+    "acp:sync-registry": "node scripts/acp-sync-registry.mjs",
+    "ui:catalog": "pnpm --filter @zakura/shared exec tsx ../../scripts/generate-ui-catalog.ts",
+    "ui:catalog:check": "pnpm ui:catalog --check"
   },
   "engines": {
     "node": ">=20"

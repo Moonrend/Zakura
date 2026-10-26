@@ -13,6 +13,35 @@ import (
 	"time"
 )
 
+func TestSafeProviderURLJoinsV1(t *testing.T) {
+	cases := []struct {
+		name     string
+		base     string
+		endpoint string
+		want     string
+	}{
+		{"base with v1 and models", "https://api.example.com/v1", "/v1/models", "https://api.example.com/v1/models"},
+		{"base with v1 trailing slash", "https://api.example.com/v1/", "/v1/models", "https://api.example.com/v1/models"},
+		{"base without v1", "https://api.example.com", "/v1/models", "https://api.example.com/v1/models"},
+		{"anthropic messages on v1 base", "https://api.anthropic.com/v1", "/v1/messages", "https://api.anthropic.com/v1/messages"},
+		{"nested prefix path v1", "https://gateway.example.com/openai/v1", "/v1/chat/completions", "https://gateway.example.com/openai/v1/chat/completions"},
+		{"nested prefix without v1", "https://gateway.example.com/openai", "/v1/chat/completions", "https://gateway.example.com/openai/v1/chat/completions"},
+		{"non v1 endpoint unchanged", "https://api.example.com/v1", "/health", "https://api.example.com/v1/health"},
+		{"empty endpoint keeps base path", "https://api.example.com/v1", "", "https://api.example.com/v1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u, e := safeProviderURL(tc.base, tc.endpoint)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if u.String() != tc.want {
+				t.Fatalf("safeProviderURL(%q, %q) = %q want %q", tc.base, tc.endpoint, u.String(), tc.want)
+			}
+		})
+	}
+}
+
 func TestGatewayFailoverAndStreamingCommitBarrier(t *testing.T) {
 	d := testDeps(t)
 	seedTenant(t, d, "tenant")

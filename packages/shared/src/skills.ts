@@ -3,7 +3,8 @@
  *
  * 一个 Skill = 一个含 `SKILL.md` 的目录：YAML frontmatter（name/description 必填）
  * + Markdown 正文 + 可选捆绑资源（scripts/ references/ assets/）。
- * 安装后写入 Agent 工作区 `/skills/<name>/`，既能被模型按需读取，
+ * 安装后写入 Space 服务器工作区 `/skills/<name>/`。同一 Space 每个名字只有一个
+ * 已安装版本，Agent 仅保存启用引用，不独立复制技能文件。
  * 也能经 MCP（list_skills / read_skill）被外部客户端调用。
  */
 
@@ -262,9 +263,15 @@ export interface SkillRecord {
   autoUpdate?: boolean;
   createdAt: string;
   updatedAt: string;
+  /** Canonical Space installation state, when returned by a Space endpoint. */
+  spaceId?: string;
+  installationId?: string;
+  revision?: string;
+  status?: "installed" | "conflict";
+  error?: string | null;
 }
 
-export type AgentSkillStatus = "installed" | "error";
+export type AgentSkillStatus = "installed" | "error" | "conflict";
 
 /** 单个 Agent 上的技能安装记录 */
 export interface AgentSkillRecord {

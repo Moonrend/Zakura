@@ -31,17 +31,34 @@ const (
 	RestrictedCommands Capability = "restricted_commands"
 )
 
+// Role separates a Space's own computer from the computers attached to it.
+// Exactly one RoleServer computer exists per Space (a partial unique index
+// enforces it). It IS the Space workspace: its runtime node, workspace kind and
+// capabilities are read from the Space row, never from a stale copy, and it has
+// no computer_runtimes rows because the workspace lifecycle owns its container.
+type Role string
+
+const (
+	RoleServer   Role = "server"
+	RoleAttached Role = "attached"
+)
+
 type Computer struct {
 	ID                 string       `json:"id"`
 	TenantID           string       `json:"-"`
 	SpaceID            string       `json:"spaceId"`
 	Name               string       `json:"name"`
 	Provider           Provider     `json:"provider"`
+	Role               Role         `json:"role"`
 	RuntimeNodeID      string       `json:"runtimeNodeId,omitempty"`
 	SecretRef          string       `json:"-"`
 	Capabilities       []Capability `json:"capabilities"`
 	IdleSeconds        int          `json:"idleSeconds"`
 	MaxLifetimeSeconds int          `json:"maxLifetimeSeconds"`
+	// WorkspaceKind is the server computer's workspace transport: "container",
+	// "host", or "local" when the Space has no runtime node. Attached computers
+	// leave it empty.
+	WorkspaceKind string `json:"workspaceKind,omitempty"`
 }
 
 func (c Computer) Has(cap Capability) bool {
@@ -52,7 +69,17 @@ func (c Computer) Has(cap Capability) bool {
 	}
 	return false
 }
+
+// IsServer reports whether c is its Space's server computer (the workspace).
+func (c Computer) IsServer() bool { return c.Role == RoleServer }
+
+// SupportsACP reports whether ACP adapters may run on c. The server computer
+// hosts them through its workspace once the Space has a runtime node; an
+// attached server-provider computer needs Docker for its sidecar container.
 func (c Computer) SupportsACP() bool {
+	if c.IsServer() {
+		return c.RuntimeNodeID != ""
+	}
 	return c.Provider == Server && c.RuntimeNodeID != "" && c.Has(Docker)
 }
 func (c Computer) SessionScoped() bool { return c.Provider == Temporary || c.Provider == E2B }
@@ -69,9 +96,19 @@ func (c Computer) Validate() error {
 	if c.ID == "" || c.TenantID == "" || c.SpaceID == "" || c.Name == "" {
 		return errors.New("computer identity is incomplete")
 	}
+	switch c.Role {
+	case RoleServer:
+		if c.Provider != Server {
+			return errors.New("a space server computer must use the server provider")
+		}
+	case "", RoleAttached:
+	default:
+		return errors.New("unsupported computer role")
+	}
 	switch c.Provider {
 	case Server, RemoteAgent:
-		if c.RuntimeNodeID == "" {
+		// The server computer follows its Space, which may not have a node yet.
+		if c.RuntimeNodeID == "" && !c.IsServer() {
 			return errors.New("agent computer requires a runtime node")
 		}
 	case Temporary, E2B, SSH, Railway:
@@ -128,9 +165,20 @@ type Runtime struct {
 	Incarnation       string
 	CreateOperationID string
 	ExternalID        string
-	State             State
-	ExpiresAt         time.Time
-	IdleDeadline      time.Time
+	// RootPath is the computer's workspace root on its runtime node (server
+	// provider only). Empty for providers without a node-hosted directory.
+	RootPath string
+	// AccessTokenEnc is provider-issued access material (E2B envd token) as a
+	// sealed computer-v1 envelope bound to the computer identity as AAD. Empty
+	// when the provider issues none; it is an internal field, never JSON-exposed.
+	AccessTokenEnc string
+	// ManifestJSON is the provider-issued manifest (Railway box identity, preview
+	// URL, claim link, deadline) kept verbatim for display. Empty or "{}" when the
+	// provider issued none. It never drives execution.
+	ManifestJSON string
+	State        State
+	ExpiresAt    time.Time
+	IdleDeadline time.Time
 }
 
 type Target struct {

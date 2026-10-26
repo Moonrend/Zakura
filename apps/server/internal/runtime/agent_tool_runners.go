@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/Moonrend/Zakura/apps/server/internal/computers"
 )
 
 const (
@@ -41,6 +43,101 @@ func builtinJSON(out any) (json.RawMessage, error) {
 		return nil, err
 	}
 	return raw, nil
+}
+
+// fsReadWindow resolves the bounded line window an fs_read call asks for.
+func fsReadWindow(args map[string]any) (offset, limit int) {
+	offset = builtinIntArg(args, "offset", 0)
+	if offset < 0 {
+		offset = 0
+	}
+	limit = builtinIntArg(args, "limit", agentFSReadDefaultBytes)
+	if limit < 1 {
+		limit = agentFSReadDefaultBytes
+	}
+	if limit > agentFSReadMaxBytes {
+		limit = agentFSReadMaxBytes
+	}
+	return offset, limit
+}
+
+// fsReadContent slices raw file bytes into the fs_read result shape: whole lines
+// from offset, truncated at the byte limit on a line boundary.
+func fsReadContent(resolved string, raw []byte, offset, limit int) (json.RawMessage, error) {
+	lines := strings.Split(string(raw), "\n")
+	if offset > 0 {
+		if offset >= len(lines) {
+			lines = nil
+		} else {
+			lines = lines[offset:]
+		}
+	}
+	content := strings.Join(lines, "\n")
+	if len(content) > limit {
+		content = content[:limit]
+		if idx := strings.LastIndexByte(content, '\n'); idx >= 0 {
+			content = content[:idx]
+		}
+	}
+	return builtinJSON(map[string]any{"path": resolved, "content": content, "size": len(content)})
+}
+
+// pinnedComputerFiles reports the provider file transport for a run pinned to a
+// files-capable E2B, SSH or Railway computer. Those channels do not run through
+// the legacy runner workspace, so they are handled before remoteWorkspace.
+func (h *handler) pinnedComputerFiles(ctx context.Context) (*resolvedExecution, bool) {
+	exec := pinnedExecution(ctx)
+	if exec == nil || exec.legacy || !exec.computer.Has(computers.Files) {
+		return nil, false
+	}
+	switch exec.computer.Provider {
+	case computers.E2B, computers.SSH, computers.Railway:
+		return exec, true
+	}
+	return nil, false
+}
+
+func (h *handler) computerFiles(ctx context.Context, exec *resolvedExecution, op string, args map[string]any) (json.RawMessage, error) {
+	if exec.computer.Provider == computers.E2B {
+		return h.e2bComputerFiles(ctx, exec, op, args)
+	}
+	return h.computerSSHFiles(ctx, exec, op, args)
+}
+
+// writeWorkspaceFile writes data to a workspace path through whichever transport
+// this run is pinned to and returns the resolved path. It is the shared write
+// used by fs_write and apply_patch.
+func (h *handler) writeWorkspaceFile(ctx context.Context, tenant, agent, target string, data []byte) (string, error) {
+	if exec, ok := h.pinnedComputerFiles(ctx); ok {
+		out, err := h.computerFiles(ctx, exec, "write", map[string]any{"path": target, "content": string(data)})
+		if err != nil {
+			return "", err
+		}
+		var result struct {
+			Path string `json:"path"`
+		}
+		_ = json.Unmarshal(out, &result)
+		if result.Path != "" {
+			return result.Path, nil
+		}
+		return target, nil
+	}
+	remote, selected, err := h.remoteWorkspace(ctx, tenant, agent)
+	if err != nil {
+		return "", err
+	}
+	if !selected {
+		return "", errors.New("no runtime node bound to this space")
+	}
+	result, err := remote.write(ctx, target, data)
+	if err != nil {
+		return "", err
+	}
+	resolved := target
+	if value, ok := result["path"].(string); ok && value != "" {
+		resolved = value
+	}
+	return resolved, nil
 }
 
 func (h *handler) runBuiltinTool(ctx context.Context, tenant, agent, name string, args json.RawMessage) (json.RawMessage, error) {
@@ -162,6 +259,9 @@ func (h *handler) runMemoryRemember(ctx context.Context, tenant, agent string, a
 }
 
 func (h *handler) runFSList(ctx context.Context, tenant, agent string, args map[string]any) (json.RawMessage, error) {
+	if exec, ok := h.pinnedComputerFiles(ctx); ok {
+		return h.computerFiles(ctx, exec, "list", args)
+	}
 	remote, selected, err := h.remoteWorkspace(ctx, tenant, agent)
 	if err != nil {
 		return nil, err
@@ -185,17 +285,10 @@ func (h *handler) runFSRead(ctx context.Context, tenant, agent string, args map[
 	if strings.TrimSpace(target) == "" {
 		return nil, errors.New("path is required")
 	}
-	offset := builtinIntArg(args, "offset", 0)
-	if offset < 0 {
-		offset = 0
+	if exec, ok := h.pinnedComputerFiles(ctx); ok {
+		return h.computerFiles(ctx, exec, "read", args)
 	}
-	limit := builtinIntArg(args, "limit", agentFSReadDefaultBytes)
-	if limit < 1 {
-		limit = agentFSReadDefaultBytes
-	}
-	if limit > agentFSReadMaxBytes {
-		limit = agentFSReadMaxBytes
-	}
+	offset, limit := fsReadWindow(args)
 	remote, selected, err := h.remoteWorkspace(ctx, tenant, agent)
 	if err != nil {
 		return nil, err
@@ -207,26 +300,11 @@ func (h *handler) runFSRead(ctx context.Context, tenant, agent string, args map[
 	if err != nil {
 		return nil, err
 	}
-	lines := strings.Split(string(raw), "\n")
-	if offset > 0 {
-		if offset >= len(lines) {
-			lines = nil
-		} else {
-			lines = lines[offset:]
-		}
-	}
-	content := strings.Join(lines, "\n")
-	if len(content) > limit {
-		content = content[:limit]
-		if idx := strings.LastIndexByte(content, '\n'); idx >= 0 {
-			content = content[:idx]
-		}
-	}
 	resolved := target
 	if value, ok := meta["path"].(string); ok && value != "" {
 		resolved = value
 	}
-	return builtinJSON(map[string]any{"path": resolved, "content": content, "size": len(content)})
+	return fsReadContent(resolved, raw, offset, limit)
 }
 
 func (h *handler) runFSWrite(ctx context.Context, tenant, agent string, args map[string]any) (json.RawMessage, error) {
@@ -234,20 +312,9 @@ func (h *handler) runFSWrite(ctx context.Context, tenant, agent string, args map
 	if strings.TrimSpace(target) == "" {
 		return nil, errors.New("path is required")
 	}
-	remote, selected, err := h.remoteWorkspace(ctx, tenant, agent)
+	resolved, err := h.writeWorkspaceFile(ctx, tenant, agent, target, []byte(builtinStringArg(args, "content")))
 	if err != nil {
 		return nil, err
-	}
-	if !selected {
-		return nil, errors.New("no runtime node bound to this space")
-	}
-	result, err := remote.write(ctx, target, []byte(builtinStringArg(args, "content")))
-	if err != nil {
-		return nil, err
-	}
-	resolved := target
-	if value, ok := result["path"].(string); ok && value != "" {
-		resolved = value
 	}
 	return builtinJSON(map[string]any{"path": resolved, "written": true})
 }

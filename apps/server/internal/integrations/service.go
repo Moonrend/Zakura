@@ -31,58 +31,34 @@ func merge(dst map[string]any, src map[string]any) {
 	}
 }
 func (h *handler) installationConfig(ctx context.Context, tenant, agent, ref string) (map[string]any, error) {
-	var install models.AgentConnectorInstallation
-	found := false
-	for _, candidate := range legacyEmailRef(ref) {
-		e := h.deps.Gorm.WithContext(ctx).Where("tenant_id = ? AND agent_id = ? AND connector_ref = ? AND enabled = true", tenant, agent, candidate).Order("created_at").First(&install).Error
-		if e == nil {
-			found = true
-			break
-		}
-		if !errors.Is(e, gorm.ErrRecordNotFound) {
-			return nil, e
-		}
+	var owner models.Agent
+	if e := h.deps.Gorm.WithContext(ctx).Where("tenant_id = ? AND id = ?", tenant, agent).First(&owner).Error; e != nil {
+		return nil, e
 	}
-	if !found {
-		return nil, gorm.ErrRecordNotFound
+	if e := h.migrateSpaceConnectors(ctx, tenant, owner.SpaceID); e != nil {
+		return nil, e
 	}
-	raw, e := decrypt(h.deps.Secret, tenant+":"+agent+":"+install.ConnectorRef, install.ConfigEnc)
+	return h.spaceInstallationConfig(ctx, tenant, owner.SpaceID, ref)
+}
+func (h *handler) spaceInstallationConfig(ctx context.Context, tenant, space, ref string) (map[string]any, error) {
+	var row spaceConnectorInstallation
+	if e := h.deps.Gorm.WithContext(ctx).Where("tenant_id = ? AND space_id = ? AND connector_ref = ? AND enabled = ?", tenant, space, canonicalRef(ref), true).First(&row).Error; e != nil {
+		return nil, e
+	}
+	cfg, e := h.spaceEnvelope(row)
 	if e != nil {
 		return nil, e
 	}
-	var installCfg struct {
-		ProfileKey string         `json:"profileKey"`
-		Config     map[string]any `json:"config"`
-	}
-	if e = json.Unmarshal(raw, &installCfg); e != nil {
-		return nil, e
-	}
 	out := map[string]any{}
-	if installCfg.ProfileKey != "" {
-		cfg, e := h.profileConfig(ctx, tenant, installCfg.ProfileKey)
+	if cfg.ProfileKey != "" {
+		profile, e := h.profileConfig(ctx, tenant, cfg.ProfileKey)
 		if e != nil {
 			return nil, e
 		}
-		merge(out, cfg)
+		merge(out, profile)
 	}
-	merge(out, installCfg.Config)
-	var setting models.ConnectorSetting
-	for _, candidate := range legacyEmailRef(ref) {
-		e := h.deps.Gorm.WithContext(ctx).Where("scope_key = ? AND connector_ref = ?", tenant, candidate).First(&setting).Error
-		if e != nil {
-			if errors.Is(e, gorm.ErrRecordNotFound) {
-				continue
-			}
-			break
-		}
-		if raw, e := decrypt(h.deps.Secret, tenant+":"+setting.ConnectorRef, setting.ConfigEnc); e == nil {
-			var cfg map[string]any
-			if json.Unmarshal(raw, &cfg) == nil {
-				merge(out, cfg)
-			}
-		}
-		break
-	}
+	merge(out, cfg.Config)
+	merge(out, cfg.Settings)
 	return out, nil
 }
 func safeURL(raw string) (string, error) {
@@ -110,6 +86,10 @@ func (h *handler) send(w http.ResponseWriter, r *http.Request) {
 	}
 	if httpx.DecodeJSON(r, &b) != nil || b.AgentID == "" || b.Action == "" {
 		httpx.Error(w, 400, "agentId and action required")
+		return
+	}
+	if _, e := h.resourceSpace(r, "", b.AgentID); e != nil {
+		writeErr(w, e)
 		return
 	}
 	status, result, e := h.callProvider(r.Context(), p.TenantID, b.AgentID, ref, b.Action, b.Payload)
@@ -262,12 +242,8 @@ func (h *handler) webhook(w http.ResponseWriter, r *http.Request) {
 	if agent != "" {
 		cfg, e = h.installationConfig(r.Context(), tenant, agent, ref)
 	} else {
-		var install models.AgentConnectorInstallation
-		e = h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND connector_ref IN ? AND enabled = true", tenant, legacyEmailRef(ref)).Order("created_at").First(&install).Error
-		if e == nil {
-			agent = install.AgentID
-			cfg, e = h.installationConfig(r.Context(), tenant, agent, ref)
-		}
+		// Routing must be explicit; never select an arbitrary Agent/Space.
+		e = errors.New("agentId required")
 	}
 	if e != nil {
 		httpx.Error(w, 401, "connector not configured")
@@ -397,30 +373,54 @@ func extractInboundText(ref string, p map[string]any) string {
 
 func (h *handler) listConnections(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	var rows []models.AgentConnectorInstallation
-	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ?", p.TenantID).Order("created_at DESC").Find(&rows).Error; e != nil {
+	spaces, e := h.allowedSpaces(r)
+	if e != nil {
 		writeErr(w, e)
 		return
 	}
-	items := make([]map[string]any, 0)
-	index := map[string]int{}
-	for _, row := range rows {
-		ref := canonicalRef(row.ConnectorRef)
-		key := row.AgentID + ":" + ref
-		meta, _ := provider(ref)
-		status := "disabled"
-		if row.Enabled {
-			status = "installed"
+	for _, space := range spaces {
+		if e = h.migrateSpaceConnectors(r.Context(), p.TenantID, space); e != nil {
+			writeErr(w, e)
+			return
 		}
-		item := map[string]any{"id": "connector:" + *row.ID, "installationId": *row.ID, "name": meta.Name, "kind": "platform", "status": status, "providerId": ref, "slug": ref, "agentIds": []string{row.AgentID}, "createdAt": row.CreatedAt, "updatedAt": row.UpdatedAt}
-		if i, ok := index[key]; ok {
-			if current, _ := items[i]["createdAt"].(string); row.CreatedAt < current {
-				items[i] = item
-			}
+	}
+	var rows []spaceConnectorInstallation
+	if e = h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND space_id IN ?", p.TenantID, spaces).Order("created_at DESC").Find(&rows).Error; e != nil {
+		writeErr(w, e)
+		return
+	}
+	items := []map[string]any{}
+	for _, row := range rows {
+		items = append(items, connectionView(row))
+	}
+	var instances []models.ComponentInstance
+	if e = h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND component_type = ?", p.TenantID, "mcp").Find(&instances).Error; e != nil {
+		writeErr(w, e)
+		return
+	}
+	for _, row := range instances {
+		if row.ID == nil {
 			continue
 		}
-		index[key] = len(items)
-		items = append(items, item)
+		owner, e := h.authorizeInstance(r, *row.ID)
+		if e != nil || !contains(spaces, owner) {
+			continue
+		}
+		var cfg map[string]any
+		_ = json.Unmarshal([]byte(row.ConfigJSON), &cfg)
+		kind := "mcp-http"
+		if cfg["transport"] == "stdio" {
+			kind = "mcp-stdio"
+		}
+		items = append(items, map[string]any{"id": "instance:" + *row.ID, "instanceId": *row.ID, "spaceId": owner, "name": row.Name, "kind": kind, "status": row.Status, "providerId": row.ComponentRef, "agentIds": []string{}, "createdAt": row.CreatedAt, "updatedAt": row.UpdatedAt})
+	}
+	var conflicts []legacySpaceConnector
+	if e = h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND space_id IN ? AND resolved = ?", p.TenantID, spaces, false).Order("id").Find(&conflicts).Error; e != nil {
+		writeErr(w, e)
+		return
+	}
+	for _, row := range conflicts {
+		items = append(items, map[string]any{"id": "legacy:" + row.ID, "spaceId": row.SpaceID, "name": row.ConnectorRef, "kind": "platform", "status": "conflict", "providerId": canonicalRef(row.ConnectorRef), "legacyAgentId": row.AgentID, "legacyRef": row.ConnectorRef, "agentIds": []string{}, "createdAt": row.CreatedAt, "updatedAt": row.UpdatedAt})
 	}
 	httpx.JSON(w, 200, map[string]any{"items": items})
 }
@@ -524,12 +524,24 @@ func (h *handler) getPackage(w http.ResponseWriter, r *http.Request) {
 func (h *handler) installPackage(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	var b struct {
-		AgentIDs     []string        `json:"agentIds"`
-		ComponentIDs []string        `json:"componentIds"`
-		Config       json.RawMessage `json:"config"`
+		SpaceID       string          `json:"spaceId"`
+		RuntimeNodeID *string         `json:"runtimeNodeId"`
+		Name          string          `json:"name"`
+		AgentIDs      []string        `json:"agentIds"`
+		ComponentIDs  []string        `json:"componentIds"`
+		Config        json.RawMessage `json:"config"`
 	}
-	if httpx.DecodeJSON(r, &b) != nil || len(b.AgentIDs) == 0 {
-		httpx.Error(w, 400, "agentIds required")
+	if httpx.DecodeJSON(r, &b) != nil {
+		httpx.Error(w, 400, "invalid JSON")
+		return
+	}
+	space, e := h.installTarget(r, b.SpaceID, b.AgentIDs)
+	if e != nil {
+		writeErr(w, e)
+		return
+	}
+	if e = h.migrateSpaceConnectors(r.Context(), p.TenantID, space); e != nil {
+		writeErr(w, e)
 		return
 	}
 	var all []models.IntegrationComponent
@@ -546,34 +558,31 @@ func (h *handler) installPackage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	installed := 0
-	for _, agent := range b.AgentIDs {
-		var count int64
-		if e := h.deps.Gorm.WithContext(r.Context()).Model(&models.Agent{}).Where("tenant_id = ? AND id = ?", p.TenantID, agent).Count(&count).Error; e != nil || count == 0 {
+	var cfg map[string]any
+	if len(b.Config) > 0 && json.Unmarshal(b.Config, &cfg) != nil {
+		httpx.Error(w, 400, "invalid config")
+		return
+	}
+	// Validate all components before making any writes. MCP provisioning belongs
+	// to the runtime installer, never synthetic ready rows.
+	for _, c := range all {
+		if len(b.ComponentIDs) > 0 && !contains(b.ComponentIDs, *c.ID) {
 			continue
 		}
-		for _, c := range all {
-			if len(b.ComponentIDs) > 0 && !contains(b.ComponentIDs, *c.ID) {
-				continue
-			}
-			if c.Kind == "connector" && validRef(c.Ref) {
-				data, _ := json.Marshal(map[string]any{"config": json.RawMessage(b.Config)})
-				enc, _ := encrypt(h.deps.Secret, p.TenantID+":"+agent+":"+c.Ref, data)
-				now := h.now().Format(time.RFC3339Nano)
-				row := models.AgentConnectorInstallation{ID: strPtr(h.id()), TenantID: p.TenantID, AgentID: agent, ConnectorRef: c.Ref, Enabled: true, ConfigEnc: enc, CreatedAt: now, UpdatedAt: now}
-				if err := h.deps.Gorm.WithContext(r.Context()).Clauses(clause.OnConflict{
-					Columns:   []clause.Column{{Name: "agent_id"}, {Name: "connector_ref"}},
-					DoUpdates: clause.AssignmentColumns([]string{"enabled", "config_enc", "updated_at"}),
-				}).Create(&row).Error; err == nil {
-					installed++
-				}
-			} else {
-				now := h.now().Format(time.RFC3339Nano)
-				row := models.ComponentInstance{ID: strPtr(h.id()), TenantID: p.TenantID, AgentID: strPtr(agent), ComponentType: c.Kind, ComponentRef: c.Ref, Name: c.Ref, ConfigJSON: c.ManifestJSON, SecretJSON: "{}", Status: "ready", CreatedAt: now, UpdatedAt: now}
-				if err := h.deps.Gorm.WithContext(r.Context()).Create(&row).Error; err == nil {
-					installed++
-				}
-			}
+		if c.Kind != "connector" || !validRef(c.Ref) {
+			httpx.Error(w, 400, "use the runtime installer for this component")
+			return
 		}
+	}
+	for _, c := range all {
+		if len(b.ComponentIDs) > 0 && !contains(b.ComponentIDs, *c.ID) {
+			continue
+		}
+		if _, e := h.saveSpaceConnector(r.Context(), p.TenantID, space, c.Ref, connectorEnvelope{Config: cfg}, true); e != nil {
+			writeErr(w, e)
+			return
+		}
+		installed++
 	}
 	result := map[string]any{"id": chi.URLParam(r, "id"), "kind": "plugin", "name": chi.URLParam(r, "id"), "status": "installed", "installed": installed}
 	httpx.JSON(w, http.StatusCreated, map[string]any{"result": result})
@@ -589,43 +598,84 @@ func contains(xs []string, v string) bool {
 func (h *handler) bindConnection(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		AgentID string `json:"agentId"`
+		SpaceID string `json:"spaceId"`
 	}
-	if httpx.DecodeJSON(r, &b) != nil || b.AgentID == "" {
-		httpx.Error(w, 400, "agentId required")
+	if httpx.DecodeJSON(r, &b) != nil {
+		httpx.Error(w, 400, "invalid JSON")
 		return
 	}
-	id := strings.TrimPrefix(chi.URLParam(r, "id"), "connector:")
-	p := principal(r)
-	var row models.AgentConnectorInstallation
-	e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", p.TenantID, id).First(&row).Error
+	rawID := chi.URLParam(r, "id")
+	if strings.HasPrefix(rawID, "instance:") {
+		id := strings.TrimPrefix(rawID, "instance:")
+		if _, e := h.authorizeInstance(r, id); e != nil {
+			writeErr(w, e)
+			return
+		}
+		space, e := h.resourceSpace(r, b.SpaceID, b.AgentID)
+		if e != nil {
+			writeErr(w, e)
+			return
+		}
+		hook, ok := h.lifecycle.(interface {
+			Bind(context.Context, string, string, string) error
+		})
+		if !ok {
+			httpx.Error(w, 503, "runtime binding unavailable")
+			return
+		}
+		if e = hook.Bind(r.Context(), principal(r).TenantID, space, id); e != nil {
+			writeErr(w, e)
+			return
+		}
+		httpx.JSON(w, 200, map[string]any{"ok": true, "spaceId": space})
+		return
+	}
+	row, e := h.loadConnection(r, rawID)
 	if e != nil {
 		writeErr(w, e)
 		return
 	}
-	raw, e := decrypt(h.deps.Secret, p.TenantID+":"+row.AgentID+":"+row.ConnectorRef, row.ConfigEnc)
+	space, e := h.resourceSpace(r, b.SpaceID, b.AgentID)
 	if e != nil {
 		writeErr(w, e)
 		return
 	}
-	newEnc, _ := encrypt(h.deps.Secret, p.TenantID+":"+b.AgentID+":"+row.ConnectorRef, raw)
-	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.AgentConnectorInstallation{}).
-		Where("tenant_id = ? AND id = ?", p.TenantID, id).
-		Updates(map[string]any{"agent_id": b.AgentID, "config_enc": newEnc, "updated_at": h.now().Format(time.RFC3339Nano)}).Error
-	if e != nil {
-		writeErr(w, e)
+	if space != row.SpaceID {
+		httpx.Error(w, 400, "connector belongs to another Space")
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"ok": true})
+	// Compatibility adapter: Agent consumes the existing Space owner. No copy,
+	// reassignment, or encryption-scope change is necessary.
+	httpx.JSON(w, 200, map[string]any{"ok": true, "spaceId": row.SpaceID})
 }
 func (h *handler) deleteConnection(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(chi.URLParam(r, "id"), "connector:")
-	res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", principal(r).TenantID, id).Delete(&models.AgentConnectorInstallation{})
-	if res.Error != nil {
-		writeErr(w, res.Error)
+	if raw := chi.URLParam(r, "id"); strings.HasPrefix(raw, "instance:") {
+		id := strings.TrimPrefix(raw, "instance:")
+		if _, e := h.authorizeInstance(r, id); e != nil {
+			writeErr(w, e)
+			return
+		}
+		hook, ok := h.lifecycle.(interface {
+			Delete(context.Context, string, string) error
+		})
+		if !ok {
+			httpx.Error(w, 503, "runtime removal unavailable")
+			return
+		}
+		if e := hook.Delete(r.Context(), principal(r).TenantID, id); e != nil {
+			writeErr(w, e)
+			return
+		}
+		httpx.JSON(w, 200, map[string]any{"ok": true})
 		return
 	}
-	if res.RowsAffected == 0 {
-		httpx.Error(w, 404, "Not found")
+	row, e := h.loadConnection(r, chi.URLParam(r, "id"))
+	if e != nil {
+		writeErr(w, e)
+		return
+	}
+	if e = h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", row.TenantID, row.ID).Delete(&spaceConnectorInstallation{}).Error; e != nil {
+		writeErr(w, e)
 		return
 	}
 	httpx.JSON(w, 200, map[string]any{"ok": true})

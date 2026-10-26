@@ -22,7 +22,6 @@ import (
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 	"github.com/golang-jwt/jwt/v5"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -145,11 +144,9 @@ func (h *handler) zakuraBotWS(w http.ResponseWriter, r *http.Request) {
 	if err := socket.send(map[string]any{"type": "ready", "protocol": 1, "agents": agents, "capabilities": []string{"agents", "history", "files", "desktop_frames", "interactions"}}); err != nil {
 		return
 	}
-	for agentID, bindingID := range bindings {
-		if err := h.replayZakuraBot(r.Context(), socket, actor, agentID, bindingID); err != nil {
-			return
-		}
-	}
+	streamCtx, stopStream := context.WithCancel(r.Context())
+	defer stopStream()
+	go h.watchZakuraBotMessages(streamCtx, socket, actor)
 	for {
 		opcode, payload, err = readWSFrameSized(rw.Reader, 1_000_000)
 		if err != nil {
@@ -172,10 +169,12 @@ func (h *handler) zakuraBotWS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var frame struct {
-			Type            string `json:"type"`
-			AgentID         string `json:"agentId"`
-			ClientMessageID string `json:"clientMessageId"`
-			Text            string `json:"text"`
+			Type            string       `json:"type"`
+			AgentID         string       `json:"agentId"`
+			ClientMessageID string       `json:"clientMessageId"`
+			RequestID       string       `json:"requestId"`
+			Text            string       `json:"text"`
+			Attachments     []botFileRef `json:"attachments"`
 		}
 		if json.Unmarshal(payload, &frame) != nil {
 			socket.fail("Malformed channel JSON", 1008, true, nil)
@@ -189,7 +188,7 @@ func (h *handler) zakuraBotWS(w http.ResponseWriter, r *http.Request) {
 			}
 			_ = socket.send(map[string]any{"type": "pong"})
 		case "send":
-			if frame.AgentID == "" || frame.ClientMessageID == "" || len(frame.AgentID) > 256 || len(frame.ClientMessageID) > 256 || strings.TrimSpace(frame.Text) == "" || len([]rune(frame.Text)) > 4000 {
+			if frame.AgentID == "" || frame.ClientMessageID == "" || len(frame.AgentID) > 256 || len(frame.ClientMessageID) > 200 || (strings.TrimSpace(frame.Text) == "" && len(frame.Attachments) == 0) || len(frame.Attachments) > 10 || len([]rune(frame.Text)) > 4000 {
 				_ = socket.send(map[string]any{"type": "error", "message": "Use 1–4000 characters per message", "agentId": frame.AgentID, "clientMessageId": frame.ClientMessageID})
 				continue
 			}
@@ -198,17 +197,29 @@ func (h *handler) zakuraBotWS(w http.ResponseWriter, r *http.Request) {
 				_ = socket.send(map[string]any{"type": "error", "message": "This device cannot access the requested agent", "agentId": frame.AgentID, "clientMessageId": frame.ClientMessageID})
 				continue
 			}
-			if err := h.zakuraBotSend(r.Context(), socket, actor, frame.AgentID, bindingID, frame.ClientMessageID, strings.TrimSpace(frame.Text)); err != nil {
+			if err := h.zakuraBotSend(r.Context(), socket, actor, frame.AgentID, bindingID, frame.ClientMessageID, strings.TrimSpace(frame.Text), frame.Attachments...); err != nil {
 				_ = socket.send(map[string]any{"type": "error", "message": err.Error(), "agentId": frame.AgentID, "clientMessageId": frame.ClientMessageID})
 			}
 		case "interrupt":
+			if len(frame.RequestID) > 256 {
+				socket.fail("Invalid stop request", 1008, true, nil)
+				return
+			}
 			bindingID := bindings[frame.AgentID]
 			if bindingID == "" {
 				_ = socket.send(map[string]any{"type": "error", "message": "This conversation is no longer available", "agentId": frame.AgentID})
 				continue
 			}
-			_ = h.interruptZakuraBot(r.Context(), actor, frame.AgentID, bindingID)
-			_ = socket.send(map[string]any{"type": "typing", "agentId": frame.AgentID, "active": false})
+			if err := h.interruptZakuraBot(r.Context(), actor, frame.AgentID, bindingID); err != nil {
+				_ = socket.send(map[string]any{"type": "error", "message": "Could not stop this reply. Try again.", "agentId": frame.AgentID, "turnEnded": false})
+				continue
+			}
+			// A queued turn may already be running. Only the watcher reports activity.
+			ack := map[string]any{"type": "interrupt_ack", "agentId": frame.AgentID}
+			if frame.RequestID != "" {
+				ack["requestId"] = frame.RequestID
+			}
+			_ = socket.send(ack)
 		case "hello":
 			socket.fail("Wait for ready before sending channel data", 1008, true, nil)
 			return
@@ -311,78 +322,72 @@ func (h *handler) zakuraBotRoster(ctx context.Context, actor httpx.Principal) ([
 	return agents, bindings, nil
 }
 
-func (h *handler) replayZakuraBot(ctx context.Context, socket *zakuraBotSocket, actor httpx.Principal, agentID, bindingID string) error {
-	var ms []models.ZakurabotMessage
-	if err := h.deps.Gorm.WithContext(ctx).Where("tenant_id = ? AND device_id = ? AND binding_id = ? AND agent_id = ?", actor.TenantID, actor.UserID, bindingID, agentID).Order("seq DESC").Limit(100).Find(&ms).Error; err != nil {
-		return err
-	}
-	frames := []json.RawMessage{}
-	for _, m := range ms {
-		frames = append(frames, json.RawMessage(m.FrameJSON))
-	}
-	for i := len(frames) - 1; i >= 0; i-- {
-		var value any
-		if json.Unmarshal(frames[i], &value) == nil {
-			if err := socket.send(value); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func (h *handler) zakuraBotSend(ctx context.Context, socket *zakuraBotSocket, actor httpx.Principal, agentID, bindingID, clientMessageID, text string) error {
-	message := map[string]any{"type": "message", "message": map[string]any{
-		"id": clientMessageID, "agentId": agentID, "role": "user", "kind": "text", "text": text,
-		"clientMessageId": clientMessageID, "createdAt": h.store.now().UnixMilli(),
-	}}
-	raw, _ := json.Marshal(message)
-	var existingRow struct {
-		FrameJSON string `gorm:"column:frame_json"`
-	}
-	err := h.deps.Gorm.WithContext(ctx).Table("zakurabot_messages").Select("frame_json").Where("tenant_id = ? AND device_id = ? AND binding_id = ? AND agent_id = ? AND client_message_id = ?", actor.TenantID, actor.UserID, bindingID, agentID, clientMessageID).Take(&existingRow).Error
-	if err == nil {
-		existing := existingRow.FrameJSON
-		if existing != string(raw) {
-			return errors.New("clientMessageId was already used with different content")
-		}
-		var replay any
-		_ = json.Unmarshal([]byte(existing), &replay)
-		return socket.send(replay)
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
-	}
-	var seq int64
-	err = h.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Table("zakurabot_messages").Select("COALESCE(MAX(seq),0)+1 AS next_seq").Where("tenant_id = ? AND device_id = ? AND binding_id = ? AND agent_id = ?", actor.TenantID, actor.UserID, bindingID, agentID).Scan(&seq).Error; err != nil {
-			return err
-		}
-		return tx.Table("zakurabot_messages").Create(map[string]any{"id": h.store.id(), "seq": seq, "tenant_id": actor.TenantID, "device_id": actor.UserID, "binding_id": bindingID, "agent_id": agentID, "client_message_id": clientMessageID, "frame_json": string(raw), "created_at": runtimeTimeString(h.store.now())}).Error
-	})
-	if err != nil {
-		return err
-	}
-	if err := socket.send(message); err != nil {
-		return err
-	}
+func (h *handler) zakuraBotSend(ctx context.Context, socket *zakuraBotSocket, actor httpx.Principal, agentID, bindingID, clientMessageID, text string, refs ...botFileRef) error {
 	sessionID, err := h.zakuraBotSession(ctx, actor, agentID, bindingID)
 	if err != nil {
 		return err
 	}
-	run, queued, err := h.service.StartTurn(ctx, actor.TenantID, agentID, sessionID, text, nil, nil, true)
+	// Serialize admission and acknowledgement separately from the run lock.
+	mu := h.service.sessionLock("bot-send:" + sessionID)
+	mu.Lock()
+	defer mu.Unlock()
+	var existing struct {
+		FrameJSON string `gorm:"column:frame_json"`
+	}
+	err = h.deps.Gorm.WithContext(ctx).Table("zakurabot_messages").Select("frame_json").Where("tenant_id=? AND device_id=? AND binding_id=? AND agent_id=? AND client_message_id=?", actor.TenantID, actor.UserID, bindingID, agentID, clientMessageID).Take(&existing).Error
+	if err == nil {
+		var saved struct {
+			Message struct {
+				Text        string `json:"text"`
+				Attachments []struct {
+					ID string `json:"id"`
+				} `json:"attachments"`
+			} `json:"message"`
+		}
+		if json.Unmarshal([]byte(existing.FrameJSON), &saved) != nil || saved.Message.Text != text {
+			return ErrConflict
+		}
+		if len(saved.Message.Attachments) != len(refs) {
+			return ErrConflict
+		}
+		for i, attachment := range saved.Message.Attachments {
+			if attachment.ID != refs[i].FileID {
+				return ErrConflict
+			}
+		}
+		return socket.send(json.RawMessage(existing.FrameJSON))
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	attachments, err := h.botAttachments(ctx, actor, agentID, bindingID, refs)
 	if err != nil {
 		return err
 	}
-	_ = socket.send(map[string]any{"type": "typing", "agentId": agentID, "active": true})
-	if queued == nil {
-		go h.watchZakuraBotRun(socket, actor, agentID, bindingID, sessionID, run.ID)
+	var user struct {
+		Name string `gorm:"column:name"`
 	}
-	return nil
+	_ = h.deps.Gorm.WithContext(ctx).Table("users").Select("name").Where("id=?", actor.UserID).Take(&user).Error
+	sender, _ := json.Marshal(map[string]string{"id": actor.UserID, "name": user.Name})
+	wrapper := &MessageContext{
+		Prefix: "[Zakura Bot message]\nSender: " + string(sender),
+		Suffix: "[Reply delivery]\nYour final answer is delivered to this bot conversation automatically. Use chat_reply when you need to send a separate message. Do not repeat messages already sent with chat_reply.",
+	}
+	_, _, err = h.service.Start(ctx, TurnRequest{Tenant: actor.TenantID, Agent: agentID, Session: sessionID, Content: text, Context: wrapper, Attachments: attachments, MessageID: clientMessageID, UserID: actor.UserID, UserName: user.Name, QueueOnConflict: true, FollowUpMode: queueModeQueue})
+	if err != nil {
+		return err
+	}
+	if err := h.deps.Gorm.WithContext(ctx).Table("zakurabot_messages").Select("frame_json").Where("tenant_id=? AND device_id=? AND binding_id=? AND agent_id=? AND client_message_id=?", actor.TenantID, actor.UserID, bindingID, agentID, clientMessageID).Take(&existing).Error; err != nil {
+		return err
+	}
+	return socket.send(json.RawMessage(existing.FrameJSON))
 }
 
 func (h *handler) zakuraBotSession(ctx context.Context, actor httpx.Principal, agentID, bindingID string) (string, error) {
 	key := "zakurabot:" + actor.TenantID + ":" + actor.UserID + ":" + bindingID + ":" + agentID
+	mu := h.service.sessionLock("bot-thread:" + key)
+	mu.Lock()
+	defer mu.Unlock()
 	var thread models.AgentChannelThread
 	err := h.deps.Gorm.WithContext(ctx).Where("tenant_id = ? AND binding_id = ? AND external_thread_key = ?", actor.TenantID, bindingID, key).Take(&thread).Error
 	if err == nil {
@@ -408,57 +413,75 @@ func (h *handler) zakuraBotSession(ctx context.Context, actor httpx.Principal, a
 }
 
 func (h *handler) interruptZakuraBot(ctx context.Context, actor httpx.Principal, agentID, bindingID string) error {
-	sessionID, err := h.zakuraBotSession(ctx, actor, agentID, bindingID)
-	if err != nil {
+	state, err := h.zakuraSessionStatus(ctx, actor, agentID, bindingID)
+	if err != nil || state["status"] != "running" {
 		return err
 	}
+	sessionID, _ := state["sessionId"].(string)
 	_, err = h.service.Cancel(ctx, actor.TenantID, agentID, sessionID)
+	if errors.Is(err, ErrConflict) {
+		return nil // The turn finished while the stop request was arriving.
+	}
 	return err
 }
 
-func (h *handler) watchZakuraBotRun(socket *zakuraBotSocket, actor httpx.Principal, agentID, bindingID, sessionID, runID string) {
-	ctx, cancel := context.WithTimeout(h.deps.RunContext(), 10*time.Minute)
-	defer cancel()
-	cursor := int64(0)
-	ticker := time.NewTicker(100 * time.Millisecond)
+func (h *handler) watchZakuraBotMessages(ctx context.Context, socket *zakuraBotSocket, actor httpx.Principal) {
+	cursors := map[string]int64{}
+	busy := map[string]bool{}
+	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
+	var bindings map[string]string
+	var rosterAt time.Time
 	for {
+		if time.Since(rosterAt) >= 5*time.Second {
+			var err error
+			_, bindings, err = h.zakuraBotRoster(ctx, actor)
+			if err != nil {
+				return
+			}
+			rosterAt = time.Now()
+		}
+		for agent, binding := range bindings {
+			key := agent + ":" + binding
+			cursor, initialized := cursors[key]
+			var rows []models.ZakurabotMessage
+			query := h.deps.Gorm.WithContext(ctx).Where("tenant_id=? AND device_id=? AND binding_id=? AND agent_id=?", actor.TenantID, actor.UserID, binding, agent)
+			if initialized {
+				query = query.Where("seq > ?", cursor).Order("seq ASC").Limit(200)
+			} else {
+				query = query.Order("seq DESC").Limit(100)
+			}
+			if query.Find(&rows).Error != nil {
+				return
+			}
+			if !initialized {
+				for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
+					rows[i], rows[j] = rows[j], rows[i]
+				}
+			}
+			for _, row := range rows {
+				if err := socket.send(json.RawMessage(row.FrameJSON)); err != nil {
+					return
+				}
+				cursor = int64(row.Seq)
+			}
+			cursors[key] = cursor
+			state, err := h.zakuraSessionStatus(ctx, actor, agent, binding)
+			if err != nil {
+				continue
+			}
+			active := state["status"] == "running"
+			if len(rows) > 0 || busy[key] != active {
+				if err := socket.send(map[string]any{"type": "typing", "agentId": agent, "active": active}); err != nil {
+					return
+				}
+				busy[key] = active
+			}
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			events, err := h.store.ListEvents(ctx, actor.TenantID, agentID, sessionID, cursor, 200)
-			if err != nil {
-				return
-			}
-			for _, event := range events {
-				if event.Seq > cursor {
-					cursor = event.Seq
-				}
-				if event.RunID == nil || *event.RunID != runID {
-					continue
-				}
-				if event.Type == "assistant_message" || event.Type == "message.created" {
-					var payload struct{ Role, Content string }
-					_ = json.Unmarshal(event.Payload, &payload)
-					if payload.Role == "assistant" && payload.Content != "" {
-						frame := map[string]any{"type": "chat_reply", "agentId": agentID, "messageId": event.ID, "createdAt": event.CreatedAt.UnixMilli(), "payload": map[string]any{"text": payload.Content, "format": "markdown"}}
-						raw, _ := json.Marshal(frame)
-						var seq int64
-						_ = h.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-							if err := tx.Table("zakurabot_messages").Select("COALESCE(MAX(seq),0)+1 AS next_seq").Where("tenant_id = ? AND device_id = ? AND binding_id = ? AND agent_id = ?", actor.TenantID, actor.UserID, bindingID, agentID).Scan(&seq).Error; err != nil {
-								return err
-							}
-							return tx.Table("zakurabot_messages").Create(map[string]any{"id": h.store.id(), "seq": seq, "tenant_id": actor.TenantID, "device_id": actor.UserID, "binding_id": bindingID, "agent_id": agentID, "client_message_id": nil, "frame_json": string(raw), "created_at": runtimeTimeString(h.store.now())}).Error
-						})
-						_ = socket.send(frame)
-					}
-				}
-				if event.Type == "run_end" || event.Type == "run_error" || event.Type == "run.completed" || event.Type == "run.failed" || event.Type == "run.cancelled" {
-					_ = socket.send(map[string]any{"type": "typing", "agentId": agentID, "active": false})
-					return
-				}
-			}
 		}
 	}
 }
@@ -520,71 +543,4 @@ func writeWSFrame(w *bufio.Writer, opcode byte, payload []byte) error {
 		return e
 	}
 	return w.Flush()
-}
-func (h *handler) handleZakuraFrame(ctx context.Context, p httpx.Principal, raw []byte) (map[string]any, error) {
-	var frame struct {
-		DeviceID        string          `json:"deviceId"`
-		BindingID       string          `json:"bindingId"`
-		AgentID         string          `json:"agentId"`
-		ClientMessageID string          `json:"clientMessageId"`
-		Type            string          `json:"type"`
-		Payload         json.RawMessage `json:"payload"`
-	}
-	if json.Unmarshal(raw, &frame) != nil || frame.DeviceID == "" || frame.BindingID == "" || frame.AgentID == "" {
-		return nil, errors.New("deviceId, bindingId and agentId required")
-	}
-	var count int64
-	if e := h.deps.Gorm.WithContext(ctx).Model(&models.AgentChannelBinding{}).Where("tenant_id = ? AND id = ? AND agent_id = ? AND enabled = true", p.TenantID, frame.BindingID, frame.AgentID).Count(&count).Error; e != nil || count == 0 {
-		return nil, errors.New("binding not found")
-	}
-	var seq int64
-	e := h.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if e := tx.Table("zakurabot_messages").Select("COALESCE(MAX(seq),0)+1 AS next_seq").Where("tenant_id = ? AND device_id = ? AND binding_id = ? AND agent_id = ?", p.TenantID, frame.DeviceID, frame.BindingID, frame.AgentID).Scan(&seq).Error; e != nil {
-			return e
-		}
-		return tx.
-			Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "device_id"}, {Name: "binding_id"}, {Name: "agent_id"}, {Name: "client_message_id"}},
-				DoNothing: true,
-			}).
-			Table("zakurabot_messages").
-			Create(map[string]any{"id": h.store.id(), "seq": seq, "tenant_id": p.TenantID, "device_id": frame.DeviceID, "binding_id": frame.BindingID, "agent_id": frame.AgentID, "client_message_id": nullString(frame.ClientMessageID), "frame_json": string(raw), "created_at": runtimeTimeString(h.store.now())}).Error
-	})
-	if e != nil {
-		return nil, e
-	}
-	result := map[string]any{"type": "ack", "seq": seq, "clientMessageId": frame.ClientMessageID}
-	if frame.Type == "message" {
-		var body struct {
-			Text      string `json:"text"`
-			SessionID string `json:"sessionId"`
-		}
-		if json.Unmarshal(frame.Payload, &body) != nil || strings.TrimSpace(body.Text) == "" {
-			return nil, errors.New("message text required")
-		}
-		sessionID := body.SessionID
-		if sessionID == "" {
-			origin, _ := json.Marshal(map[string]any{"channel": "zakurabot", "deviceId": frame.DeviceID, "bindingId": frame.BindingID})
-			userID := p.UserID
-			if p.APIKey {
-				userID = ""
-			}
-			sess, e := h.store.CreateSession(ctx, p.TenantID, userID, frame.AgentID, Session{Title: "ZakuraBot", Origin: origin})
-			if e != nil {
-				return nil, e
-			}
-			sessionID = sess.ID
-		}
-		run, queued, e := h.service.StartTurn(ctx, p.TenantID, frame.AgentID, sessionID, body.Text, nil, nil, true)
-		if e != nil {
-			return nil, e
-		}
-		result["sessionId"] = sessionID
-		if queued != nil {
-			result["queued"] = queued
-		} else {
-			result["run"] = run
-		}
-	}
-	return result, nil
 }

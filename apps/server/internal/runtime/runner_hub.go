@@ -15,11 +15,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/Moonrend/Zakura/apps/agent/executor"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 	"gorm.io/gorm"
@@ -52,19 +55,40 @@ type runnerReply struct {
 	err    error
 }
 
+// Stream delivery is serialized per stream, but never runs on the runner read
+// loop: consumers may issue runner RPCs while handling an event. Keep startup
+// output until onStream subscribes (start replies and output can race).
+const runnerStreamMaxBytes = 1 << 20
+const runnerStreamMaxPendingBytes = 8 << 20
+const runnerStreamMaxPending = 128
+
+type runnerStreamEvent struct {
+	channel string
+	data    []byte
+}
+
+type runnerStream struct {
+	callback func(string, []byte)
+	events   []runnerStreamEvent
+	bytes    int
+	draining bool
+}
+
 type runnerSession struct {
-	hub       *runnerHub
-	nodeID    string
-	conn      net.Conn
-	rw        *bufio.ReadWriter
-	writeGate chan struct{}
-	mu        sync.Mutex
-	pending   map[string]chan runnerReply
-	streams   map[string]func(string, []byte)
-	done      chan struct{}
-	closeOne  sync.Once
-	ready     atomic.Bool
-	lastSeen  atomic.Int64
+	hub          *runnerHub
+	nodeID       string
+	conn         net.Conn
+	local        *executor.Executor
+	rw           *bufio.ReadWriter
+	writeGate    chan struct{}
+	mu           sync.Mutex
+	pending      map[string]chan runnerReply
+	streamQueues map[string]*runnerStream
+	streamBytes  int
+	done         chan struct{}
+	closeOne     sync.Once
+	ready        atomic.Bool
+	lastSeen     atomic.Int64
 }
 
 func newRunnerHub(deps *appdeps.Dependencies) *runnerHub {
@@ -89,7 +113,7 @@ func (h *handler) runnerHubHTTP(w http.ResponseWriter, r *http.Request) {
 	var node struct {
 		ID string `gorm:"column:id"`
 	}
-	err := h.deps.Gorm.WithContext(r.Context()).Table("runtime_nodes").Select("id").Where("token_hash=?", hex.EncodeToString(sum[:])).Take(&node).Error
+	err := h.deps.Gorm.WithContext(r.Context()).Table("runtime_nodes").Select("id").Where("token_hash=? AND kind<>'local'", hex.EncodeToString(sum[:])).Take(&node).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		httpx.Error(w, http.StatusUnauthorized, "unauthorized")
 		return
@@ -99,7 +123,11 @@ func (h *handler) runnerHubHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	nodeID = node.ID
-	runnerTokenCache.Store(nodeID, token)
+	installationIncarnation, err := h.cacheRuntimeNodeToken(r.Context(), nodeID, token)
+	if err != nil {
+		httpx.Error(w, http.StatusForbidden, "node enrollment is unavailable")
+		return
+	}
 	key := r.Header.Get("Sec-WebSocket-Key")
 	hijacker, ok := w.(http.Hijacker)
 	if !ok || key == "" {
@@ -117,13 +145,14 @@ func (h *handler) runnerHubHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = conn.Close()
 		return
 	}
-	s := &runnerSession{writeGate: make(chan struct{}, 1), hub: h.hub, nodeID: nodeID, conn: conn, rw: rw, pending: map[string]chan runnerReply{}, streams: map[string]func(string, []byte){}, done: make(chan struct{})}
+	s := &runnerSession{writeGate: make(chan struct{}, 1), hub: h.hub, nodeID: nodeID, conn: conn, rw: rw, pending: map[string]chan runnerReply{}, streamQueues: map[string]*runnerStream{}, done: make(chan struct{})}
 	s.lastSeen.Store(time.Now().UnixMilli())
 	h.hub.install(s)
+	stopShutdown := context.AfterFunc(h.deps.RunContext(), func() { s.close(errors.New("server stopped")) })
+	defer stopShutdown()
 	defer func() {
 		s.close(errors.New("runner disconnected"))
 		h.hub.remove(s)
-		_ = h.deps.Gorm.WithContext(h.deps.RunContext()).Exec(`UPDATE runtime_nodes SET status=CASE WHEN status='draining' THEN status ELSE 'offline' END,updated_at=? WHERE id=?`, runtimeTimeString(h.store.now()), nodeID).Error
 	}()
 	go s.readLoop()
 	if err := s.writeJSON(runnerFrame{Type: "welcome", ID: nodeID}); err != nil {
@@ -138,16 +167,41 @@ func (h *handler) runnerHubHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	err = s.call(ctx, "sys.info", map[string]any{}, &info)
+	if err == nil && installationIncarnation != "" {
+		var identity struct {
+			Version     int    `json:"version"`
+			Incarnation string `json:"incarnation"`
+		}
+		err = s.call(ctx, "workspace.identity", map[string]any{}, &identity)
+		if err == nil && (identity.Version != 1 || identity.Incarnation != installationIncarnation || info.Kind != "server") {
+			err = errInstallationRevoked
+		}
+	}
+	if err == nil {
+		err = h.syncWorkspaceRevocations(ctx, s)
+	}
 	cancel()
 	if err != nil {
 		return
 	}
 	now := h.store.now()
-	err = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE runtime_nodes SET status=CASE WHEN status='draining' THEN status ELSE 'online' END,kind=CASE WHEN kind='runner' AND ? IN ('computer','server') THEN ? ELSE kind END,endpoint=NULL,host_info_json=?,capabilities_json=?,agent_version=?,storage_root=?,last_seen_at=?,updated_at=? WHERE id=?`, info.Kind, info.Kind, validJSON(info.HostInfo, "{}"), validJSON(info.Capabilities, `{"host":true}`), nullString(info.Version), nullString(info.StorageRoot), runtimeTimeString(now), runtimeTimeString(now), nodeID).Error
+	h.hub.mu.Lock()
+	if h.hub.sessions[nodeID] != s {
+		h.hub.mu.Unlock()
+		return
+	}
+	result := h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE runtime_nodes SET status=CASE WHEN status='draining' THEN status ELSE 'online' END,kind=CASE WHEN kind='runner' AND ? IN ('computer','server') THEN ? ELSE kind END,endpoint=NULL,host_info_json=?,capabilities_json=?,agent_version=?,storage_root=?,last_seen_at=?,updated_at=? WHERE id=? AND kind<>'local' AND token_hash=?`, info.Kind, info.Kind, validJSON(info.HostInfo, "{}"), validJSON(info.Capabilities, `{"host":true}`), nullString(info.Version), nullString(info.StorageRoot), runtimeTimeString(now), runtimeTimeString(now), nodeID, hex.EncodeToString(sum[:]))
+	err = result.Error
+	if err == nil && result.RowsAffected != 1 {
+		err = errInstallationRevoked
+	}
+	if err == nil {
+		s.ready.Store(true)
+	}
+	h.hub.mu.Unlock()
 	if err != nil {
 		return
 	}
-	s.ready.Store(true)
 	ticker := time.NewTicker(20 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -155,6 +209,9 @@ func (h *handler) runnerHubHTTP(w http.ResponseWriter, r *http.Request) {
 		case <-s.done:
 			return
 		case <-ticker.C:
+			if err := h.hub.persistHeartbeat(s); err != nil {
+				return
+			}
 			if time.Since(time.UnixMilli(s.lastSeen.Load())) > 60*time.Second {
 				return
 			}
@@ -177,19 +234,118 @@ func (h *runnerHub) install(session *runnerSession) {
 
 func (h *runnerHub) remove(session *runnerSession) {
 	h.mu.Lock()
-	if h.sessions[session.nodeID] == session {
-		delete(h.sessions, session.nodeID)
+	defer h.mu.Unlock()
+	if h.sessions[session.nodeID] != session {
+		return
 	}
-	h.mu.Unlock()
+	delete(h.sessions, session.nodeID)
+	// Serialize ownership changes and their persistent writes. An older socket
+	// must never mark its replacement offline, including during handshake.
+	if h.deps != nil && h.deps.Gorm != nil {
+		_ = h.deps.Gorm.WithContext(h.deps.RunContext()).Exec(`UPDATE runtime_nodes SET status=CASE WHEN status='draining' THEN status ELSE 'offline' END,updated_at=? WHERE id=?`, runtimeTimeString(time.Now().UTC()), session.nodeID).Error
+	}
+}
+
+func (h *runnerHub) persistHeartbeat(s *runnerSession) error {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.sessions[s.nodeID] != s {
+		return errors.New("runner connection replaced")
+	}
+	if h.deps == nil || h.deps.Gorm == nil {
+		return nil
+	}
+	seen := runtimeTimeString(time.UnixMilli(s.lastSeen.Load()).UTC())
+	result := h.deps.Gorm.WithContext(h.deps.RunContext()).Exec(`UPDATE runtime_nodes SET last_seen_at=?,updated_at=? WHERE id=?`, seen, seen, s.nodeID)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return errInstallationRevoked
+	}
+	return nil
 }
 
 func (h *runnerHub) get(nodeID string) (*runnerSession, error) {
 	h.mu.RLock()
 	s := h.sessions[nodeID]
 	h.mu.RUnlock()
-	if s == nil || !s.ready.Load() || time.Since(time.UnixMilli(s.lastSeen.Load())) > 60*time.Second {
+	if s == nil {
+		var err error
+		s, err = h.mountLocal(nodeID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !s.ready.Load() || (s.local == nil && time.Since(time.UnixMilli(s.lastSeen.Load())) > 60*time.Second) {
 		return nil, errors.New("runtime node agent is offline")
 	}
+	return s, nil
+}
+
+// Only legacy, tokenless embedded rows are trusted host executors. No remote
+// offline row, operator-entered path or new arbitrary kind becomes local.
+func (h *runnerHub) mountLocal(nodeID string) (*runnerSession, error) {
+	if h.deps == nil || h.deps.Gorm == nil {
+		return nil, errors.New("runtime node agent is offline")
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if s := h.sessions[nodeID]; s != nil {
+		return s, nil
+	}
+	var node struct {
+		StorageRoot string `gorm:"column:storage_root"`
+	}
+	err := h.deps.Gorm.WithContext(h.deps.RunContext()).Table("runtime_nodes").Select("storage_root").Where("id=? AND kind='local' AND agent_version='embedded' AND (token_hash IS NULL OR token_hash='')", nodeID).Take(&node).Error
+	if err != nil {
+		return nil, errors.New("runtime node agent is offline")
+	}
+	root := strings.TrimSpace(node.StorageRoot)
+	if root == "" {
+		return nil, errors.New("local runtime node storage root is unavailable: no storage root configured")
+	}
+	// Resolve legacy relative paths on this host, never foreign absolute paths
+	// or drive-relative paths which would silently select a different directory.
+	if !filepath.IsAbs(root) && (!filepath.IsLocal(root) || strings.Contains(root, ":") || (filepath.Separator == '/' && strings.Contains(root, `\`))) {
+		return nil, fmt.Errorf("local runtime node storage root is unavailable: invalid local path %q", root)
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("local runtime node storage root is unavailable: %w", err)
+	}
+	if err = os.MkdirAll(root, 0750); err != nil {
+		return nil, fmt.Errorf("local runtime node storage root is unavailable: %q: %w", root, err)
+	}
+	if root != node.StorageRoot {
+		result := h.deps.Gorm.WithContext(h.deps.RunContext()).Table("runtime_nodes").Where("id=? AND kind='local' AND agent_version='embedded' AND (token_hash IS NULL OR token_hash='') AND storage_root=?", nodeID, node.StorageRoot).Update("storage_root", root)
+		if result.Error != nil {
+			return nil, result.Error
+		}
+		if result.RowsAffected != 1 {
+			return nil, errors.New("local runtime node storage root changed; retry shortly")
+		}
+	}
+	s := &runnerSession{hub: h, nodeID: nodeID, local: executor.New("local", root), pending: map[string]chan runnerReply{}, streamQueues: map[string]*runnerStream{}, done: make(chan struct{})}
+	s.lastSeen.Store(time.Now().UnixMilli())
+	s.ready.Store(true)
+	h.sessions[nodeID] = s
+	go func() {
+		ticker := time.NewTicker(20 * time.Second)
+		defer ticker.Stop()
+		defer func() { s.close(errors.New("local runtime stopped")); h.remove(s) }()
+		for {
+			select {
+			case <-h.deps.RunContext().Done():
+				return
+			case <-s.done:
+				return
+			case <-ticker.C:
+				s.lastSeen.Store(time.Now().UnixMilli())
+				_ = h.persistHeartbeat(s)
+			}
+		}
+	}()
 	return s, nil
 }
 
@@ -197,7 +353,12 @@ func (s *runnerSession) close(reason error) {
 	s.closeOne.Do(func() {
 		s.ready.Store(false)
 		close(s.done)
-		_ = s.conn.Close()
+		if s.conn != nil {
+			_ = s.conn.Close()
+		}
+		if s.local != nil {
+			go s.local.Close()
+		}
 		s.mu.Lock()
 		for id, pending := range s.pending {
 			delete(s.pending, id)
@@ -206,8 +367,18 @@ func (s *runnerSession) close(reason error) {
 			default:
 			}
 		}
-		s.streams = map[string]func(string, []byte){}
+		listeners := []func(string, []byte){}
+		for _, stream := range s.streamQueues {
+			if stream.callback != nil {
+				listeners = append(listeners, stream.callback)
+			}
+		}
+		s.streamQueues = map[string]*runnerStream{}
+		s.streamBytes = 0
 		s.mu.Unlock()
+		for _, listener := range listeners {
+			go listener("error", []byte(reason.Error()))
+		}
 	})
 }
 
@@ -332,17 +503,18 @@ func (s *runnerSession) readLoop() {
 			if err != nil {
 				continue
 			}
-			s.mu.Lock()
-			listener := s.streams[frame.Stream]
-			s.mu.Unlock()
-			if listener != nil {
-				listener(frame.Chan, data)
-			}
+			s.queueStream(frame.Stream, frame.Chan, data)
 		}
 	}
 }
 
 func (s *runnerSession) call(ctx context.Context, method string, params any, out any) error {
+	if s.local != nil && method == "sys.update" {
+		return errors.New("embedded local Agent is updated with the server")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	id := fmt.Sprintf("%d", s.hub.seq.Add(1))
 	raw, err := json.Marshal(params)
 	if err != nil {
@@ -358,7 +530,29 @@ func (s *runnerSession) call(ctx context.Context, method string, params any, out
 	}
 	s.pending[id] = pending
 	s.mu.Unlock()
-	if err := s.writeJSONContext(ctx, runnerFrame{Type: "req", ID: id, Method: method, Params: raw}); err != nil {
+	if s.local != nil {
+		go s.local.Dispatch(ctx, executor.Message{Type: "req", ID: id, Method: method, Params: raw}, func(msg executor.Message) {
+			if msg.Type == "stream" {
+				if data, err := base64.StdEncoding.DecodeString(msg.Data); err == nil {
+					s.queueStream(msg.Stream, msg.Chan, data)
+				}
+				return
+			}
+			if msg.Type == "res" {
+				s.mu.Lock()
+				ch := s.pending[msg.ID]
+				delete(s.pending, msg.ID)
+				s.mu.Unlock()
+				if ch != nil {
+					if msg.OK != nil && !*msg.OK {
+						ch <- runnerReply{err: errors.New(msg.Error)}
+					} else {
+						ch <- runnerReply{result: msg.Result}
+					}
+				}
+			}
+		})
+	} else if err := s.writeJSONContext(ctx, runnerFrame{Type: "req", ID: id, Method: method, Params: raw}); err != nil {
 		s.mu.Lock()
 		delete(s.pending, id)
 		s.mu.Unlock()
@@ -377,19 +571,109 @@ func (s *runnerSession) call(ctx context.Context, method string, params any, out
 		s.mu.Lock()
 		delete(s.pending, id)
 		s.mu.Unlock()
+		if s.local != nil {
+			s.local.Cancel(id)
+		} else {
+			go func() {
+				budget, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				_ = s.writeJSONContext(budget, runnerFrame{Type: "cancel", ID: id})
+			}()
+		}
 		return ctx.Err()
 	case <-s.done:
 		return errors.New("runtime node agent is offline")
 	}
 }
 
+func (s *runnerSession) queueStream(id, channel string, data []byte) {
+	s.mu.Lock()
+	select {
+	case <-s.done:
+		s.mu.Unlock()
+		return
+	default:
+	}
+	if s.streamQueues == nil {
+		s.streamQueues = map[string]*runnerStream{}
+	}
+	q := s.streamQueues[id]
+	if q == nil {
+		if len(s.streamQueues) >= runnerStreamMaxPending {
+			s.mu.Unlock()
+			s.close(errors.New("runner stream backlog exhausted"))
+			return
+		}
+		q = &runnerStream{}
+		s.streamQueues[id] = q
+	}
+	// Overflow is a transport failure, never silent truncation of ACP JSON or
+	// loss of a short-lived process's exit. Include event overhead in the bound.
+	size := len(data) + 32
+	if q.bytes+size > runnerStreamMaxBytes || s.streamBytes+size > runnerStreamMaxPendingBytes {
+		s.mu.Unlock()
+		s.close(errors.New("runner stream backlog exhausted"))
+		return
+	}
+	q.events = append(q.events, runnerStreamEvent{channel, append([]byte(nil), data...)})
+	q.bytes += size
+	s.streamBytes += size
+	s.startStreamLocked(id, q)
+	s.mu.Unlock()
+}
+
+func (s *runnerSession) startStreamLocked(id string, q *runnerStream) {
+	if q.callback != nil && !q.draining && len(q.events) > 0 {
+		q.draining = true
+		go s.drainStream(id, q)
+	}
+}
+
+func (s *runnerSession) drainStream(id string, q *runnerStream) {
+	for {
+		s.mu.Lock()
+		if s.streamQueues[id] != q || q.callback == nil || len(q.events) == 0 {
+			q.draining = false
+			s.mu.Unlock()
+			return
+		}
+		event, callback := q.events[0], q.callback
+		q.events[0] = runnerStreamEvent{}
+		q.events = q.events[1:]
+		size := len(event.data) + 32
+		q.bytes -= size
+		s.streamBytes -= size
+		s.mu.Unlock()
+		callback(event.channel, event.data)
+	}
+}
+
 func (s *runnerSession) onStream(id string, callback func(string, []byte)) func() {
 	s.mu.Lock()
-	s.streams[id] = callback
+	select {
+	case <-s.done:
+		s.mu.Unlock()
+		go callback("error", []byte("runtime node agent is offline"))
+		return func() {}
+	default:
+	}
+	if s.streamQueues == nil {
+		s.streamQueues = map[string]*runnerStream{}
+	}
+	q := s.streamQueues[id]
+	if q == nil {
+		q = &runnerStream{}
+		s.streamQueues[id] = q
+	}
+	q.callback = callback
+	s.startStreamLocked(id, q)
 	s.mu.Unlock()
 	return func() {
 		s.mu.Lock()
-		delete(s.streams, id)
+		if s.streamQueues[id] == q {
+			s.streamBytes -= q.bytes
+			delete(s.streamQueues, id)
+		}
 		s.mu.Unlock()
 	}
 }

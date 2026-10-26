@@ -21,25 +21,26 @@ import (
 )
 
 type Schedule struct {
-	ID          string          `json:"id"`
-	AgentID     string          `json:"agentId"`
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	Pattern     string          `json:"pattern"`
-	TriggerKind string          `json:"triggerKind"`
-	Listener    json.RawMessage `json:"listener"`
-	Prompt      string          `json:"prompt"`
-	Project     *string         `json:"project"`
-	Enabled     bool            `json:"enabled"`
-	MaxRuns     *int            `json:"maxRuns"`
-	RunCount    int             `json:"runCount"`
-	Timezone    string          `json:"timezone"`
-	NextRunAt   *time.Time      `json:"nextRunAt"`
-	LastRunAt   *time.Time      `json:"lastRunAt"`
-	LastStatus  *string         `json:"lastStatus"`
-	LastError   *string         `json:"lastError"`
-	CreatedAt   time.Time       `json:"createdAt"`
-	UpdatedAt   time.Time       `json:"updatedAt"`
+	ID                 string          `json:"id"`
+	AgentID            string          `json:"agentId"`
+	Name               string          `json:"name"`
+	Description        string          `json:"description"`
+	Pattern            string          `json:"pattern"`
+	TriggerKind        string          `json:"triggerKind"`
+	Listener           json.RawMessage `json:"listener"`
+	Prompt             string          `json:"prompt"`
+	Project            *string         `json:"project"`
+	Enabled            bool            `json:"enabled"`
+	BypassToolApproval bool            `json:"bypassToolApproval"`
+	MaxRuns            *int            `json:"maxRuns"`
+	RunCount           int             `json:"runCount"`
+	Timezone           string          `json:"timezone"`
+	NextRunAt          *time.Time      `json:"nextRunAt"`
+	LastRunAt          *time.Time      `json:"lastRunAt"`
+	LastStatus         *string         `json:"lastStatus"`
+	LastError          *string         `json:"lastError"`
+	CreatedAt          time.Time       `json:"createdAt"`
+	UpdatedAt          time.Time       `json:"updatedAt"`
 }
 type AutomationRun struct {
 	ID          string     `json:"id"`
@@ -75,7 +76,7 @@ func (h *handler) registerAutomation(r chi.Router) {
 }
 
 func scheduleFromModel(m models.AgentSchedule) (Schedule, string) {
-	x := Schedule{AgentID: m.AgentID, Name: m.Name, TriggerKind: m.TriggerKind, Listener: json.RawMessage(m.ListenerJSON), Prompt: m.Prompt, Project: m.Project, Enabled: m.Enabled, RunCount: int(m.RunCount), Timezone: m.Timezone, LastStatus: m.LastStatus, LastError: m.LastError}
+	x := Schedule{AgentID: m.AgentID, Name: m.Name, TriggerKind: m.TriggerKind, Listener: json.RawMessage(m.ListenerJSON), Prompt: m.Prompt, Project: m.Project, Enabled: m.Enabled, BypassToolApproval: m.BypassToolApproval, RunCount: int(m.RunCount), Timezone: m.Timezone, LastStatus: m.LastStatus, LastError: m.LastError}
 	if m.ID != nil {
 		x.ID = *m.ID
 	}
@@ -196,7 +197,7 @@ func (h *handler) createScheduleInternal(ctx context.Context, tenant, agent stri
 	secret := randomSecret()
 	description := in.Description
 	pattern := in.Pattern
-	m := models.AgentSchedule{ID: &id, TenantID: tenant, AgentID: agent, Name: in.Name, Description: &description, Pattern: &pattern, TriggerKind: in.TriggerKind, ListenerJSON: validJSON(in.Listener, "{}"), WebhookSecret: &secret, Prompt: in.Prompt, Project: in.Project, Enabled: in.Enabled, MaxRuns: maxRuns, Timezone: in.Timezone, NextRunAt: nextStr, CreatedAt: now, UpdatedAt: now}
+	m := models.AgentSchedule{ID: &id, TenantID: tenant, AgentID: agent, Name: in.Name, Description: &description, Pattern: &pattern, TriggerKind: in.TriggerKind, ListenerJSON: validJSON(in.Listener, "{}"), WebhookSecret: &secret, Prompt: in.Prompt, Project: in.Project, Enabled: in.Enabled, BypassToolApproval: in.BypassToolApproval, MaxRuns: maxRuns, Timezone: in.Timezone, NextRunAt: nextStr, CreatedAt: now, UpdatedAt: now}
 	if e = h.deps.Gorm.WithContext(ctx).Create(&m).Error; e != nil {
 		return Schedule{}, e
 	}
@@ -207,22 +208,23 @@ func (h *handler) createSchedule(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	agent := chi.URLParam(r, "id")
 	var b struct {
-		Name        string          `json:"name"`
-		Description string          `json:"description"`
-		TriggerKind string          `json:"triggerKind"`
-		Pattern     string          `json:"pattern"`
-		Listener    json.RawMessage `json:"listener"`
-		Prompt      string          `json:"prompt"`
-		Project     *string         `json:"project"`
-		Enabled     *bool           `json:"enabled"`
-		MaxRuns     *int            `json:"maxRuns"`
-		Timezone    string          `json:"timezone"`
+		Name               string          `json:"name"`
+		Description        string          `json:"description"`
+		TriggerKind        string          `json:"triggerKind"`
+		Pattern            string          `json:"pattern"`
+		Listener           json.RawMessage `json:"listener"`
+		Prompt             string          `json:"prompt"`
+		Project            *string         `json:"project"`
+		Enabled            *bool           `json:"enabled"`
+		BypassToolApproval bool            `json:"bypassToolApproval"`
+		MaxRuns            *int            `json:"maxRuns"`
+		Timezone           string          `json:"timezone"`
 	}
 	if httpx.DecodeJSON(r, &b) != nil {
 		httpx.Error(w, 400, "invalid JSON")
 		return
 	}
-	in := Schedule{Name: b.Name, Description: b.Description, TriggerKind: b.TriggerKind, Pattern: b.Pattern, Listener: b.Listener, Prompt: b.Prompt, Project: b.Project, MaxRuns: b.MaxRuns, Timezone: b.Timezone, Enabled: true}
+	in := Schedule{Name: b.Name, Description: b.Description, TriggerKind: b.TriggerKind, Pattern: b.Pattern, Listener: b.Listener, Prompt: b.Prompt, Project: b.Project, MaxRuns: b.MaxRuns, Timezone: b.Timezone, Enabled: true, BypassToolApproval: b.BypassToolApproval}
 	if b.Enabled != nil {
 		in.Enabled = *b.Enabled
 	}
@@ -274,6 +276,13 @@ func (h *handler) patchScheduleInternal(ctx context.Context, tenant, agent, id s
 	if v, ok := patch["enabled"].(bool); ok {
 		cur.Enabled = v
 	}
+	if v, exists := patch["bypassToolApproval"]; exists {
+		on, ok := v.(bool)
+		if !ok {
+			return Schedule{}, errors.New("bypassToolApproval must be a boolean")
+		}
+		cur.BypassToolApproval = on
+	}
 	loc, e := time.LoadLocation(cur.Timezone)
 	if e != nil {
 		return Schedule{}, errors.New("invalid timezone")
@@ -291,7 +300,7 @@ func (h *handler) patchScheduleInternal(ctx context.Context, tenant, agent, id s
 	if next != nil {
 		nextVal = runtimeTimeString(*next)
 	}
-	e = h.deps.Gorm.WithContext(ctx).Model(&models.AgentSchedule{}).Where("tenant_id = ? AND agent_id = ? AND id = ?", tenant, agent, id).Updates(map[string]any{"name": cur.Name, "description": cur.Description, "pattern": cur.Pattern, "prompt": cur.Prompt, "timezone": cur.Timezone, "enabled": cur.Enabled, "next_run_at": nextVal, "updated_at": runtimeTimeString(h.store.now())}).Error
+	e = h.deps.Gorm.WithContext(ctx).Model(&models.AgentSchedule{}).Where("tenant_id = ? AND agent_id = ? AND id = ?", tenant, agent, id).Updates(map[string]any{"name": cur.Name, "description": cur.Description, "pattern": cur.Pattern, "prompt": cur.Prompt, "timezone": cur.Timezone, "enabled": cur.Enabled, "bypass_tool_approval": cur.BypassToolApproval, "next_run_at": nextVal, "updated_at": runtimeTimeString(h.store.now())}).Error
 	if e != nil {
 		return Schedule{}, e
 	}
@@ -333,6 +342,14 @@ func (h *handler) deleteSchedule(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) admitAutomation(ctx context.Context, tenant, agent, kind string, scheduleID *string, prompt string) (AutomationRun, error) {
+	bypass := false
+	if scheduleID != nil {
+		schedule, _, err := h.getSchedule(ctx, tenant, agent, *scheduleID)
+		if err != nil {
+			return AutomationRun{}, err
+		}
+		bypass = schedule.BypassToolApproval
+	}
 	now := h.store.now()
 	ar := AutomationRun{ID: h.store.id(), AgentID: agent, Kind: kind, ScheduleID: scheduleID, Status: "running", Prompt: prompt, StartedAt: &now, CreatedAt: now}
 	sess, e := h.store.CreateSession(ctx, tenant, "", agent, Session{Title: "Automation: " + kind, Kind: "system", Status: "active"})
@@ -340,7 +357,7 @@ func (h *handler) admitAutomation(ctx context.Context, tenant, agent, kind strin
 		return AutomationRun{}, e
 	}
 	ar.SessionID = &sess.ID
-	run, _, e := h.service.StartTurn(ctx, tenant, agent, sess.ID, prompt, nil, nil, false)
+	run, _, e := h.service.Start(ctx, TurnRequest{Tenant: tenant, Agent: agent, Session: sess.ID, Content: prompt, bypassAlwaysAsk: bypass})
 	if e != nil {
 		return AutomationRun{}, e
 	}

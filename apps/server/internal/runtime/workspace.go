@@ -2,10 +2,6 @@
 package runtime
 
 import (
-	"archive/tar"
-	"archive/zip"
-	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -96,35 +92,40 @@ type fsEntry struct {
 }
 
 func (h *handler) registerWorkspace(r chi.Router) {
+	h.registerSpaceWorkspace(r)
 	r.Get("/agents/{id}/fs", h.fsInfo)
 	r.Get("/agents/{id}/fs/list", h.fsList)
 	r.Get("/agents/{id}/fs/read", h.fsRead)
 	r.Get("/agents/{id}/fs/download", h.fsDownload)
-	r.Post("/agents/{id}/fs/write", h.fsWrite)
-	r.Post("/agents/{id}/fs/upload", h.fsUpload)
-	r.Post("/agents/{id}/fs/mkdir", h.fsMkdir)
-	r.Post("/agents/{id}/fs/delete", h.fsDelete)
-	r.Post("/agents/{id}/fs/rename", h.fsRename)
-	r.Post("/agents/{id}/fs/archive", h.fsArchive)
-	r.Post("/agents/{id}/fs/extract", h.fsExtract)
+	r.Post("/agents/{id}/fs/write", h.legacyWorkspaceRoute(h.fsWrite))
+	r.Post("/agents/{id}/fs/upload", h.legacyWorkspaceRoute(h.fsUpload))
+	r.Post("/agents/{id}/fs/mkdir", h.legacyWorkspaceRoute(h.fsMkdir))
+	r.Post("/agents/{id}/fs/delete", h.legacyWorkspaceRoute(h.fsDelete))
+	r.Post("/agents/{id}/fs/rename", h.legacyWorkspaceRoute(h.fsRename))
+	r.Post("/agents/{id}/fs/archive", h.legacyWorkspaceRoute(h.fsArchive))
+	r.Post("/agents/{id}/fs/extract", h.legacyWorkspaceRoute(h.fsExtract))
 	r.Post("/agents/{id}/fs/share", h.createFileShare)
-	r.Delete("/agents/{id}/fs/shares/{shareId}", h.revokeFileShare)
+	r.Delete("/agents/{id}/fs/shares/{shareId}", h.legacyWorkspaceRoute(h.revokeFileShare))
 	r.Get("/agents/{id}/projects", h.listProjects)
-	r.Post("/agents/{id}/projects", h.createProject)
-	r.Patch("/agents/{id}/projects/{slug}", h.patchProject)
-	r.Delete("/agents/{id}/projects/{slug}", h.deleteProject)
+	r.Post("/agents/{id}/projects", h.legacyWorkspaceRoute(h.createProject))
+	r.Patch("/agents/{id}/projects/{slug}", h.legacyWorkspaceRoute(h.patchProject))
+	r.Delete("/agents/{id}/projects/{slug}", h.legacyWorkspaceRoute(h.deleteProject))
 	r.Get("/agents/{id}/projects/{slug}/config", h.getProjectConfig)
-	r.Put("/agents/{id}/projects/{slug}/instructions", h.putProjectInstructions)
-	r.Put("/agents/{id}/projects/{slug}/hooks", h.putProjectHooks)
-	r.Post("/agents/{id}/projects/{slug}/skills", h.putProjectSkill)
-	r.Put("/agents/{id}/projects/{slug}/skills/{name}", h.putProjectSkill)
-	r.Delete("/agents/{id}/projects/{slug}/skills/{name}", h.deleteProjectSkill)
+	r.Put("/agents/{id}/projects/{slug}/instructions", h.legacyWorkspaceRoute(h.putProjectInstructions))
+	r.Put("/agents/{id}/projects/{slug}/hooks", h.legacyWorkspaceRoute(h.putProjectHooks))
+	r.Post("/agents/{id}/projects/{slug}/skills", h.legacyWorkspaceRoute(h.putProjectSkill))
+	r.Put("/agents/{id}/projects/{slug}/skills/{name}", h.legacyWorkspaceRoute(h.putProjectSkill))
+	r.Delete("/agents/{id}/projects/{slug}/skills/{name}", h.legacyWorkspaceRoute(h.deleteProjectSkill))
 	r.Get("/agents/{id}/projects/{slug}/skills/{name}/file", h.getProjectSkillFile)
 	r.Get("/agents/{id}/desktop", h.agentDesktop)
 	r.Post("/agents/{id}/desktop-ticket", h.desktopTicket)
 	r.Post("/agents/{id}/terminal-ticket", h.terminalTicket)
 	r.Get("/spaces/{id}/graph", h.spaceGraph)
 	r.Get("/agents/{id}/migrations", h.listWorkspaceMigrations)
+	r.Get("/spaces/{id}/migrations", h.spaceWorkspaceRoute(h.listWorkspaceMigrations))
+	r.Post("/spaces/{id}/migrations", h.spaceWorkspaceScope(h.createWorkspaceMigration))
+	r.Get("/spaces/{id}/migrations/{jobId}", h.spaceWorkspaceRoute(h.getWorkspaceMigration))
+	r.Get("/spaces/{id}/migrations/{jobId}/events", h.spaceWorkspaceRoute(h.workspaceMigrationEvents))
 	r.Post("/agents/{id}/migrations", h.createWorkspaceMigration)
 	r.Post("/instances/{id}/migrations", h.createInstanceMigration)
 	r.Get("/migrations/{jobId}", h.getWorkspaceMigration)
@@ -148,7 +149,7 @@ func (h *handler) registerWorkspace(r chi.Router) {
 	r.Get("/runtime/docker", h.runtimeDocker)
 }
 func (h *handler) fs(w http.ResponseWriter, r *http.Request) (workspaceFS, bool) {
-	f, e := h.workspaceFor(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
+	f, e := h.requestWorkspace(r)
 	if e != nil {
 		statusErr(w, e)
 		return workspaceFS{}, false
@@ -165,7 +166,7 @@ func (h *handler) fsInfo(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var result map[string]any
-		if e = remote.runner.call(r.Context(), "host.fs.stat", params, &result); e != nil {
+		if e = remote.call(r.Context(), "host.fs.stat", params, &result); e != nil {
 			writeRemoteError(w, e)
 			return
 		}
@@ -177,12 +178,7 @@ func (h *handler) fsInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reqPath := r.URL.Query().Get("path")
-	p, e := f.resolve(reqPath, true)
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	info, e := os.Stat(p)
+	info, e := f.statLocal(reqPath)
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -207,12 +203,13 @@ func (h *handler) fsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reqPath := r.URL.Query().Get("path")
-	p, e := f.resolve(reqPath, true)
+	dir, e := f.openLocal(reqPath)
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
-	entries, e := os.ReadDir(p)
+	defer dir.Close()
+	entries, e := dir.ReadDir(-1)
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -245,19 +242,14 @@ func (h *handler) fsRead(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	p, e := f.resolve(r.URL.Query().Get("path"), true)
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	file, e := os.Open(p)
+	file, e := f.openLocal(r.URL.Query().Get("path"))
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
 	defer file.Close()
 	info, e := file.Stat()
-	if e != nil || info.IsDir() {
+	if e != nil || !info.Mode().IsRegular() {
 		httpx.Error(w, 400, "path is not a file")
 		return
 	}
@@ -265,9 +257,13 @@ func (h *handler) fsRead(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 413, "file too large for text read")
 		return
 	}
-	raw, e := io.ReadAll(file)
+	raw, e := io.ReadAll(io.LimitReader(file, (5<<20)+1))
 	if e != nil {
 		statusErr(w, e)
+		return
+	}
+	if len(raw) > 5<<20 {
+		httpx.Error(w, 413, "file too large for text read")
 		return
 	}
 	sum := sha256.Sum256(raw)
@@ -298,23 +294,18 @@ func (h *handler) fsDownload(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	p, e := f.resolve(r.URL.Query().Get("path"), true)
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	file, e := os.Open(p)
+	file, e := f.openLocal(r.URL.Query().Get("path"))
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
 	defer file.Close()
 	info, e := file.Stat()
-	if e != nil || info.IsDir() {
+	if e != nil || !info.Mode().IsRegular() {
 		httpx.Error(w, 400, "path is not a file")
 		return
 	}
-	w.Header().Set("Content-Disposition", `attachment; filename="`+strings.ReplaceAll(filepath.Base(p), `"`, "")+`"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+strings.ReplaceAll(filepath.Base(r.URL.Query().Get("path")), `"`, "")+`"`)
 	http.ServeContent(w, r, info.Name(), info.ModTime(), file)
 }
 func (h *handler) fsWrite(w http.ResponseWriter, r *http.Request) {
@@ -368,64 +359,19 @@ func (h *handler) fsWrite(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	p, e := f.resolve(b.Path, false)
+	mode := os.FileMode(0640)
+	if b.Mode != nil {
+		mode = os.FileMode(*b.Mode) & 0777
+	}
+	written, e := f.writeLocal(b.Path, []byte(b.Content), b.Append, b.ExpectedRevision, mode)
+	if errors.Is(e, ErrConflict) {
+		httpx.Error(w, 409, "revision conflict")
+		return
+	}
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
-	if e = os.MkdirAll(filepath.Dir(p), 0o750); e != nil {
-		statusErr(w, e)
-		return
-	}
-	mode := os.FileMode(0o640)
-	if b.ExpectedRevision != "" {
-		existing, e := os.ReadFile(p)
-		if e != nil && !errors.Is(e, os.ErrNotExist) {
-			statusErr(w, e)
-			return
-		}
-		sum := sha256.Sum256(existing)
-		if hex.EncodeToString(sum[:]) != b.ExpectedRevision {
-			httpx.Error(w, 409, "revision conflict")
-			return
-		}
-	}
-	if b.Mode != nil {
-		mode = os.FileMode(*b.Mode) & 0o777
-	}
-	if b.Append {
-		file, e := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, mode)
-		if e == nil {
-			_, e = file.WriteString(b.Content)
-			_ = file.Close()
-		}
-		if e != nil {
-			statusErr(w, e)
-			return
-		}
-	} else {
-		tmp, e := os.CreateTemp(filepath.Dir(p), ".zakura-write-*")
-		if e != nil {
-			statusErr(w, e)
-			return
-		}
-		_ = tmp.Chmod(mode)
-		_, e = tmp.WriteString(b.Content)
-		closeErr := tmp.Close()
-		if e == nil {
-			e = closeErr
-		}
-		if e == nil {
-			e = os.Rename(tmp.Name(), p)
-		} else {
-			_ = os.Remove(tmp.Name())
-		}
-		if e != nil {
-			statusErr(w, e)
-			return
-		}
-	}
-	written, _ := os.ReadFile(p)
 	sum := sha256.Sum256(written)
 	httpx.JSON(w, 200, map[string]any{"ok": true, "path": b.Path, "revision": hex.EncodeToString(sum[:])})
 }
@@ -495,7 +441,7 @@ func (h *handler) fsUpload(w http.ResponseWriter, r *http.Request) {
 			}
 			target := base
 			if strings.HasSuffix(base, "/") || base == "" {
-				target = filepath.ToSlash(filepath.Join(base, head.Filename))
+				target = filepath.ToSlash(filepath.Join(base, filepath.Base(head.Filename)))
 			}
 			httpx.JSON(w, http.StatusOK, map[string]any{"path": target, "size": head.Size})
 			return
@@ -508,7 +454,7 @@ func (h *handler) fsUpload(w http.ResponseWriter, r *http.Request) {
 			statusErr(w, e)
 			return
 		}
-		e = h.saveUpload(f, base, head.Filename, file)
+		e = h.saveUpload(f, strings.TrimSuffix(base, "/")+"/", head.Filename, file)
 		file.Close()
 		if e != nil {
 			statusErr(w, e)
@@ -523,26 +469,11 @@ func (h *handler) saveUpload(f workspaceFS, base, name string, src multipart.Fil
 	if name == "." || name == "" {
 		return errors.New("invalid filename")
 	}
-	p, e := f.resolve(filepath.Join(base, name), false)
-	if e != nil {
-		return e
+	target := base
+	if strings.HasSuffix(base, "/") || base == "" {
+		target = filepath.ToSlash(filepath.Join(base, name))
 	}
-	if e = os.MkdirAll(filepath.Dir(p), 0o750); e != nil {
-		return e
-	}
-	tmp, e := os.CreateTemp(filepath.Dir(p), ".zakura-upload-*")
-	if e != nil {
-		return e
-	}
-	defer os.Remove(tmp.Name())
-	if _, e = io.Copy(tmp, io.LimitReader(src, maxWorkspaceUpload+1)); e != nil {
-		tmp.Close()
-		return e
-	}
-	if e = tmp.Close(); e != nil {
-		return e
-	}
-	return os.Rename(tmp.Name(), p)
+	return f.uploadLocal(target, src)
 }
 func (h *handler) fsMkdir(w http.ResponseWriter, r *http.Request) {
 	var b struct{ Path string }
@@ -556,7 +487,7 @@ func (h *handler) fsMkdir(w http.ResponseWriter, r *http.Request) {
 		params, e := remotePathParams(remote.spaceID, b.Path)
 		if e == nil {
 			var result map[string]any
-			e = remote.runner.call(r.Context(), "host.fs.mkdir", params, &result)
+			e = remote.call(r.Context(), "host.fs.mkdir", params, &result)
 			if e == nil {
 				httpx.JSON(w, http.StatusOK, result)
 				return
@@ -569,10 +500,7 @@ func (h *handler) fsMkdir(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	p, e := f.resolve(b.Path, false)
-	if e == nil {
-		e = os.MkdirAll(p, 0o750)
-	}
+	e := f.mkdirLocal(b.Path)
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -595,7 +523,7 @@ func (h *handler) fsDelete(w http.ResponseWriter, r *http.Request) {
 		if e == nil {
 			params["recursive"] = b.Recursive
 			var result map[string]any
-			e = remote.runner.call(r.Context(), "host.fs.remove", params, &result)
+			e = remote.call(r.Context(), "host.fs.remove", params, &result)
 			if e == nil {
 				httpx.JSON(w, http.StatusOK, result)
 				return
@@ -608,20 +536,7 @@ func (h *handler) fsDelete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	p, e := f.resolve(b.Path, true)
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	if p == f.root {
-		httpx.Error(w, 400, "cannot delete workspace root")
-		return
-	}
-	if b.Recursive {
-		e = os.RemoveAll(p)
-	} else {
-		e = os.Remove(p)
-	}
+	e := f.removeLocal(b.Path, b.Recursive)
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -658,7 +573,7 @@ func (h *handler) fsRename(w http.ResponseWriter, r *http.Request) {
 			to, e = runnerWorkspacePath(b.To)
 			if e == nil {
 				var result map[string]any
-				e = remote.runner.call(r.Context(), "host.fs.rename", map[string]any{"spaceId": remote.spaceID, "oldPath": from, "newPath": to}, &result)
+				e = remote.call(r.Context(), "host.fs.rename", map[string]any{"spaceId": remote.spaceID, "oldPath": from, "newPath": to}, &result)
 				if e == nil {
 					httpx.JSON(w, http.StatusOK, result)
 					return
@@ -672,18 +587,7 @@ func (h *handler) fsRename(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	from, e := f.resolve(b.From, true)
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	to, e := f.resolve(b.To, false)
-	if e == nil {
-		e = os.MkdirAll(filepath.Dir(to), 0o750)
-	}
-	if e == nil {
-		e = os.Rename(from, to)
-	}
+	e := f.renameLocal(b.From, b.To)
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -730,69 +634,7 @@ func (h *handler) fsArchive(w http.ResponseWriter, r *http.Request) {
 }
 
 func archiveLocalWorkspace(f workspaceFS, paths []string) ([]byte, error) {
-	var raw bytes.Buffer
-	gz := gzip.NewWriter(&raw)
-	tw := tar.NewWriter(gz)
-	var total int64
-	seen := map[string]bool{}
-	for _, name := range paths {
-		resolved, err := f.resolve(name, true)
-		if err != nil {
-			return nil, err
-		}
-		err = filepath.Walk(resolved, func(current string, info os.FileInfo, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
-			}
-			rel, err := filepath.Rel(f.root, current)
-			if err != nil {
-				return err
-			}
-			rel = filepath.ToSlash(rel)
-			if rel == "." || seen[rel] {
-				return nil
-			}
-			seen[rel] = true
-			if info.Mode()&os.ModeSymlink != 0 {
-				return errors.New("workspace symlinks are not archived")
-			}
-			header, err := tar.FileInfoHeader(info, "")
-			if err != nil {
-				return err
-			}
-			header.Name = rel
-			if info.IsDir() {
-				header.Name += "/"
-				return tw.WriteHeader(header)
-			}
-			total += info.Size()
-			if total > maxWorkspaceUpload {
-				return errors.New("archive exceeds size limit")
-			}
-			if err = tw.WriteHeader(header); err != nil {
-				return err
-			}
-			file, err := os.Open(current)
-			if err != nil {
-				return err
-			}
-			_, err = io.Copy(tw, io.LimitReader(file, info.Size()))
-			_ = file.Close()
-			return err
-		})
-		if err != nil {
-			_ = tw.Close()
-			_ = gz.Close()
-			return nil, err
-		}
-	}
-	if err := tw.Close(); err != nil {
-		return nil, err
-	}
-	if err := gz.Close(); err != nil {
-		return nil, err
-	}
-	return raw.Bytes(), nil
+	return archiveRootedWorkspace(f, paths)
 }
 func (h *handler) fsExtract(w http.ResponseWriter, r *http.Request) {
 	var b struct {
@@ -825,138 +667,12 @@ func (h *handler) fsExtract(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	src, e := f.resolve(b.Archive, true)
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	dst, e := f.resolve(b.Destination, false)
-	if e == nil {
-		e = os.MkdirAll(dst, 0o750)
-	}
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	if strings.HasSuffix(strings.ToLower(src), ".zip") {
-		e = extractZip(src, dst)
-	} else {
-		e = extractTar(src, dst)
-	}
+	e := extractRootedWorkspace(f, b.Archive, b.Destination)
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
 	httpx.JSON(w, 200, map[string]any{"ok": true, "destination": b.Destination})
-}
-func safeExtractPath(root, name string) (string, error) {
-	name = filepath.Clean(filepath.FromSlash(name))
-	if filepath.IsAbs(name) || name == ".." || strings.HasPrefix(name, ".."+string(filepath.Separator)) {
-		return "", errors.New("archive path traversal")
-	}
-	p := filepath.Join(root, name)
-	rel, _ := filepath.Rel(root, p)
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", errors.New("archive path traversal")
-	}
-	return p, nil
-}
-func extractZip(src, dst string) error {
-	z, e := zip.OpenReader(src)
-	if e != nil {
-		return e
-	}
-	defer z.Close()
-	var total int64
-	for _, f := range z.File {
-		total += int64(f.UncompressedSize64)
-		if total > maxWorkspaceUpload {
-			return errors.New("archive expands beyond limit")
-		}
-		p, e := safeExtractPath(dst, f.Name)
-		if e != nil {
-			return e
-		}
-		if f.FileInfo().Mode()&os.ModeSymlink != 0 {
-			return errors.New("archive symlinks are not allowed")
-		}
-		if f.FileInfo().IsDir() {
-			if e = os.MkdirAll(p, 0o750); e != nil {
-				return e
-			}
-			continue
-		}
-		if e = os.MkdirAll(filepath.Dir(p), 0o750); e != nil {
-			return e
-		}
-		in, e := f.Open()
-		if e != nil {
-			return e
-		}
-		out, e := os.OpenFile(p, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, f.Mode()&0o777)
-		if e == nil {
-			_, e = io.Copy(out, io.LimitReader(in, maxWorkspaceUpload+1))
-			_ = out.Close()
-		}
-		_ = in.Close()
-		if e != nil {
-			return e
-		}
-	}
-	return nil
-}
-func extractTar(src, dst string) error {
-	file, e := os.Open(src)
-	if e != nil {
-		return e
-	}
-	defer file.Close()
-	var reader io.Reader = file
-	if strings.HasSuffix(strings.ToLower(src), ".gz") || strings.HasSuffix(strings.ToLower(src), ".tgz") {
-		gz, e := gzip.NewReader(file)
-		if e != nil {
-			return e
-		}
-		defer gz.Close()
-		reader = gz
-	}
-	tr := tar.NewReader(reader)
-	var total int64
-	for {
-		head, e := tr.Next()
-		if errors.Is(e, io.EOF) {
-			return nil
-		}
-		if e != nil {
-			return e
-		}
-		if head.Typeflag != tar.TypeReg && head.Typeflag != tar.TypeDir {
-			return errors.New("archive links and special files are not allowed")
-		}
-		total += head.Size
-		if total > maxWorkspaceUpload {
-			return errors.New("archive expands beyond limit")
-		}
-		p, e := safeExtractPath(dst, head.Name)
-		if e != nil {
-			return e
-		}
-		if head.Typeflag == tar.TypeDir {
-			e = os.MkdirAll(p, 0o750)
-		} else {
-			if e = os.MkdirAll(filepath.Dir(p), 0o750); e == nil {
-				var out *os.File
-				out, e = os.OpenFile(p, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(head.Mode)&0o777)
-				if e == nil {
-					_, e = io.Copy(out, io.LimitReader(tr, head.Size))
-					_ = out.Close()
-				}
-			}
-		}
-		if e != nil {
-			return e
-		}
-	}
 }
 
 func (h *handler) spaceForAgent(ctx context.Context, tenant, agent string) (string, error) {
@@ -969,7 +685,7 @@ func (h *handler) spaceForAgent(ctx context.Context, tenant, agent string) (stri
 }
 func (h *handler) listProjects(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	space, e := h.spaceForAgent(r.Context(), p.TenantID, chi.URLParam(r, "id"))
+	space, e := h.workspaceRequestSpace(r)
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -979,17 +695,17 @@ func (h *handler) listProjects(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
+	presence, e := h.projectDiskPresence(r.Context(), p.TenantID, space, ms)
+	if e != nil {
+		statusErr(w, e)
+		return
+	}
 	out := make([]map[string]any, 0, len(ms))
 	for _, m := range ms {
-		id := ""
-		if m.ID != nil {
-			id = *m.ID
-		}
-		var path any
-		if m.HasWorkspace {
-			path = "/workspace/projects/" + m.Slug
-		}
-		out = append(out, map[string]any{"id": id, "slug": m.Slug, "name": m.Name, "description": m.Description, "instructions": m.Instructions, "hasWorkspace": m.HasWorkspace, "path": path, "createdAt": parseTime(m.CreatedAt), "updatedAt": parseTime(m.UpdatedAt)})
+		m.HasWorkspace = presence[m.Slug]
+		item := projectDTO(m)
+		item["createdAt"], item["updatedAt"] = parseTime(m.CreatedAt), parseTime(m.UpdatedAt)
+		out = append(out, item)
 	}
 	httpx.JSON(w, 200, map[string]any{"projects": out})
 }
@@ -1007,7 +723,7 @@ func (h *handler) createProject(w http.ResponseWriter, r *http.Request) {
 	if b.Slug == "" {
 		b.Slug = slugify(b.Name)
 	}
-	if b.Slug == "" || b.Slug != strings.TrimSpace(b.Slug) || strings.ContainsAny(b.Slug, `/\\`) {
+	if b.Slug == "" || b.Slug != slugify(b.Slug) {
 		httpx.Error(w, http.StatusBadRequest, "invalid project name")
 		return
 	}
@@ -1019,223 +735,65 @@ func (h *handler) createProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := principal(r)
-	agent := chi.URLParam(r, "id")
-	space, e := h.spaceForAgent(r.Context(), p.TenantID, agent)
+	space, e := h.workspaceRequestSpace(r)
 	if e != nil {
 		statusErr(w, e)
 		return
+	}
+	// A pending rename owns both source and destination until reconciliation.
+	currentSpace, e := h.store.GetSpace(r.Context(), p.TenantID, space)
+	if e != nil {
+		statusErr(w, e)
+		return
+	}
+	accepted, ok := r.Context().Value(workspaceRequestTargetKey{}).(Space)
+	if !ok {
+		accepted = currentSpace
+	}
+	for _, value := range nestedMap(configMap(currentSpace.Config), projectIntentsKey) {
+		op, err := decodeProjectIntent(value)
+		if err != nil {
+			statusErr(w, err)
+			return
+		}
+		if projectIntentMatches(op, accepted.CurrentWorkspaceInstanceID, accepted.WorkspaceGeneration) && (op.Slug == b.Slug || op.Next == b.Slug) {
+			statusErr(w, ErrConflict)
+			return
+		}
 	}
 	nowStr := runtimeTimeString(h.store.now())
 	id := h.store.id()
 	sp := models.SpaceProject{ID: &id, TenantID: p.TenantID, SpaceID: space, Slug: b.Slug, Name: b.Name, Description: b.Description, Instructions: b.Instructions, HasWorkspace: b.HasWorkspace, CreatedAt: nowStr, UpdatedAt: nowStr}
-	if e = h.deps.Gorm.WithContext(r.Context()).Create(&sp).Error; e != nil {
+	if e = h.deps.Gorm.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+		if err := lockWorkspaceInstance(tx, p.TenantID, space, accepted.CurrentWorkspaceInstanceID, accepted.WorkspaceGeneration); err != nil {
+			return err
+		}
+		return tx.Create(&sp).Error
+	}); e != nil {
 		statusErr(w, e)
 		return
 	}
-	cloneError := ""
 	if b.HasWorkspace {
-		if remote, selected, remoteErr := h.remoteWorkspace(r.Context(), p.TenantID, agent); remoteErr != nil {
-			_ = h.deps.Gorm.WithContext(r.Context()).Where("id = ?", id).Delete(&models.SpaceProject{}).Error
-			writeRemoteError(w, remoteErr)
+		e = h.createProjectWorkspace(r, space, b.Slug, b.GitURL)
+		if e != nil {
+			_ = h.deps.Gorm.WithContext(context.WithoutCancel(r.Context())).Where("tenant_id=? AND id=?", p.TenantID, id).Delete(&models.SpaceProject{}).Error
+			httpx.Error(w, http.StatusBadGateway, e.Error())
 			return
-		} else if selected {
-			params, _ := remotePathParams(remote.spaceID, projectRemotePath(b.Slug))
-			if remoteErr = remote.runner.call(r.Context(), "host.fs.mkdir", params, nil); remoteErr != nil {
-				_ = h.deps.Gorm.WithContext(r.Context()).Where("id = ?", id).Delete(&models.SpaceProject{}).Error
-				writeRemoteError(w, remoteErr)
-				return
-			}
-			if b.GitURL != "" {
-				var execResult struct {
-					ExitCode int    `json:"exitCode"`
-					Stdout   string `json:"stdout"`
-					Stderr   string `json:"stderr"`
-				}
-				remoteErr = remote.runner.call(r.Context(), "host.exec", map[string]any{"spaceId": remote.spaceID, "command": []string{"git", "clone", "--depth", "1", "--", b.GitURL, "/workspace/projects/" + b.Slug}, "workingDir": "/workspace"}, &execResult)
-				if remoteErr != nil {
-					cloneError = remoteErr.Error()
-				} else if execResult.ExitCode != 0 {
-					cloneError = strings.TrimSpace(execResult.Stderr + "\n" + execResult.Stdout)
-					if len(cloneError) > 800 {
-						cloneError = cloneError[:800]
-					}
-				}
-			}
-		} else if f, localErr := h.workspaceFor(r.Context(), p.TenantID, agent); localErr == nil {
-			if localErr = os.MkdirAll(filepath.Join(f.root, "projects", b.Slug), 0o750); localErr != nil {
-				_ = h.deps.Gorm.WithContext(r.Context()).Where("id = ?", id).Delete(&models.SpaceProject{}).Error
-				statusErr(w, localErr)
-				return
-			}
 		}
 	}
-	projectPath := any(nil)
-	if b.HasWorkspace {
-		projectPath = "/workspace/projects/" + b.Slug
+	presence, e := h.projectDiskPresence(r.Context(), p.TenantID, space, []models.SpaceProject{sp})
+	if e != nil {
+		statusErr(w, e)
+		return
 	}
-	response := map[string]any{"project": map[string]any{"id": id, "slug": b.Slug, "name": b.Name, "description": b.Description, "instructions": b.Instructions, "hasWorkspace": b.HasWorkspace, "path": projectPath}}
-	if cloneError != "" {
-		response["cloneError"] = cloneError
-	}
-	httpx.JSON(w, http.StatusOK, response)
+	sp.HasWorkspace = presence[sp.Slug]
+	httpx.JSON(w, http.StatusOK, map[string]any{"project": projectDTO(sp)})
 }
 func (h *handler) patchProject(w http.ResponseWriter, r *http.Request) {
-	m, e := decodeMap(r)
-	if e != nil {
-		httpx.Error(w, 400, "invalid JSON")
-		return
-	}
-	p := principal(r)
-	space, e := h.spaceForAgent(r.Context(), p.TenantID, chi.URLParam(r, "id"))
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	oldSlug := chi.URLParam(r, "slug")
-	var existingRow struct {
-		HasWorkspace bool `gorm:"column:has_workspace"`
-	}
-	if e = h.deps.Gorm.WithContext(r.Context()).Table("space_projects").Select("has_workspace").Where("tenant_id = ? AND space_id = ? AND slug = ?", p.TenantID, space, oldSlug).Take(&existingRow).Error; errors.Is(e, gorm.ErrRecordNotFound) {
-		statusErr(w, ErrNotFound)
-		return
-	} else if e != nil {
-		statusErr(w, e)
-		return
-	}
-	existingHas := existingRow.HasWorkspace
-	updates := map[string]any{}
-	for k, col := range map[string]string{"name": "name", "description": "description", "instructions": "instructions", "hasWorkspace": "has_workspace"} {
-		if v, ok := m[k]; ok {
-			updates[col] = v
-		}
-	}
-	if v, ok := m["withWorkspace"]; ok {
-		updates["has_workspace"] = v
-	}
-	if v, ok := m["slug"].(string); ok && slugify(v) != "" {
-		updates["slug"] = slugify(v)
-	}
-	if len(updates) == 0 {
-		httpx.JSON(w, http.StatusBadRequest, map[string]any{"error": "no supported fields"})
-		return
-	}
-	nextSlug := oldSlug
-	if v, ok := m["slug"].(string); ok && slugify(v) != "" {
-		nextSlug = slugify(v)
-	}
-	wantWorkspace := existingHas
-	if v, ok := m["withWorkspace"].(bool); ok && v {
-		wantWorkspace = true
-	}
-	if v, ok := m["hasWorkspace"].(bool); ok {
-		wantWorkspace = v
-	}
-	if remote, selected, fsErr := h.remoteWorkspace(r.Context(), p.TenantID, chi.URLParam(r, "id")); fsErr != nil {
-		writeRemoteError(w, fsErr)
-		return
-	} else if selected {
-		if existingHas && nextSlug != oldSlug {
-			from, to := projectRemotePath(oldSlug), projectRemotePath(nextSlug)
-			fsErr = remote.runner.call(r.Context(), "host.fs.rename", map[string]any{"spaceId": remote.spaceID, "oldPath": from, "newPath": to}, nil)
-		} else if wantWorkspace && !existingHas {
-			params, _ := remotePathParams(remote.spaceID, projectRemotePath(nextSlug))
-			fsErr = remote.runner.call(r.Context(), "host.fs.mkdir", params, nil)
-		}
-		if fsErr != nil {
-			writeRemoteError(w, fsErr)
-			return
-		}
-	} else if existingHas && nextSlug != oldSlug {
-		if f, fsErr := h.workspaceFor(r.Context(), p.TenantID, chi.URLParam(r, "id")); fsErr == nil {
-			if fsErr = os.Rename(filepath.Join(f.root, "projects", oldSlug), filepath.Join(f.root, "projects", nextSlug)); fsErr != nil {
-				statusErr(w, fsErr)
-				return
-			}
-		}
-	} else if wantWorkspace && !existingHas {
-		if f, fsErr := h.workspaceFor(r.Context(), p.TenantID, chi.URLParam(r, "id")); fsErr == nil {
-			if fsErr = os.MkdirAll(filepath.Join(f.root, "projects", nextSlug), 0o750); fsErr != nil {
-				statusErr(w, fsErr)
-				return
-			}
-		}
-	}
-	updates["updated_at"] = runtimeTimeString(h.store.now())
-	res := h.deps.Gorm.WithContext(r.Context()).Model(&models.SpaceProject{}).Where("tenant_id = ? AND space_id = ? AND slug = ?", p.TenantID, space, chi.URLParam(r, "slug")).Updates(updates)
-	if res.Error != nil {
-		statusErr(w, res.Error)
-		return
-	}
-	if res.RowsAffected == 0 {
-		statusErr(w, ErrNotFound)
-		return
-	}
-	lookupSlug := chi.URLParam(r, "slug")
-	if v, ok := m["slug"].(string); ok && slugify(v) != "" {
-		lookupSlug = slugify(v)
-	}
-	var proj models.SpaceProject
-	if e = h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND space_id = ? AND slug = ?", p.TenantID, space, lookupSlug).Take(&proj).Error; e != nil {
-		statusErr(w, e)
-		return
-	}
-	id := ""
-	if proj.ID != nil {
-		id = *proj.ID
-	}
-	var projectPath any
-	if proj.HasWorkspace {
-		projectPath = "/workspace/projects/" + lookupSlug
-	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"project": map[string]any{"id": id, "slug": lookupSlug, "name": proj.Name, "description": proj.Description, "instructions": proj.Instructions, "hasWorkspace": proj.HasWorkspace, "path": projectPath}})
+	h.mutateProject(w, r, false)
 }
 func (h *handler) deleteProject(w http.ResponseWriter, r *http.Request) {
-	p := principal(r)
-	space, e := h.spaceForAgent(r.Context(), p.TenantID, chi.URLParam(r, "id"))
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	slug := chi.URLParam(r, "slug")
-	var existingRow struct {
-		HasWorkspace bool `gorm:"column:has_workspace"`
-	}
-	if e = h.deps.Gorm.WithContext(r.Context()).Table("space_projects").Select("has_workspace").Where("tenant_id = ? AND space_id = ? AND slug = ?", p.TenantID, space, slug).Take(&existingRow).Error; errors.Is(e, gorm.ErrRecordNotFound) {
-		statusErr(w, ErrNotFound)
-		return
-	} else if e != nil {
-		statusErr(w, e)
-		return
-	}
-	hasWorkspace := existingRow.HasWorkspace
-	if hasWorkspace {
-		if remote, selected, fsErr := h.remoteWorkspace(r.Context(), p.TenantID, chi.URLParam(r, "id")); fsErr != nil {
-			writeRemoteError(w, fsErr)
-			return
-		} else if selected {
-			params, _ := remotePathParams(remote.spaceID, projectRemotePath(slug))
-			params["recursive"] = true
-			if fsErr = remote.runner.call(r.Context(), "host.fs.remove", params, nil); fsErr != nil {
-				writeRemoteError(w, fsErr)
-				return
-			}
-		} else if f, fsErr := h.workspaceFor(r.Context(), p.TenantID, chi.URLParam(r, "id")); fsErr == nil {
-			if fsErr = os.RemoveAll(filepath.Join(f.root, "projects", slug)); fsErr != nil {
-				statusErr(w, fsErr)
-				return
-			}
-		}
-	}
-	res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND space_id = ? AND slug = ?", p.TenantID, space, chi.URLParam(r, "slug")).Delete(&models.SpaceProject{})
-	if res.Error != nil {
-		statusErr(w, res.Error)
-		return
-	}
-	if res.RowsAffected == 0 {
-		statusErr(w, ErrNotFound)
-		return
-	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": true})
+	h.mutateProject(w, r, true)
 }
 func (h *handler) getProjectConfig(w http.ResponseWriter, r *http.Request) {
 	if remote, selected, e := h.remoteProject(r); e != nil {
@@ -1272,8 +830,8 @@ func (h *handler) putProjectInstructions(w http.ResponseWriter, r *http.Request)
 			writeRemoteError(w, e)
 			return
 		}
-		sub := h.deps.Gorm.Model(&models.Agent{}).Select("space_id").Where("tenant_id = ? AND id = ?", principal(r).TenantID, chi.URLParam(r, "id"))
-		h.deps.Gorm.WithContext(r.Context()).Model(&models.SpaceProject{}).Where("tenant_id = ? AND slug = ? AND space_id = (?)", principal(r).TenantID, chi.URLParam(r, "slug"), sub).Updates(map[string]any{"instructions": b.Content, "updated_at": runtimeTimeString(h.store.now())})
+		// Directory instruction files are independent of the project's conversation
+		// instructions column; never silently overwrite that separate setting.
 		httpx.JSON(w, http.StatusOK, map[string]any{"config": remote.projectSnapshot(r.Context(), chi.URLParam(r, "slug")), "path": "/workspace/projects/" + chi.URLParam(r, "slug") + "/" + b.File})
 		return
 	}
@@ -1282,12 +840,10 @@ func (h *handler) putProjectInstructions(w http.ResponseWriter, r *http.Request)
 		statusErr(w, e)
 		return
 	}
-	if e = atomicWrite(filepath.Join(dir, b.File), []byte(b.Content), 0o640); e != nil {
+	if e = writeProjectFile(dir, b.File, []byte(b.Content)); e != nil {
 		statusErr(w, e)
 		return
 	}
-	sub := h.deps.Gorm.Model(&models.Agent{}).Select("space_id").Where("tenant_id = ? AND id = ?", principal(r).TenantID, chi.URLParam(r, "id"))
-	h.deps.Gorm.WithContext(r.Context()).Model(&models.SpaceProject{}).Where("tenant_id = ? AND slug = ? AND space_id = (?)", principal(r).TenantID, chi.URLParam(r, "slug"), sub).Updates(map[string]any{"instructions": b.Content, "updated_at": runtimeTimeString(h.store.now())})
 	httpx.JSON(w, http.StatusOK, map[string]any{"config": projectConfigSnapshot(chi.URLParam(r, "slug"), dir), "path": "/workspace/projects/" + chi.URLParam(r, "slug") + "/" + b.File})
 }
 
@@ -1301,6 +857,7 @@ func (h *handler) listRuntimeNodes(w http.ResponseWriter, r *http.Request) {
 	out := make([]map[string]any, 0, len(ms))
 	for _, m := range ms {
 		x := runtimeNodeFromModel(m)
+		h.projectRuntimeNode(x)
 		if m.IsShared {
 			x["access"] = "shared"
 		} else {
@@ -1346,7 +903,9 @@ func (h *handler) getRuntimeNode(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"node": runtimeNodeFromModel(m)})
+	node := runtimeNodeFromModel(m)
+	h.projectRuntimeNode(node)
+	httpx.JSON(w, 200, map[string]any{"node": node})
 }
 func (h *handler) createRuntimeNode(w http.ResponseWriter, r *http.Request) {
 	var b struct {
@@ -1364,6 +923,10 @@ func (h *handler) createRuntimeNode(w http.ResponseWriter, r *http.Request) {
 	}
 	if b.Kind == "" {
 		b.Kind = "computer"
+	}
+	if b.Kind != "computer" && b.Kind != "server" || b.StorageRoot != "" {
+		httpx.Error(w, http.StatusBadRequest, "runtime nodes must use the managed Agent installation")
+		return
 	}
 	if b.StorageRoot == "" {
 		b.StorageRoot = "/var/lib/zakura"
@@ -1444,18 +1007,6 @@ func (h *handler) patchRuntimeNode(w http.ResponseWriter, r *http.Request) {
 	}
 	h.getRuntimeNode(w, r)
 }
-func (h *handler) deleteRuntimeNode(w http.ResponseWriter, r *http.Request) {
-	res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ? AND is_shared = false", principal(r).TenantID, chi.URLParam(r, "id")).Delete(&models.RuntimeNode{})
-	if res.Error != nil {
-		statusErr(w, res.Error)
-		return
-	}
-	if res.RowsAffected == 0 {
-		statusErr(w, ErrNotFound)
-		return
-	}
-	httpx.JSON(w, 200, map[string]any{"ok": true})
-}
 func (h *handler) runtimeHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if !h.authorizeRunnerNode(r, chi.URLParam(r, "id"), false) {
 		httpx.Error(w, http.StatusUnauthorized, "Unauthorized")
@@ -1470,7 +1021,7 @@ func (h *handler) runtimeHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := runtimeTimeString(h.store.now())
-	res := h.deps.Gorm.WithContext(r.Context()).Model(&models.RuntimeNode{}).Where("id = ?", chi.URLParam(r, "id")).Updates(map[string]any{"status": "online", "agent_version": b.AgentVersion, "capabilities_json": validJSON(b.Capabilities, "{}"), "host_info_json": validJSON(b.HostInfo, "{}"), "last_seen_at": now, "updated_at": now})
+	res := h.deps.Gorm.WithContext(r.Context()).Model(&models.RuntimeNode{}).Where("id = ?", chi.URLParam(r, "id")).Updates(map[string]any{"agent_version": b.AgentVersion, "capabilities_json": validJSON(b.Capabilities, "{}"), "host_info_json": validJSON(b.HostInfo, "{}"), "last_seen_at": now, "updated_at": now})
 	if res.Error != nil {
 		statusErr(w, res.Error)
 		return

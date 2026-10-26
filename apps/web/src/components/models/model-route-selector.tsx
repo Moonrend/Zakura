@@ -305,9 +305,9 @@ export function ModelRouteSelector({
         side={side}
         align={align}
         sideOffset={8}
-        className="w-auto min-w-48 max-w-[min(22rem,calc(100vw-1.5rem))]"
+        className="max-h-[min(25rem,var(--available-height))] w-auto min-w-48 max-w-[min(22rem,calc(100vw-1.5rem))]"
       >
-        <div className="flex items-center gap-2 border-b border-border/70 px-2 py-1.5">
+        <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-border/70 bg-popover px-2 py-1.5">
           <Search className="size-3.5 shrink-0 text-muted-foreground" />
           <input
             value={query}
@@ -319,7 +319,7 @@ export function ModelRouteSelector({
           />
         </div>
 
-        <div className="max-h-[min(22rem,var(--available-height))] overflow-y-auto pt-1">
+        <div className="pt-1">
           {filtered.length === 0 ? (
             <div className="px-2 py-5 text-center text-xs text-muted-foreground">
               没有匹配的模型

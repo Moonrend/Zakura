@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/Moonrend/Zakura/apps/server/internal/computers"
 )
 
 const (
@@ -47,6 +49,9 @@ func browserStderrFirstLine(result map[string]any) string {
 }
 
 func (h *handler) runBuiltinToolBrowser(ctx context.Context, tenant, agent, name string, args json.RawMessage) (json.RawMessage, error) {
+	if err := requireWorkspaceCapability(ctx, computers.Browser, "browser control"); err != nil {
+		return nil, err
+	}
 	parsed := map[string]any{}
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &parsed); err != nil {

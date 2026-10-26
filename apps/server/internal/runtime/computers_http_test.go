@@ -2,6 +2,9 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +13,7 @@ import (
 	"github.com/Moonrend/Zakura/apps/server/internal/computers"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
+	"golang.org/x/crypto/ssh"
 )
 
 func TestComputerSelectionHTTP(t *testing.T) {
@@ -52,17 +56,49 @@ func TestComputerSelectionHTTP(t *testing.T) {
 	if w := call(http.MethodPut, path, `{"computerId":"missing"}`, p); w.Code != 404 {
 		t.Fatalf("missing: %d %s", w.Code, w.Body)
 	}
-	for _, body := range []string{`{"computerId":"one"}`, `{"computerId":null}`} {
-		if w := call(http.MethodPut, path, body, p); w.Code != 200 {
+	server := "server:" + space.ID
+	for _, tc := range []struct{ body, choice, effective string }{
+		{`{"computerId":"one"}`, "one", "one"},
+		{`{"computerId":null}`, "", server},
+		{`{"computerId":"` + server + `"}`, "", server},
+	} {
+		if w := call(http.MethodPut, path, tc.body, p); w.Code != 200 {
 			t.Fatalf("selection: %d %s", w.Code, w.Body)
 		}
-		if w := call(http.MethodGet, path, "", p); w.Code != 200 || strings.TrimSpace(w.Body.String()) != body {
+		w := call(http.MethodGet, path, "", p)
+		var got struct {
+			ComputerID          *string `json:"computerId"`
+			EffectiveComputerID string  `json:"effectiveComputerId"`
+			ServerComputerID    string  `json:"serverComputerId"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &got) != nil {
 			t.Fatalf("read selection: %d %s", w.Code, w.Body)
+		}
+		choice := ""
+		if got.ComputerID != nil {
+			choice = *got.ComputerID
+		}
+		if choice != tc.choice || got.EffectiveComputerID != tc.effective || got.ServerComputerID != server {
+			t.Fatalf("selection after %s: %s", tc.body, w.Body)
 		}
 	}
 	w := call(http.MethodGet, "/spaces/"+space.ID+"/computers", "", p)
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `"id":"one"`) || strings.Contains(w.Body.String(), "secret") || strings.Contains(w.Body.String(), "apiKey") {
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"id":"one"`) || !strings.Contains(w.Body.String(), `"id":"`+server+`"`) || strings.Contains(w.Body.String(), "secret") || strings.Contains(w.Body.String(), "apiKey") {
 		t.Fatalf("catalog: %d %s", w.Code, w.Body)
+	}
+	var catalog []map[string]any
+	if json.Unmarshal(w.Body.Bytes(), &catalog) != nil || len(catalog) != 2 || catalog[0]["id"] != server || catalog[0]["role"] != "server" {
+		t.Fatalf("server computer must be listed first: %s", w.Body)
+	}
+	if w := call(http.MethodGet, "/spaces/"+space.ID+"/computer-default", "", p); w.Code != 200 || !strings.Contains(w.Body.String(), server) {
+		t.Fatalf("space default: %d %s", w.Code, w.Body)
+	}
+	owner := httpx.Principal{TenantID: "tenant", Role: "owner"}
+	if w := call(http.MethodPut, "/spaces/"+space.ID+"/computer-default", `{"computerId":"one"}`, owner); w.Code != 409 {
+		t.Fatalf("attached space default accepted: %d %s", w.Code, w.Body)
+	}
+	if w := call(http.MethodDelete, "/spaces/"+space.ID+"/computers/"+server, "", owner); w.Code != 409 {
+		t.Fatalf("server computer deleted: %d %s", w.Code, w.Body)
 	}
 	bound := httpx.Principal{TenantID: "tenant", SpaceID: space.ID, AgentID: agent.ID}
 	if w := call(http.MethodGet, path+"s", "", bound); w.Code != 200 || !strings.Contains(w.Body.String(), `"id":"one"`) || strings.Contains(w.Body.String(), "secret") || strings.Contains(w.Body.String(), "apiKey") {
@@ -122,7 +158,7 @@ func TestComputerManagementHTTP(t *testing.T) {
 		}
 	}
 	var ciphertext, computerID string
-	if err := d.DB.QueryRow(`SELECT secret_ref,id FROM computers WHERE space_id=? LIMIT 1`, space.ID).Scan(&ciphertext, &computerID); err != nil {
+	if err := d.DB.QueryRow(`SELECT secret_ref,id FROM computers WHERE space_id=? AND role='attached' LIMIT 1`, space.ID).Scan(&ciphertext, &computerID); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(ciphertext, "private-key-value") {
@@ -138,5 +174,84 @@ func TestComputerManagementHTTP(t *testing.T) {
 	}
 	if w := call("POST", path, `{"name":"bad","provider":"e2b","config":{}}`, p); w.Code != 400 {
 		t.Fatalf("missing credential: %d", w.Code)
+	}
+}
+
+func TestComputerManagementAcceptsComputerNode(t *testing.T) {
+	d := testDeps(t)
+	seedTenant(t, d, "tenant")
+	h := &handler{deps: d, store: NewStore(d)}
+	space, err := h.store.CreateSpace(context.Background(), "tenant", Space{Name: "S"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte("node-token"))
+	for _, node := range []struct{ id, kind string }{{"cnode", "computer"}, {"lnode", "local"}, {"rnode", "runner"}} {
+		if _, err := d.DB.Exec(`INSERT INTO runtime_nodes(id,tenant_id,name,slug,kind,status,token_hash,capabilities_json,host_info_json,storage_root,labels_json,is_shared,created_at,updated_at) VALUES(?,?,?,?,?,'offline',?,'{}','{}','/srv/zakura','{}',false,'now','now')`, node.id, "tenant", node.id, node.id, node.kind, hex.EncodeToString(sum[:])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	router := chi.NewRouter()
+	h.registerComputers(router)
+	path := "/spaces/" + space.ID + "/computers"
+	call := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", path, strings.NewReader(body))
+		req = req.WithContext(httpx.WithPrincipal(req.Context(), httpx.Principal{TenantID: "tenant", Role: "owner"}))
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		return w
+	}
+	if w := call(`{"name":"Local","provider":"temporary","runtimeNodeId":"cnode","config":{}}`); w.Code != 201 {
+		t.Fatalf("computer node rejected: %d %s", w.Code, w.Body)
+	}
+	if w := call(`{"name":"LocalRunner","provider":"temporary","runtimeNodeId":"lnode","config":{}}`); w.Code != 201 {
+		t.Fatalf("local node rejected: %d %s", w.Code, w.Body)
+	}
+	if w := call(`{"name":"Bad","provider":"temporary","runtimeNodeId":"rnode","config":{}}`); w.Code != 400 {
+		t.Fatalf("unrelated node kind accepted: %d %s", w.Code, w.Body)
+	}
+	// The Space already owns its server computer; another cannot be added.
+	if w := call(`{"name":"Second","provider":"server","runtimeNodeId":"cnode","config":{}}`); w.Code != 400 {
+		t.Fatalf("second server computer accepted: %d %s", w.Code, w.Body)
+	}
+}
+
+func TestComputerManagementRailwayAutoKey(t *testing.T) {
+	d := testDeps(t)
+	seedTenant(t, d, "tenant")
+	h := &handler{deps: d, store: NewStore(d)}
+	space, err := h.store.CreateSpace(context.Background(), "tenant", Space{Name: "S"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := chi.NewRouter()
+	h.registerComputers(router)
+	req := httptest.NewRequest("POST", "/spaces/"+space.ID+"/computers", strings.NewReader(`{"name":"Railway","provider":"railway","config":{}}`))
+	req = req.WithContext(httpx.WithPrincipal(req.Context(), httpx.Principal{TenantID: "tenant", Role: "owner"}))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != 201 {
+		t.Fatalf("railway create: %d %s", w.Code, w.Body)
+	}
+	var secret, computerID string
+	if err := d.DB.QueryRow(`SELECT secret_ref,id FROM computers WHERE space_id=? AND role='attached'`, space.ID).Scan(&secret, &computerID); err != nil {
+		t.Fatal(err)
+	}
+	plain, err := computers.OpenCredentials(d.Secret, "tenant", space.ID, computerID, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored map[string]string
+	if err := json.Unmarshal(plain, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(stored["privateKey"]) == "" {
+		t.Fatal("railway private key was not generated")
+	}
+	if _, ok := stored["hostKeyFingerprint"]; ok {
+		t.Fatalf("unexpected host key fingerprint: %q", stored["hostKeyFingerprint"])
+	}
+	if _, err := ssh.ParsePrivateKey([]byte(stored["privateKey"])); err != nil {
+		t.Fatalf("generated key does not parse: %v", err)
 	}
 }

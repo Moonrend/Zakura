@@ -3,18 +3,15 @@ package integration_test
 import (
 	"context"
 	"database/sql"
-	"os"
 	"testing"
 	"time"
 
 	platformdb "github.com/Moonrend/Zakura/apps/server/internal/platform/db"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/pgtest"
 )
 
 func TestPostgresGormConnection(t *testing.T) {
-	dsn := os.Getenv("ZAKURA_TEST_POSTGRES_URL")
-	if dsn == "" {
-		t.Skip("ZAKURA_TEST_POSTGRES_URL is not set")
-	}
+	dsn := pgtest.FreshURL(t, pgtest.URL(t), "integration_gorm")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	conn, err := platformdb.OpenGorm(ctx, dsn)

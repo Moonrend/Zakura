@@ -23,11 +23,11 @@ func TestComputerDispatchNeverFallsBack(t *testing.T) {
 	if err = d.Gorm.Exec(`INSERT INTO computers(id,tenant_id,space_id,name,provider,created_at,updated_at) VALUES('cloud','tenant',?,'Cloud','e2b','now','now')`, space.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err = h.computerStore().SetSpaceDefault(ctx, "tenant", space.ID, "cloud"); err != nil {
-		t.Fatal(err)
-	}
 	chat, err := h.store.CreateSession(ctx, "tenant", "", agent.ID, Session{})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err = h.computerStore().SetSessionDefault(ctx, "tenant", space.ID, chat.ID, "cloud"); err != nil {
 		t.Fatal(err)
 	}
 	run, err := h.store.StartRun(ctx, "tenant", agent.ID, chat.ID, "hi", nil, nil)
@@ -37,17 +37,17 @@ func TestComputerDispatchNeverFallsBack(t *testing.T) {
 	ctx = context.WithValue(ctx, computerRunKey{}, run.ID)
 	for _, name := range []string{"shell_exec", "fs_read", "mcp__shell", "instance:exec"} {
 		_, err = h.dispatchAgentTool(ctx, "tenant", agent.ID, chat.ID, "call", name, []byte(`{}`))
-		if err == nil || !strings.Contains(err.Error(), "refusing legacy workspace fallback") {
+		if err == nil || !strings.Contains(err.Error(), "never falls back to the server computer") {
 			t.Fatalf("%s: %v", name, err)
 		}
 	}
-	if err = h.guardLegacyComputer(ctx, "tenant", agent.ID, "wrong", nil); err == nil {
+	if _, err := h.resolveExecutionGuard(ctx, "tenant", agent.ID, "wrong", nil); err == nil {
 		t.Fatal("cross-session execution allowed")
 	}
-	if err = h.guardLegacyComputer(ctx, "tenant", agent.ID, chat.ID, []byte(`{"computerId":""}`)); err == nil {
+	if _, err := h.resolveExecutionGuard(ctx, "tenant", agent.ID, chat.ID, []byte(`{"computerId":""}`)); err == nil {
 		t.Fatal("empty override accepted")
 	}
-	if err = h.guardLegacyComputer(context.Background(), "tenant", agent.ID, chat.ID, nil); err == nil {
+	if _, err := h.resolveExecutionGuard(context.Background(), "tenant", agent.ID, chat.ID, nil); err == nil {
 		t.Fatal("missing run accepted")
 	}
 }
@@ -84,14 +84,14 @@ func TestListComputersUsesFrozenRunAndScope(t *testing.T) {
 		}
 	}
 	for _, initial := range []string{"", "one"} {
-		if initial != "" {
-			if err := h.computerStore().SetSpaceDefault(base, "tenant", space.ID, initial); err != nil {
-				t.Fatal(err)
-			}
-		}
 		chat, err := h.store.CreateSession(base, "tenant", "", agent.ID, Session{})
 		if err != nil {
 			t.Fatal(err)
+		}
+		if initial != "" {
+			if err := h.computerStore().SetSessionDefault(base, "tenant", space.ID, chat.ID, initial); err != nil {
+				t.Fatal(err)
+			}
 		}
 		run, err := h.store.StartRun(base, "tenant", agent.ID, chat.ID, "hi", nil, nil)
 		if err != nil {
@@ -108,15 +108,22 @@ func TestListComputersUsesFrozenRunAndScope(t *testing.T) {
 		var result struct {
 			Computers []map[string]any `json:"computers"`
 			Default   *string          `json:"defaultComputerId"`
+			Server    *string          `json:"serverComputerId"`
 		}
 		if err := json.Unmarshal(raw, &result); err != nil {
 			t.Fatal(err)
 		}
-		if len(result.Computers) != 2 {
+		if len(result.Computers) != 3 || result.Server == nil || *result.Server != "server:"+space.ID {
 			t.Fatalf("catalog: %s", raw)
 		}
-		if initial == "" && result.Default != nil || initial != "" && (result.Default == nil || *result.Default != initial) {
-			t.Fatalf("mutable default leaked: %s", raw)
+		// The Run keeps the computer pinned at its start: the chat's choice then,
+		// or the Space server computer, never a choice made afterwards.
+		want := initial
+		if want == "" {
+			want = "server:" + space.ID
+		}
+		if result.Default == nil || *result.Default != want {
+			t.Fatalf("mutable choice leaked: %s", raw)
 		}
 		for _, c := range result.Computers {
 			for _, field := range []string{"secretRef", "settings", "apiKey", "tenantId"} {

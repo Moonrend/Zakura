@@ -92,7 +92,7 @@ export function McpInstallFlow({
   const [instanceId, setInstanceId] = useState<string | null>(null);
   const [spaces, setSpaces] = useState<SpaceItem[]>(spacesProp ?? []);
   const [spaceTarget, setSpaceTarget] = useState<SpaceTargetValue>(() => ({
-    all: !defaultSpaceIds?.length,
+    all: false,
     spaceIds: defaultSpaceIds ?? [],
   }));
   const spaceTargetRef = useRef(spaceTarget);
@@ -212,9 +212,13 @@ export function McpInstallFlow({
   }
 
   function installSpacePayload() {
-    return spaceTargetRef.current.all
-      ? { all: true as const }
-      : { all: false as const, spaceIds: spaceTargetRef.current.spaceIds };
+    const ids = resolveSpaceIds(spaceTargetRef.current, spacesRef.current);
+    if (!ids.length) throw new Error("请选择所属空间");
+    if (config.kind === "stdio" && ids.length !== 1) {
+      throw new Error("Stdio MCP 必须只属于一个空间，运行在该空间的服务器电脑上");
+    }
+    if (ids.length !== 1) throw new Error("请选择一个所属空间，远程 MCP 可在安装后显式绑定其他空间");
+    return { all: false as const, spaceId: ids[0], spaceIds: ids };
   }
 
   async function finishInstall(result: InstallResult) {
@@ -285,18 +289,15 @@ export function McpInstallFlow({
       setPhase("verifying");
       try {
         await verifyUpstreamOauth(id);
-      } catch {
-        /* non-fatal */
-      }
-      try {
         await api(`/api/instances/${id}/start`, { method: "POST" });
-      } catch {
-        /* 可能已在运行 */
+        await bindSpaces(id);
+        setPhase("done");
+        toast.success("已授权并启动");
+        onComplete?.({ instanceId: id, slug: config.name });
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+        setPhase("error");
       }
-      await bindSpaces(id);
-      setPhase("done");
-      toast.success("已授权并启动");
-      onComplete?.({ instanceId: id, slug: config.name });
     },
     // bindSpaces 用 ref，故意不列入 deps
     // eslint-disable-next-line react-hooks/exhaustive-deps

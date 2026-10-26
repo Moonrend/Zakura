@@ -44,6 +44,7 @@ import { cn } from "@/lib/utils";
 
 type Binding = {
   id: string;
+  spaceId: string;
   agentId: string;
   platform: string;
   profileKey: string;
@@ -117,16 +118,16 @@ function isChatSdkConnector(c: ConnectorView): boolean {
 
 export function AgentPlatformsPanel({
   agentId,
-  spaceId: _spaceId,
-  memberAgents: _memberAgents,
+  spaceId,
+  memberAgents,
 }: {
-  agentId: string;
-  /** 渠道绑定归 Space；控制台传入以便后续按空间展示。 */
+  agentId?: string;
   spaceId?: string;
   memberAgents?: Array<{ id: string; name: string }>;
 }) {
-  void _spaceId;
-  void _memberAgents;
+  const agents = useMemo(() => memberAgents ?? (agentId ? [{ id: agentId, name: "当前 Agent" }] : []), [memberAgents, agentId]);
+  const [replyAgentId, setReplyAgentId] = useState(agentId ?? "");
+  const [enabled, setEnabled] = useState(false);
   const [connectors, setConnectors] = useState<ConnectorView[]>([]);
   const [allBindings, setAllBindings] = useState<Binding[]>([]);
   const [webhookBaseUrl, setWebhookBaseUrl] = useState("");
@@ -149,8 +150,8 @@ export function AgentPlatformsPanel({
   const [saving, setSaving] = useState(false);
 
   const agentBindings = useMemo(
-    () => allBindings.filter((b) => b.agentId === agentId && b.platform !== "email"),
-    [allBindings, agentId],
+    () => allBindings.filter((b) => (spaceId ? b.spaceId === spaceId : b.agentId === agentId) && b.platform !== "email"),
+    [allBindings, agentId, spaceId],
   );
   const remotePlatforms = useMemo(() => connectors.filter(isChatSdkConnector), [connectors]);
   const catalogConnector = useMemo(
@@ -172,9 +173,9 @@ export function AgentPlatformsPanel({
     setRemoteError("");
     try {
       const [connResult, models, cloud] = await Promise.all([
-        api<{ connectors: ConnectorView[] }>("/api/connectors?scope=tenant"),
+        api<{ connectors: ConnectorView[] }>(`/api/connectors?scope=tenant${spaceId ? `&spaceId=${encodeURIComponent(spaceId)}` : ""}`),
         listChatModels(),
-        getCloudConfig(agentId).catch(() => null),
+        agentId ? getCloudConfig(agentId).catch(() => null) : Promise.resolve(null),
       ]);
       setChatModels(models);
       setAgentDefaultModel(cloud?.cloud.model?.trim() || null);
@@ -182,7 +183,7 @@ export function AgentPlatformsPanel({
 
       let remote: { bindings: Binding[]; webhookBaseUrl: string; initialized: boolean };
       try {
-        remote = await api("/api/remote-channels");
+        remote = await api(`/api/remote-channels${spaceId ? `?spaceId=${encodeURIComponent(spaceId)}` : agentId ? `?agentId=${encodeURIComponent(agentId)}` : ""}`);
         if (!remote.initialized) setRemoteError("远程通路尚未初始化");
       } catch (err) {
         remote = { bindings: [], webhookBaseUrl: "", initialized: false };
@@ -197,23 +198,25 @@ export function AgentPlatformsPanel({
     } finally {
       setLoading(false);
     }
-  }, [agentId]);
+  }, [agentId, spaceId]);
 
   useEffect(() => { void load(); }, [load]);
 
   useEffect(() => {
     return subscribePlatformEvents((ev) => {
       if (ev.type !== "connector_notice") return;
-      if (ev.agentId && ev.agentId !== agentId) return;
+      if (ev.agentId && (spaceId ? !agents.some((agent) => agent.id === ev.agentId) : ev.agentId !== agentId)) return;
       if (ev.level === "error") toast.error(ev.message);
       else if (ev.level === "warn") toast.warning(ev.message);
       else toast.message(ev.message);
     });
-  }, [agentId]);
+  }, [agentId, spaceId, agents]);
 
   // Sync draft
   useEffect(() => {
     if (editingBinding) {
+      setReplyAgentId(editingBinding.agentId ?? "");
+      setEnabled(editingBinding.enabled);
       setPlatform(editingBinding.platform);
       setLabelDraft(
         editingBinding.label || platformLabels[editingBinding.platform] || editingBinding.platform,
@@ -226,6 +229,8 @@ export function AgentPlatformsPanel({
       return;
     }
     if (platform) {
+      setReplyAgentId(agentId ?? "");
+      setEnabled(Boolean(agentId));
       setLabelDraft(platformLabels[platform] ?? platform);
       setProfileDraft({});
       setAllowAll(false);
@@ -233,7 +238,7 @@ export function AgentPlatformsPanel({
       setModel("");
       setModelRouteId(null);
     }
-  }, [editingBinding, platform]);
+  }, [editingBinding, platform, agentId]);
 
   function openAdd() {
     setEditingId(null);
@@ -259,10 +264,11 @@ export function AgentPlatformsPanel({
         toast.warning("未设置模型，且 Agent / 团队也无默认模型");
       }
       const payload = {
-        agentId,
+        ...(spaceId ? { spaceId } : {}),
+        agentId: replyAgentId,
         platform,
         label: labelDraft.trim() || platformLabels[platform] || platform,
-        enabled: true,
+        enabled: enabled && Boolean(replyAgentId),
         credentials: profileDraft,
         credentialsEnabled: true,
         settings: {
@@ -418,7 +424,7 @@ export function AgentPlatformsPanel({
                 {b.label || platformLabels[b.platform] || b.platform}
               </span>
               <p className="mt-0.5 text-[11px] text-muted-foreground">
-                {b.enabled ? "启用" : "未启用"}
+                {b.agentId ? agents.find((agent) => agent.id === b.agentId)?.name ?? "回复 Agent 不可用" : "未指定回复 Agent"} · {b.enabled ? "启用" : "未启用"}
               </p>
             </div>
             <div
@@ -458,7 +464,7 @@ export function AgentPlatformsPanel({
                   : "添加平台"}
             </SheetTitle>
             {!editingId ? (
-              <SheetDescription>选择平台，填写凭据即可上线</SheetDescription>
+              <SheetDescription>凭据保存在 Space 中；指定回复 Agent 后可启用。</SheetDescription>
             ) : null}
           </SheetHeader>
 
@@ -510,6 +516,19 @@ export function AgentPlatformsPanel({
                     onChange={(e) => setLabelDraft(e.target.value)}
                     placeholder={platformLabels[platform] ?? platform}
                   />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="channel-reply-agent">回复 Agent</Label>
+                  <select id="channel-reply-agent" className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm" value={replyAgentId} onChange={(event) => { setReplyAgentId(event.target.value); if (!event.target.value) setEnabled(false); }}>
+                    <option value="">暂不指定</option>
+                    {agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+                  </select>
+                  {agents.length === 0 ? <p className="text-xs text-muted-foreground">这个 Space 还没有 Agent。可以先保存平台凭据，之后再指定回复 Agent。</p> : null}
+                  <div className="flex items-center justify-between gap-3">
+                    <Label htmlFor="channel-enabled">启用渠道</Label>
+                    <Switch id="channel-enabled" checked={enabled} disabled={!replyAgentId} onCheckedChange={setEnabled} />
+                  </div>
                 </div>
 
                 {/* Credential fields — inline, no card wrapper */}

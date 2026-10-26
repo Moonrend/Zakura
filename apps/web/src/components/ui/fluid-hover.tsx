@@ -1,7 +1,6 @@
 "use client";
 
-import {
-  Children,
+import React, {
   createContext,
   useContext,
   useMemo,
@@ -20,22 +19,21 @@ import {
 import { FluidHoverHighlight } from "@/components/ui/fluid-hover-highlight";
 
 const FluidHoverContext = createContext<UseFluidHoverReturn | null>(null);
-const FluidHoverIndexContext = createContext<number | undefined>(undefined);
 const FluidHoverAllocContext = createContext<{ claim: () => number } | null>(null);
 
 export function useOptionalFluidHover() {
   return useContext(FluidHoverContext);
 }
 
-export function useFluidHoverIndex() {
-  return useContext(FluidHoverIndexContext);
+function useFluidHoverAllocator() {
+  const seq = useRef(0);
+  return useMemo(() => ({ claim: () => seq.current++ }), []);
 }
 
 export function useFluidHoverScope(options?: UseFluidHoverOptions) {
   const ref = useRef<HTMLElement | null>(null);
   const hover = useFluidHover(ref, options);
-  const seq = useRef(0);
-  const alloc = useMemo(() => ({ claim: () => seq.current++ }), []);
+  const alloc = useFluidHoverAllocator();
   return { ref, hover, alloc };
 }
 
@@ -64,14 +62,11 @@ export function FluidHoverProvider({
   hover: UseFluidHoverReturn;
   children: ReactNode;
 }) {
+  const alloc = useFluidHoverAllocator();
   return (
-    <FluidHoverContext.Provider value={hover}>
-      {Children.map(children, (child, index) => (
-        <FluidHoverIndexContext.Provider value={index}>
-          {child}
-        </FluidHoverIndexContext.Provider>
-      ))}
-    </FluidHoverContext.Provider>
+    <FluidHoverContextOnly hover={hover} alloc={alloc}>
+      {children}
+    </FluidHoverContextOnly>
   );
 }
 
@@ -80,13 +75,15 @@ export function useFluidItem(
   index?: number,
 ) {
   const hover = useContext(FluidHoverContext);
-  const ctxIndex = useContext(FluidHoverIndexContext);
   const alloc = useContext(FluidHoverAllocContext);
   const owned = useRef<number | undefined>(undefined);
-  if (owned.current === undefined) {
-    owned.current = index ?? ctxIndex ?? alloc?.claim();
+  if (index === undefined && owned.current === undefined) {
+    owned.current = alloc?.claim();
   }
-  useRegisterFluidHoverItem(hover?.registerItem, owned.current, ref);
+  // Allocate per item: wrappers and groups can contain several registered rows.
+  const itemIndex = index ?? owned.current;
+  useRegisterFluidHoverItem(hover?.registerItem, itemIndex, ref);
+  return itemIndex;
 }
 
 type FluidListProps = HTMLAttributes<HTMLDivElement> &

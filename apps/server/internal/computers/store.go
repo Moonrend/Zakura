@@ -21,21 +21,29 @@ func (s Store) query(q string) string {
 	return q
 }
 
-// SetSpaceDefault never changes an existing chat's selection.
+// SetSpaceDefault is retired: a Space's default is always its server computer.
+// Naming that computer is accepted as a no-op; any other computer is refused
+// with ErrSpaceDefaultFixed and a foreign or missing one with sql.ErrNoRows.
+//
+// Deprecated: select computers per chat with SetSessionDefault.
 func (s Store) SetSpaceDefault(ctx context.Context, tenant, space, computer string) error {
-	result, err := s.DB.ExecContext(ctx, s.query(`INSERT INTO space_computer_defaults(space_id,tenant_id,computer_id)
- SELECT space_id,tenant_id,id FROM computers WHERE tenant_id=? AND space_id=? AND id=?
- ON CONFLICT(space_id) DO UPDATE SET computer_id=excluded.computer_id WHERE space_computer_defaults.tenant_id=excluded.tenant_id`), tenant, space, computer)
-	return requireRow(result, err)
+	c, err := s.Get(ctx, tenant, space, computer)
+	if err != nil {
+		return err
+	}
+	if !c.IsServer() {
+		return ErrSpaceDefaultFixed
+	}
+	return nil
 }
 
-// InitializeSessionDefault snapshots the Space default exactly once. Invoke at
-// chat creation, not at Run start; no default is represented by sql.ErrNoRows.
+// InitializeSessionDefault records a new chat's selection exactly once. A new
+// chat follows the Space server computer, represented by sql.ErrNoRows here;
+// an explicit choice made earlier is preserved.
 func (s Store) InitializeSessionDefault(ctx context.Context, tenant, space, session string) (string, error) {
 	_, err := s.DB.ExecContext(ctx, s.query(`INSERT INTO session_computer_defaults(session_id,tenant_id,space_id,computer_id)
- SELECT cs.id,cs.tenant_id,a.space_id,d.computer_id FROM cloud_agent_sessions cs
+ SELECT cs.id,cs.tenant_id,a.space_id,NULL FROM cloud_agent_sessions cs
  JOIN agents a ON a.id=cs.agent_id AND a.tenant_id=cs.tenant_id
- LEFT JOIN space_computer_defaults d ON d.space_id=a.space_id AND d.tenant_id=cs.tenant_id
  WHERE cs.id=? AND cs.tenant_id=? AND a.space_id=?
  ON CONFLICT(session_id) DO NOTHING`), session, tenant, space)
 	if err != nil {
@@ -62,13 +70,16 @@ func (s Store) SetSessionDefault(ctx context.Context, tenant, space, session, co
 }
 
 // SnapshotRunTarget is retry-safe: the first persisted target wins even if the
-// chat default changes while a Run is active. It deliberately has no Space fallback.
+// chat's choice changes while a Run is active. A chat without a choice pins the
+// Space server computer; sql.ErrNoRows means the Space has none.
 func (s Store) SnapshotRunTarget(ctx context.Context, tenant, space, run string) (string, error) {
-	_, err := s.DB.ExecContext(ctx, s.query(`INSERT INTO run_computer_targets(run_id,tenant_id,space_id,computer_id)
- SELECT r.id,cs.tenant_id,a.space_id,d.computer_id FROM cloud_agent_runs r
+	_, err := s.DB.ExecContext(ctx, s.query(`INSERT INTO run_computer_targets(run_id,tenant_id,space_id,computer_id,workspace_instance_id,workspace_generation)
+ SELECT r.id,cs.tenant_id,a.space_id,COALESCE(d.computer_id,sc.id),ws.current_workspace_instance_id,ws.workspace_generation FROM cloud_agent_runs r
  JOIN cloud_agent_sessions cs ON cs.id=r.session_id
  JOIN agents a ON a.id=cs.agent_id AND a.tenant_id=cs.tenant_id
+ JOIN spaces ws ON ws.id=a.space_id AND ws.tenant_id=cs.tenant_id
  LEFT JOIN session_computer_defaults d ON d.session_id=cs.id AND d.tenant_id=cs.tenant_id AND d.space_id=a.space_id
+ LEFT JOIN computers sc ON sc.tenant_id=cs.tenant_id AND sc.space_id=a.space_id AND sc.role='server'
  WHERE r.id=? AND cs.tenant_id=? AND a.space_id=?
  ON CONFLICT(run_id) DO NOTHING`), run, tenant, space)
 	if err != nil {
@@ -156,8 +167,9 @@ func (s Store) ExecutionTarget(ctx context.Context, tenant, space, run, id strin
 	return t, err
 }
 
-// ClearSessionDefault records an explicit absence, rather than deleting the row.
-// This prevents initialization retries from restoring a later Space default.
+// ClearSessionDefault records that the chat follows the Space server computer.
+// It upserts rather than deletes so initialization retries cannot resurrect an
+// earlier explicit choice.
 func (s Store) ClearSessionDefault(ctx context.Context, tenant, space, session string) error {
 	result, err := s.DB.ExecContext(ctx, s.query(`INSERT INTO session_computer_defaults(session_id,tenant_id,space_id,computer_id)
  SELECT cs.id,cs.tenant_id,a.space_id,NULL FROM cloud_agent_sessions cs

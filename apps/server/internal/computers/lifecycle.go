@@ -23,11 +23,24 @@ func runtimeID() string {
 // ReserveRuntime records intent only. It never calls a provider. Retrying returns
 // the same operation, including Unknown outcomes; terminal sessions are never
 // silently recreated. Provider and scope are read from storage, not caller data.
+// The Space server computer has no provider runtime: its workspace lifecycle
+// owns its container, so it is refused here.
 func (s Store) ReserveRuntime(ctx context.Context, tenant, space, computer, session string, now time.Time) (Runtime, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return Runtime{}, err
+	}
+	defer tx.Rollback()
+	if err = s.lockCreationOwners(ctx, tx, tenant, space, computer); err != nil {
+		return Runtime{}, err
+	}
 	var c Computer
 	c.ID, c.TenantID, c.SpaceID = computer, tenant, space
-	if err := s.DB.QueryRowContext(ctx, s.query(`SELECT provider FROM computers WHERE tenant_id=? AND space_id=? AND id=?`), tenant, space, computer).Scan(&c.Provider); err != nil {
+	if err := tx.QueryRowContext(ctx, s.query(`SELECT provider,role FROM computers WHERE tenant_id=? AND space_id=? AND id=?`), tenant, space, computer).Scan(&c.Provider, &c.Role); err != nil {
 		return Runtime{}, err
+	}
+	if c.IsServer() {
+		return Runtime{}, ErrServerComputerManaged
 	}
 	scope, err := c.Scope(session)
 	if err != nil {
@@ -35,18 +48,18 @@ func (s Store) ReserveRuntime(ctx context.Context, tenant, space, computer, sess
 	}
 	if session != "" {
 		var valid int
-		err = s.DB.QueryRowContext(ctx, s.query(`SELECT 1 FROM cloud_agent_sessions cs JOIN agents a ON a.id=cs.agent_id AND a.tenant_id=cs.tenant_id WHERE cs.id=? AND cs.tenant_id=? AND a.space_id=?`), session, tenant, space).Scan(&valid)
+		err = tx.QueryRowContext(ctx, s.query(`SELECT 1 FROM cloud_agent_sessions cs JOIN agents a ON a.id=cs.agent_id AND a.tenant_id=cs.tenant_id WHERE cs.id=? AND cs.tenant_id=? AND a.space_id=?`), session, tenant, space).Scan(&valid)
 		if err != nil {
 			return Runtime{}, err
 		}
 	}
 	stamp := now.UTC().Format(time.RFC3339Nano)
-	_, err = s.DB.ExecContext(ctx, s.query(`INSERT INTO computer_runtimes(id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,created_at,updated_at)
+	_, err = tx.ExecContext(ctx, s.query(`INSERT INTO computer_runtimes(id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,created_at,updated_at)
  SELECT ?,?,?,?,?,?,?,'pending_approval',?,? WHERE NOT EXISTS (SELECT 1 FROM computer_runtimes WHERE tenant_id=? AND space_id=? AND computer_id=? AND session_scope=?) ON CONFLICT DO NOTHING`), runtimeID(), tenant, space, computer, scope, runtimeID(), runtimeID(), stamp, stamp, tenant, space, computer, scope)
 	if err != nil {
 		return Runtime{}, err
 	}
-	r, err := scanRuntime(s.DB.QueryRowContext(ctx, s.query(`SELECT id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,external_id,expires_at,idle_deadline FROM computer_runtimes WHERE tenant_id=? AND space_id=? AND computer_id=? AND session_scope=? ORDER BY created_at DESC,id DESC LIMIT 1`), tenant, space, computer, scope))
+	r, err := scanRuntime(tx.QueryRowContext(ctx, s.query(`SELECT id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,external_id,root_path,access_token_enc,manifest_json,expires_at,idle_deadline FROM computer_runtimes WHERE tenant_id=? AND space_id=? AND computer_id=? AND session_scope=? ORDER BY created_at DESC,id DESC LIMIT 1`), tenant, space, computer, scope))
 	if err != nil {
 		return Runtime{}, err
 	}
@@ -54,19 +67,83 @@ func (s Store) ReserveRuntime(ctx context.Context, tenant, space, computer, sess
 	case Expired, Destroyed, Failed:
 		return r, ErrRuntimeEnded
 	}
-	return r, nil
+	return r, tx.Commit()
+}
+
+// ReserveReplacementRuntime records intent for a fresh instance only after the
+// active-slot runtime for the same computer and session scope is terminal: a
+// failed outcome may be replaced, while an unknown outcome is parked as failed
+// first so it releases the active-slot index. A pending/creating/ready/
+// disconnected/stopping slot is never replaced and yields ErrTransitionConflict.
+// It never contacts a provider; the new runtime still requires explicit approval.
+func (s Store) ReserveReplacementRuntime(ctx context.Context, tenant, space, computer, session string, now time.Time) (Runtime, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return Runtime{}, err
+	}
+	defer tx.Rollback()
+	if err = s.lockCreationOwners(ctx, tx, tenant, space, computer); err != nil {
+		return Runtime{}, err
+	}
+	var c Computer
+	c.ID, c.TenantID, c.SpaceID = computer, tenant, space
+	if err := tx.QueryRowContext(ctx, s.query(`SELECT provider,role FROM computers WHERE tenant_id=? AND space_id=? AND id=?`), tenant, space, computer).Scan(&c.Provider, &c.Role); err != nil {
+		return Runtime{}, err
+	}
+	if c.IsServer() {
+		return Runtime{}, ErrServerComputerManaged
+	}
+	scope, err := c.Scope(session)
+	if err != nil {
+		return Runtime{}, err
+	}
+	if session != "" {
+		var valid int
+		err = tx.QueryRowContext(ctx, s.query(`SELECT 1 FROM cloud_agent_sessions cs JOIN agents a ON a.id=cs.agent_id AND a.tenant_id=cs.tenant_id WHERE cs.id=? AND cs.tenant_id=? AND a.space_id=?`), session, tenant, space).Scan(&valid)
+		if err != nil {
+			return Runtime{}, err
+		}
+	}
+	stamp := now.UTC().Format(time.RFC3339Nano)
+	current, err := scanRuntime(tx.QueryRowContext(ctx, s.query(`SELECT id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,external_id,root_path,access_token_enc,manifest_json,expires_at,idle_deadline FROM computer_runtimes WHERE tenant_id=? AND space_id=? AND computer_id=? AND session_scope=? ORDER BY created_at DESC,id DESC LIMIT 1`), tenant, space, computer, scope))
+	if err != nil {
+		return Runtime{}, err
+	}
+	switch current.State {
+	case Failed:
+	case Unknown:
+		result, updateErr := tx.ExecContext(ctx, s.query(`UPDATE computer_runtimes SET state='failed',updated_at=? WHERE tenant_id=? AND space_id=? AND computer_id=? AND id=? AND incarnation=? AND state='unknown'`), stamp, tenant, space, computer, current.ID, current.Incarnation)
+		if updateErr = requireRow(result, updateErr); updateErr != nil {
+			return Runtime{}, updateErr
+		}
+	default:
+		return Runtime{}, ErrTransitionConflict
+	}
+	replacementID := runtimeID()
+	_, err = tx.ExecContext(ctx, s.query(`INSERT INTO computer_runtimes(id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'pending_approval',?,?)`), replacementID, tenant, space, computer, scope, runtimeID(), runtimeID(), stamp, stamp)
+	if err != nil {
+		return Runtime{}, err
+	}
+	result, err := scanRuntime(tx.QueryRowContext(ctx, s.query(`SELECT id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,external_id,root_path,access_token_enc,manifest_json,expires_at,idle_deadline FROM computer_runtimes WHERE tenant_id=? AND space_id=? AND computer_id=? AND id=?`), tenant, space, computer, replacementID))
+	if err != nil {
+		return Runtime{}, err
+	}
+	return result, tx.Commit()
 }
 
 type runtimeScanner interface{ Scan(...any) error }
 
 func scanRuntime(row runtimeScanner) (Runtime, error) {
 	var r Runtime
-	var external, expires, idle sql.NullString
-	err := row.Scan(&r.ID, &r.TenantID, &r.SpaceID, &r.ComputerID, &r.SessionScope, &r.Incarnation, &r.CreateOperationID, &r.State, &external, &expires, &idle)
+	var external, root, token, manifest, expires, idle sql.NullString
+	err := row.Scan(&r.ID, &r.TenantID, &r.SpaceID, &r.ComputerID, &r.SessionScope, &r.Incarnation, &r.CreateOperationID, &r.State, &external, &root, &token, &manifest, &expires, &idle)
 	if err != nil {
 		return r, err
 	}
 	r.ExternalID = external.String
+	r.RootPath = root.String
+	r.AccessTokenEnc = token.String
+	r.ManifestJSON = manifest.String
 	if expires.Valid {
 		r.ExpiresAt, err = time.Parse(time.RFC3339Nano, expires.String)
 		if err != nil {
@@ -91,6 +168,9 @@ func (s Store) ApproveCreation(ctx context.Context, target Target, operation, ac
 		return err
 	}
 	defer tx.Rollback()
+	if err = s.lockCreationOwners(ctx, tx, target.TenantID, target.SpaceID, target.ComputerID); err != nil {
+		return err
+	}
 	stamp := now.UTC().Format(time.RFC3339Nano)
 	result, err := tx.ExecContext(ctx, s.query(`UPDATE computer_runtimes SET state='creating',updated_at=? WHERE tenant_id=? AND space_id=? AND computer_id=? AND id=? AND incarnation=? AND create_operation_id=? AND state='pending_approval'`), stamp, target.TenantID, target.SpaceID, target.ComputerID, target.RuntimeID, target.Incarnation, operation)
 	if err = requireRow(result, err); err != nil {

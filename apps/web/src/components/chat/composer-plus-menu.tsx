@@ -136,7 +136,7 @@ export function ComposerPlusMenu({
                 aria-label="添加"
                 aria-expanded={open}
                 className={cn(
-                  "relative size-8 rounded-full text-muted-foreground",
+                  "relative size-8 rounded-md text-muted-foreground",
                   nudgeToken ? "animate-remote-nudge" : null,
                 )}
               />

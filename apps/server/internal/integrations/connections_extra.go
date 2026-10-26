@@ -11,39 +11,40 @@ import (
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 func (h *handler) setConnectionState(w http.ResponseWriter, r *http.Request, enabled bool) {
-	p := principal(r)
 	raw := chi.URLParam(r, "id")
-	kind, id := "connector", strings.TrimPrefix(raw, "connector:")
 	if strings.HasPrefix(raw, "instance:") {
-		kind = "instance"
-		id = strings.TrimPrefix(raw, "instance:")
-	}
-	now := h.now().Format(time.RFC3339Nano)
-	var res *gorm.DB
-	if kind == "connector" {
-		res = h.deps.Gorm.WithContext(r.Context()).Model(&models.AgentConnectorInstallation{}).
-			Where("tenant_id = ? AND id = ?", p.TenantID, id).
-			Updates(map[string]any{"enabled": enabled, "updated_at": now})
-	} else {
-		status := "stopped"
-		if enabled {
-			status = "running"
+		id := strings.TrimPrefix(raw, "instance:")
+		if _, e := h.authorizeInstance(r, id); e != nil {
+			writeErr(w, e)
+			return
 		}
-		res = h.deps.Gorm.WithContext(r.Context()).Model(&models.ComponentInstance{}).
-			Where("tenant_id = ? AND id = ?", p.TenantID, id).
-			Updates(map[string]any{"status": status, "updated_at": now})
-	}
-	if res.Error != nil {
-		writeErr(w, res.Error)
-		return
-	}
-	if res.RowsAffected == 0 {
-		httpx.Error(w, 404, "Not found")
-		return
+		if h.lifecycle == nil {
+			httpx.Error(w, 503, "runtime lifecycle unavailable")
+			return
+		}
+		var e error
+		if enabled {
+			e = h.lifecycle.Start(r.Context(), principal(r).TenantID, id)
+		} else {
+			e = h.lifecycle.Stop(r.Context(), principal(r).TenantID, id)
+		}
+		if e != nil {
+			writeErr(w, e)
+			return
+		}
+	} else {
+		row, e := h.loadConnection(r, raw)
+		if e != nil {
+			writeErr(w, e)
+			return
+		}
+		if e = h.deps.Gorm.WithContext(r.Context()).Model(&spaceConnectorInstallation{}).Where("tenant_id = ? AND id = ?", row.TenantID, row.ID).Updates(map[string]any{"enabled": enabled, "updated_at": h.now().Format(time.RFC3339Nano)}).Error; e != nil {
+			writeErr(w, e)
+			return
+		}
 	}
 	httpx.JSON(w, 200, map[string]any{"ok": true, "enabled": enabled})
 }
@@ -56,76 +57,90 @@ func (h *handler) stopConnection(w http.ResponseWriter, r *http.Request) {
 func (h *handler) installConnection(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	var b struct {
-		Source, Kind, Name string
-		AgentIDs           []string        `json:"agentIds"`
-		Config             json.RawMessage `json:"config"`
+		Source          string         `json:"source"`
+		Ref             string         `json:"ref"`
+		Kind            string         `json:"kind"`
+		Name            string         `json:"name"`
+		SpaceID         string         `json:"spaceId"`
+		AgentIDs        []string       `json:"agentIds"`
+		RuntimeNodeID   *string        `json:"runtimeNodeId"`
+		CredentialScope string         `json:"credentialScope"`
+		Config          map[string]any `json:"config"`
 	}
-	if httpx.DecodeJSON(r, &b) != nil || b.Source == "" || len(b.AgentIDs) == 0 {
-		httpx.Error(w, 400, "source and agentIds required")
+	if httpx.DecodeJSON(r, &b) != nil || b.Source == "" {
+		httpx.Error(w, 400, "source required")
+		return
+	}
+	space, e := h.installTarget(r, b.SpaceID, b.AgentIDs)
+	if e != nil {
+		writeErr(w, e)
 		return
 	}
 	ref := b.Source
-	if validRef(ref) {
-		installed := 0
-		for _, agent := range b.AgentIDs {
-			raw, _ := json.Marshal(map[string]any{"config": json.RawMessage(b.Config)})
-			enc, _ := encrypt(h.deps.Secret, p.TenantID+":"+agent+":"+ref, raw)
-			now := h.now().Format(time.RFC3339Nano)
-			row := models.AgentConnectorInstallation{ID: strPtr(h.id()), TenantID: p.TenantID, AgentID: agent, ConnectorRef: ref, Enabled: true, ConfigEnc: enc, CreatedAt: now, UpdatedAt: now}
-			if e := h.deps.Gorm.WithContext(r.Context()).Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "agent_id"}, {Name: "connector_ref"}},
-				DoUpdates: clause.AssignmentColumns([]string{"enabled", "config_enc", "updated_at"}),
-			}).Create(&row).Error; e == nil {
-				installed++
-			}
-		}
-		meta, _ := provider(ref)
-		httpx.JSON(w, http.StatusCreated, map[string]any{"result": map[string]any{"id": "connector:" + ref, "kind": "platform", "name": meta.Name, "status": "installed", "installed": installed}})
-		return
+	if b.Ref != "" {
+		ref = b.Ref
 	}
-	if b.Kind == "mcp" || strings.HasPrefix(b.Source, "http://") || strings.HasPrefix(b.Source, "https://") {
-		if _, e := safeURL(b.Source); e != nil {
+	if validRef(ref) {
+		if e = h.migrateSpaceConnectors(r.Context(), p.TenantID, space); e != nil {
 			writeErr(w, e)
 			return
 		}
-		cfg := map[string]any{"url": b.Source}
-		secretValues := map[string]any{}
-		if len(b.Config) > 0 {
-			_ = json.Unmarshal(b.Config, &cfg)
-			cfg["url"] = b.Source
-		}
-		for _, key := range []string{"token", "apiKey", "accessToken", "headers", "credentials", "secret"} {
-			if value, ok := cfg[key]; ok {
-				secretValues[key] = value
-				delete(cfg, key)
-			}
-		}
-		cfgRaw, _ := json.Marshal(cfg)
-		now := h.now().Format(time.RFC3339Nano)
-		created := []string{}
-		for _, agent := range b.AgentIDs {
-			id := h.id()
-			secretRaw, _ := json.Marshal(secretValues)
-			enc, encErr := encrypt(h.deps.Secret, "mcp:"+id, secretRaw)
-			if encErr != nil {
-				writeErr(w, encErr)
-				return
-			}
-			secretStored, _ := json.Marshal(map[string]any{"enc": enc, "configured": len(secretValues) > 0})
-			row := models.ComponentInstance{ID: strPtr(id), TenantID: p.TenantID, AgentID: strPtr(agent), ComponentType: "mcp", ComponentRef: slugifyLocal(b.Name), Name: b.Name, ConfigJSON: string(cfgRaw), SecretJSON: string(secretStored), Status: "ready", CreatedAt: now, UpdatedAt: now}
-			if e := h.deps.Gorm.WithContext(r.Context()).Create(&row).Error; e == nil {
-				created = append(created, id)
-			}
-		}
-		if len(created) == 0 {
-			httpx.Error(w, http.StatusBadRequest, "no eligible agents")
+		row, e := h.saveSpaceConnector(r.Context(), p.TenantID, space, ref, connectorEnvelope{Config: b.Config}, true)
+		if e != nil {
+			writeErr(w, e)
 			return
 		}
-		result := map[string]any{"id": created[0], "instanceId": created[0], "instanceIds": created, "kind": "mcp-http", "name": b.Name, "status": "ready"}
-		httpx.JSON(w, http.StatusCreated, map[string]any{"result": result})
+		httpx.JSON(w, 201, map[string]any{"result": connectionView(row)})
 		return
 	}
-	httpx.Error(w, 400, "unknown connector or MCP source")
+	if b.Kind != "mcp" && b.Kind != "mcp-http" && !strings.HasPrefix(b.Source, "https://") && !strings.HasPrefix(b.Source, "http://") {
+		httpx.Error(w, 400, "unknown connector or MCP source")
+		return
+	}
+	if _, e = safeURL(b.Source); e != nil {
+		writeErr(w, e)
+		return
+	}
+	cfg := b.Config
+	if cfg == nil {
+		cfg = map[string]any{}
+	}
+	cfg["url"] = b.Source
+	cfg["ownerSpaceId"] = space
+	cfg["transport"] = "http"
+	secrets := map[string]any{}
+	for _, key := range []string{"token", "apiKey", "accessToken", "headers", "credentials", "secret"} {
+		if value, ok := cfg[key]; ok {
+			secrets[key] = value
+			delete(cfg, key)
+		}
+	}
+	id := h.id()
+	secretRaw, _ := json.Marshal(secrets)
+	enc, e := encrypt(h.deps.Secret, "mcp:"+id, secretRaw)
+	if e != nil {
+		writeErr(w, e)
+		return
+	}
+	stored, _ := json.Marshal(map[string]any{"enc": enc, "configured": len(secrets) > 0})
+	cfgRaw, _ := json.Marshal(cfg)
+	now := h.now().Format(time.RFC3339Nano)
+	name := strings.TrimSpace(b.Name)
+	if name == "" {
+		name = b.Source
+	}
+	row := models.ComponentInstance{ID: strPtr(id), TenantID: p.TenantID, ComponentType: "mcp", ComponentRef: slugifyLocal(name), Name: name, ConfigJSON: string(cfgRaw), SecretJSON: string(stored), Status: "stopped", CreatedAt: now, UpdatedAt: now}
+	e = h.deps.Gorm.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+		if e := tx.Create(&row).Error; e != nil {
+			return e
+		}
+		return tx.Exec("INSERT INTO agent_bindings(id,tenant_id,space_id,agent_id,instance_id,created_at) VALUES(?,?,?,NULL,?,?)", h.id(), p.TenantID, space, id, now).Error
+	})
+	if e != nil {
+		writeErr(w, e)
+		return
+	}
+	httpx.JSON(w, 201, map[string]any{"result": map[string]any{"id": "instance:" + id, "instanceId": id, "spaceId": space, "kind": "mcp-http", "name": name, "status": "stopped"}})
 }
 func slugifyLocal(v string) string {
 	v = strings.ToLower(strings.TrimSpace(v))

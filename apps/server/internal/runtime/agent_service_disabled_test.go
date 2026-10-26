@@ -182,7 +182,7 @@ func assertDisabledToolInterception(t *testing.T, store *Store, agent Agent, ses
 	if containsToolName(second, mcpToolName) {
 		t.Fatalf("second request declared disabled mcp tool=%v", second)
 	}
-	if result := toolMessageContent(bodies[1]); !strings.Contains(result, "No matching tools found.") {
+	if result := toolMessageContent(bodies[1]); !strings.Contains(result, `"tools":[]`) {
 		t.Fatalf("tool_search result=%q", result)
 	}
 
