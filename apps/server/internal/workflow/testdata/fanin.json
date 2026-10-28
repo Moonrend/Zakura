@@ -1,0 +1,5730 @@
+[
+  {
+    "name": "fanin-nominal-criticalPath-capacity0",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "fanin 0",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "fanin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 12,
+            "costMicros": 1291,
+            "maxAttempts": 4,
+            "backoffMs": 3,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 25,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "fanin task 1",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 29,
+            "costMicros": 1592,
+            "maxAttempts": 1,
+            "backoffMs": 6,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 42
+          },
+          {
+            "id": "n2",
+            "name": "fanin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 46,
+            "costMicros": 1893,
+            "maxAttempts": 2,
+            "backoffMs": 9,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "fanin task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 63,
+            "costMicros": 2194,
+            "maxAttempts": 3,
+            "backoffMs": 1,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 76,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "fanin task 4",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 13,
+            "costMicros": 2495,
+            "maxAttempts": 4,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 26
+          },
+          {
+            "id": "n5",
+            "name": "fanin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 30,
+            "costMicros": 2796,
+            "maxAttempts": 1,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "fanin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n0",
+              "n1",
+              "n2",
+              "n3",
+              "n4",
+              "n5"
+            ],
+            "durationMs": 47,
+            "costMicros": 3097,
+            "maxAttempts": 2,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 60,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 1,
+        "resources": {
+          "cpu": 1,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "nominal",
+        "priority": "criticalPath",
+        "budgetMicros": 0,
+        "deadlineMs": 0
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 12,
+            "retryBoundMs": 96,
+            "costMicros": 1291,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 12,
+            "latestStartMs": 51,
+            "slackMs": 51,
+            "tailMs": 59,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n1",
+            "durationMs": 29,
+            "retryBoundMs": 29,
+            "costMicros": 1592,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 29,
+            "latestStartMs": 34,
+            "slackMs": 34,
+            "tailMs": 76,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 46,
+            "retryBoundMs": 101,
+            "costMicros": 1893,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 46,
+            "latestStartMs": 17,
+            "slackMs": 17,
+            "tailMs": 93,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 63,
+            "retryBoundMs": 220,
+            "costMicros": 2194,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 63,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 110,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 13,
+            "retryBoundMs": 103,
+            "costMicros": 2495,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 13,
+            "latestStartMs": 50,
+            "slackMs": 50,
+            "tailMs": 60,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 30,
+            "retryBoundMs": 30,
+            "costMicros": 2796,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 30,
+            "latestStartMs": 33,
+            "slackMs": 33,
+            "tailMs": 77,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 47,
+            "retryBoundMs": 117,
+            "costMicros": 3097,
+            "earliestStartMs": 63,
+            "earliestFinishMs": 110,
+            "latestStartMs": 63,
+            "slackMs": 0,
+            "tailMs": 47,
+            "level": 1,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n3",
+          "n6"
+        ],
+        "criticalPathMs": 110,
+        "totalWorkMs": 240,
+        "totalCostMicros": 15358,
+        "parallelLowerBoundMs": 240,
+        "resourceLowerBoundsMs": {
+          "cpu": 118,
+          "model": 42
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n3",
+          "startMs": 0,
+          "endMs": 63,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 63,
+          "endMs": 109,
+          "waitMs": 63,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 109,
+          "endMs": 139,
+          "waitMs": 109,
+          "resources": {}
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 139,
+          "endMs": 168,
+          "waitMs": 139,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 168,
+          "endMs": 181,
+          "waitMs": 168,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n0",
+          "startMs": 181,
+          "endMs": 193,
+          "waitMs": 181,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 193,
+          "endMs": 240,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 240,
+      "peakParallel": 1,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "fanin-nominal-criticalPath-capacity1",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "fanin 1",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "fanin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n5",
+              "n4",
+              "n3",
+              "n2",
+              "n1",
+              "n0"
+            ],
+            "durationMs": 47,
+            "costMicros": 3097,
+            "maxAttempts": 2,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 60,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "fanin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 30,
+            "costMicros": 2796,
+            "maxAttempts": 1,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "fanin task 4",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 13,
+            "costMicros": 2495,
+            "maxAttempts": 4,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 26
+          },
+          {
+            "id": "n3",
+            "name": "fanin task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 63,
+            "costMicros": 2194,
+            "maxAttempts": 3,
+            "backoffMs": 1,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 76,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "fanin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 46,
+            "costMicros": 1893,
+            "maxAttempts": 2,
+            "backoffMs": 9,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "fanin task 1",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 29,
+            "costMicros": 1592,
+            "maxAttempts": 1,
+            "backoffMs": 6,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 42
+          },
+          {
+            "id": "n0",
+            "name": "fanin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 12,
+            "costMicros": 1291,
+            "maxAttempts": 4,
+            "backoffMs": 3,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 25,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 2,
+        "resources": {
+          "cpu": 1,
+          "model": 2
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "nominal",
+        "priority": "criticalPath",
+        "budgetMicros": 10000,
+        "deadlineMs": 150
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 12,
+            "retryBoundMs": 96,
+            "costMicros": 1291,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 12,
+            "latestStartMs": 51,
+            "slackMs": 51,
+            "tailMs": 59,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n1",
+            "durationMs": 29,
+            "retryBoundMs": 29,
+            "costMicros": 1592,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 29,
+            "latestStartMs": 34,
+            "slackMs": 34,
+            "tailMs": 76,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 46,
+            "retryBoundMs": 101,
+            "costMicros": 1893,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 46,
+            "latestStartMs": 17,
+            "slackMs": 17,
+            "tailMs": 93,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 63,
+            "retryBoundMs": 220,
+            "costMicros": 2194,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 63,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 110,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 13,
+            "retryBoundMs": 103,
+            "costMicros": 2495,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 13,
+            "latestStartMs": 50,
+            "slackMs": 50,
+            "tailMs": 60,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 30,
+            "retryBoundMs": 30,
+            "costMicros": 2796,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 30,
+            "latestStartMs": 33,
+            "slackMs": 33,
+            "tailMs": 77,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 47,
+            "retryBoundMs": 117,
+            "costMicros": 3097,
+            "earliestStartMs": 63,
+            "earliestFinishMs": 110,
+            "latestStartMs": 63,
+            "slackMs": 0,
+            "tailMs": 47,
+            "level": 1,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n3",
+          "n6"
+        ],
+        "criticalPathMs": 110,
+        "totalWorkMs": 240,
+        "totalCostMicros": 15358,
+        "parallelLowerBoundMs": 120,
+        "resourceLowerBoundsMs": {
+          "cpu": 118,
+          "model": 21
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n3",
+          "startMs": 0,
+          "endMs": 63,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 0,
+          "endMs": 46,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 46,
+          "endMs": 76,
+          "waitMs": 46,
+          "resources": {}
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 63,
+          "endMs": 92,
+          "waitMs": 63,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 76,
+          "endMs": 89,
+          "waitMs": 76,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n0",
+          "startMs": 89,
+          "endMs": 101,
+          "waitMs": 89,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 101,
+          "endMs": 148,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 148,
+      "peakParallel": 2,
+      "peakResources": {
+        "cpu": 1,
+        "model": 2
+      },
+      "withinBudget": false,
+      "withinDeadline": true,
+      "optimal": false
+    }
+  },
+  {
+    "name": "fanin-nominal-criticalPath-capacity2",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "fanin 2",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "fanin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 12,
+            "costMicros": 1291,
+            "maxAttempts": 4,
+            "backoffMs": 3,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 25,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "fanin task 1",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 29,
+            "costMicros": 1592,
+            "maxAttempts": 1,
+            "backoffMs": 6,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 42
+          },
+          {
+            "id": "n2",
+            "name": "fanin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 46,
+            "costMicros": 1893,
+            "maxAttempts": 2,
+            "backoffMs": 9,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "fanin task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 63,
+            "costMicros": 2194,
+            "maxAttempts": 3,
+            "backoffMs": 1,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 76,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "fanin task 4",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 13,
+            "costMicros": 2495,
+            "maxAttempts": 4,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 26
+          },
+          {
+            "id": "n5",
+            "name": "fanin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 30,
+            "costMicros": 2796,
+            "maxAttempts": 1,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "fanin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n0",
+              "n1",
+              "n2",
+              "n3",
+              "n4",
+              "n5"
+            ],
+            "durationMs": 47,
+            "costMicros": 3097,
+            "maxAttempts": 2,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 60,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 3,
+        "resources": {
+          "cpu": 2,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 2
+        },
+        "mode": "nominal",
+        "priority": "criticalPath",
+        "budgetMicros": 20000,
+        "deadlineMs": 300
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 12,
+            "retryBoundMs": 96,
+            "costMicros": 1291,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 12,
+            "latestStartMs": 51,
+            "slackMs": 51,
+            "tailMs": 59,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n1",
+            "durationMs": 29,
+            "retryBoundMs": 29,
+            "costMicros": 1592,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 29,
+            "latestStartMs": 34,
+            "slackMs": 34,
+            "tailMs": 76,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 46,
+            "retryBoundMs": 101,
+            "costMicros": 1893,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 46,
+            "latestStartMs": 17,
+            "slackMs": 17,
+            "tailMs": 93,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 63,
+            "retryBoundMs": 220,
+            "costMicros": 2194,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 63,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 110,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 13,
+            "retryBoundMs": 103,
+            "costMicros": 2495,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 13,
+            "latestStartMs": 50,
+            "slackMs": 50,
+            "tailMs": 60,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 30,
+            "retryBoundMs": 30,
+            "costMicros": 2796,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 30,
+            "latestStartMs": 33,
+            "slackMs": 33,
+            "tailMs": 77,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 47,
+            "retryBoundMs": 117,
+            "costMicros": 3097,
+            "earliestStartMs": 63,
+            "earliestFinishMs": 110,
+            "latestStartMs": 63,
+            "slackMs": 0,
+            "tailMs": 47,
+            "level": 1,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n3",
+          "n6"
+        ],
+        "criticalPathMs": 110,
+        "totalWorkMs": 240,
+        "totalCostMicros": 15358,
+        "parallelLowerBoundMs": 80,
+        "resourceLowerBoundsMs": {
+          "cpu": 59,
+          "model": 42
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n3",
+          "startMs": 0,
+          "endMs": 63,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 0,
+          "endMs": 46,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 0,
+          "endMs": 30,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 30,
+          "endMs": 59,
+          "waitMs": 30,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n0",
+          "startMs": 46,
+          "endMs": 58,
+          "waitMs": 46,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 59,
+          "endMs": 72,
+          "waitMs": 59,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 72,
+          "endMs": 119,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 119,
+      "peakParallel": 3,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": false
+    }
+  },
+  {
+    "name": "fanin-nominal-criticalPath-capacity3",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "fanin 3",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "fanin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n5",
+              "n4",
+              "n3",
+              "n2",
+              "n1",
+              "n0"
+            ],
+            "durationMs": 47,
+            "costMicros": 3097,
+            "maxAttempts": 2,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 60,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "fanin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 30,
+            "costMicros": 2796,
+            "maxAttempts": 1,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "fanin task 4",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 13,
+            "costMicros": 2495,
+            "maxAttempts": 4,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 26
+          },
+          {
+            "id": "n3",
+            "name": "fanin task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 63,
+            "costMicros": 2194,
+            "maxAttempts": 3,
+            "backoffMs": 1,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 76,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "fanin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 46,
+            "costMicros": 1893,
+            "maxAttempts": 2,
+            "backoffMs": 9,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "fanin task 1",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 29,
+            "costMicros": 1592,
+            "maxAttempts": 1,
+            "backoffMs": 6,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 42
+          },
+          {
+            "id": "n0",
+            "name": "fanin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 12,
+            "costMicros": 1291,
+            "maxAttempts": 4,
+            "backoffMs": 3,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 25,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 6,
+        "resources": {
+          "cpu": 4,
+          "model": 3
+        },
+        "concurrencyLimits": {
+          "exclusive": 3
+        },
+        "mode": "nominal",
+        "priority": "criticalPath",
+        "budgetMicros": 100000,
+        "deadlineMs": 1000
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 12,
+            "retryBoundMs": 96,
+            "costMicros": 1291,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 12,
+            "latestStartMs": 51,
+            "slackMs": 51,
+            "tailMs": 59,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n1",
+            "durationMs": 29,
+            "retryBoundMs": 29,
+            "costMicros": 1592,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 29,
+            "latestStartMs": 34,
+            "slackMs": 34,
+            "tailMs": 76,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 46,
+            "retryBoundMs": 101,
+            "costMicros": 1893,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 46,
+            "latestStartMs": 17,
+            "slackMs": 17,
+            "tailMs": 93,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 63,
+            "retryBoundMs": 220,
+            "costMicros": 2194,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 63,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 110,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 13,
+            "retryBoundMs": 103,
+            "costMicros": 2495,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 13,
+            "latestStartMs": 50,
+            "slackMs": 50,
+            "tailMs": 60,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 30,
+            "retryBoundMs": 30,
+            "costMicros": 2796,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 30,
+            "latestStartMs": 33,
+            "slackMs": 33,
+            "tailMs": 77,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 47,
+            "retryBoundMs": 117,
+            "costMicros": 3097,
+            "earliestStartMs": 63,
+            "earliestFinishMs": 110,
+            "latestStartMs": 63,
+            "slackMs": 0,
+            "tailMs": 47,
+            "level": 1,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n3",
+          "n6"
+        ],
+        "criticalPathMs": 110,
+        "totalWorkMs": 240,
+        "totalCostMicros": 15358,
+        "parallelLowerBoundMs": 40,
+        "resourceLowerBoundsMs": {
+          "cpu": 30,
+          "model": 14
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n3",
+          "startMs": 0,
+          "endMs": 63,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 0,
+          "endMs": 46,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 0,
+          "endMs": 30,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 0,
+          "endMs": 29,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 0,
+          "endMs": 13,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 12,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 63,
+          "endMs": 110,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 110,
+      "peakParallel": 6,
+      "peakResources": {
+        "cpu": 3,
+        "model": 2
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "fanin-nominal-id-capacity0",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "fanin 0",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "fanin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 12,
+            "costMicros": 1291,
+            "maxAttempts": 4,
+            "backoffMs": 3,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 25,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "fanin task 1",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 29,
+            "costMicros": 1592,
+            "maxAttempts": 1,
+            "backoffMs": 6,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 42
+          },
+          {
+            "id": "n2",
+            "name": "fanin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 46,
+            "costMicros": 1893,
+            "maxAttempts": 2,
+            "backoffMs": 9,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "fanin task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 63,
+            "costMicros": 2194,
+            "maxAttempts": 3,
+            "backoffMs": 1,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 76,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "fanin task 4",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 13,
+            "costMicros": 2495,
+            "maxAttempts": 4,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 26
+          },
+          {
+            "id": "n5",
+            "name": "fanin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 30,
+            "costMicros": 2796,
+            "maxAttempts": 1,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "fanin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n0",
+              "n1",
+              "n2",
+              "n3",
+              "n4",
+              "n5"
+            ],
+            "durationMs": 47,
+            "costMicros": 3097,
+            "maxAttempts": 2,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 60,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 1,
+        "resources": {
+          "cpu": 1,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "nominal",
+        "priority": "id",
+        "budgetMicros": 0,
+        "deadlineMs": 0
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 12,
+            "retryBoundMs": 96,
+            "costMicros": 1291,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 12,
+            "latestStartMs": 51,
+            "slackMs": 51,
+            "tailMs": 59,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n1",
+            "durationMs": 29,
+            "retryBoundMs": 29,
+            "costMicros": 1592,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 29,
+            "latestStartMs": 34,
+            "slackMs": 34,
+            "tailMs": 76,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 46,
+            "retryBoundMs": 101,
+            "costMicros": 1893,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 46,
+            "latestStartMs": 17,
+            "slackMs": 17,
+            "tailMs": 93,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 63,
+            "retryBoundMs": 220,
+            "costMicros": 2194,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 63,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 110,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 13,
+            "retryBoundMs": 103,
+            "costMicros": 2495,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 13,
+            "latestStartMs": 50,
+            "slackMs": 50,
+            "tailMs": 60,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 30,
+            "retryBoundMs": 30,
+            "costMicros": 2796,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 30,
+            "latestStartMs": 33,
+            "slackMs": 33,
+            "tailMs": 77,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 47,
+            "retryBoundMs": 117,
+            "costMicros": 3097,
+            "earliestStartMs": 63,
+            "earliestFinishMs": 110,
+            "latestStartMs": 63,
+            "slackMs": 0,
+            "tailMs": 47,
+            "level": 1,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n3",
+          "n6"
+        ],
+        "criticalPathMs": 110,
+        "totalWorkMs": 240,
+        "totalCostMicros": 15358,
+        "parallelLowerBoundMs": 240,
+        "resourceLowerBoundsMs": {
+          "cpu": 118,
+          "model": 42
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 12,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 12,
+          "endMs": 41,
+          "waitMs": 12,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 41,
+          "endMs": 87,
+          "waitMs": 41,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 87,
+          "endMs": 150,
+          "waitMs": 87,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 150,
+          "endMs": 163,
+          "waitMs": 150,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 163,
+          "endMs": 193,
+          "waitMs": 163,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 193,
+          "endMs": 240,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 240,
+      "peakParallel": 1,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "fanin-nominal-id-capacity1",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "fanin 1",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "fanin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n5",
+              "n4",
+              "n3",
+              "n2",
+              "n1",
+              "n0"
+            ],
+            "durationMs": 47,
+            "costMicros": 3097,
+            "maxAttempts": 2,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 60,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "fanin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 30,
+            "costMicros": 2796,
+            "maxAttempts": 1,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "fanin task 4",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 13,
+            "costMicros": 2495,
+            "maxAttempts": 4,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 26
+          },
+          {
+            "id": "n3",
+            "name": "fanin task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 63,
+            "costMicros": 2194,
+            "maxAttempts": 3,
+            "backoffMs": 1,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 76,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "fanin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 46,
+            "costMicros": 1893,
+            "maxAttempts": 2,
+            "backoffMs": 9,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "fanin task 1",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 29,
+            "costMicros": 1592,
+            "maxAttempts": 1,
+            "backoffMs": 6,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 42
+          },
+          {
+            "id": "n0",
+            "name": "fanin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 12,
+            "costMicros": 1291,
+            "maxAttempts": 4,
+            "backoffMs": 3,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 25,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 2,
+        "resources": {
+          "cpu": 1,
+          "model": 2
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "nominal",
+        "priority": "id",
+        "budgetMicros": 10000,
+        "deadlineMs": 150
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 12,
+            "retryBoundMs": 96,
+            "costMicros": 1291,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 12,
+            "latestStartMs": 51,
+            "slackMs": 51,
+            "tailMs": 59,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n1",
+            "durationMs": 29,
+            "retryBoundMs": 29,
+            "costMicros": 1592,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 29,
+            "latestStartMs": 34,
+            "slackMs": 34,
+            "tailMs": 76,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 46,
+            "retryBoundMs": 101,
+            "costMicros": 1893,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 46,
+            "latestStartMs": 17,
+            "slackMs": 17,
+            "tailMs": 93,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 63,
+            "retryBoundMs": 220,
+            "costMicros": 2194,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 63,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 110,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 13,
+            "retryBoundMs": 103,
+            "costMicros": 2495,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 13,
+            "latestStartMs": 50,
+            "slackMs": 50,
+            "tailMs": 60,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 30,
+            "retryBoundMs": 30,
+            "costMicros": 2796,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 30,
+            "latestStartMs": 33,
+            "slackMs": 33,
+            "tailMs": 77,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 47,
+            "retryBoundMs": 117,
+            "costMicros": 3097,
+            "earliestStartMs": 63,
+            "earliestFinishMs": 110,
+            "latestStartMs": 63,
+            "slackMs": 0,
+            "tailMs": 47,
+            "level": 1,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n3",
+          "n6"
+        ],
+        "criticalPathMs": 110,
+        "totalWorkMs": 240,
+        "totalCostMicros": 15358,
+        "parallelLowerBoundMs": 120,
+        "resourceLowerBoundsMs": {
+          "cpu": 118,
+          "model": 21
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 12,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 0,
+          "endMs": 29,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 12,
+          "endMs": 58,
+          "waitMs": 12,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 29,
+          "endMs": 92,
+          "waitMs": 29,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 58,
+          "endMs": 71,
+          "waitMs": 58,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 71,
+          "endMs": 101,
+          "waitMs": 71,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 101,
+          "endMs": 148,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 148,
+      "peakParallel": 2,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": false,
+      "withinDeadline": true,
+      "optimal": false
+    }
+  },
+  {
+    "name": "fanin-nominal-id-capacity2",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "fanin 2",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "fanin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 12,
+            "costMicros": 1291,
+            "maxAttempts": 4,
+            "backoffMs": 3,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 25,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "fanin task 1",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 29,
+            "costMicros": 1592,
+            "maxAttempts": 1,
+            "backoffMs": 6,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 42
+          },
+          {
+            "id": "n2",
+            "name": "fanin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 46,
+            "costMicros": 1893,
+            "maxAttempts": 2,
+            "backoffMs": 9,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "fanin task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 63,
+            "costMicros": 2194,
+            "maxAttempts": 3,
+            "backoffMs": 1,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 76,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "fanin task 4",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 13,
+            "costMicros": 2495,
+            "maxAttempts": 4,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 26
+          },
+          {
+            "id": "n5",
+            "name": "fanin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 30,
+            "costMicros": 2796,
+            "maxAttempts": 1,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "fanin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n0",
+              "n1",
+              "n2",
+              "n3",
+              "n4",
+              "n5"
+            ],
+            "durationMs": 47,
+            "costMicros": 3097,
+            "maxAttempts": 2,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 60,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 3,
+        "resources": {
+          "cpu": 2,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 2
+        },
+        "mode": "nominal",
+        "priority": "id",
+        "budgetMicros": 20000,
+        "deadlineMs": 300
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 12,
+            "retryBoundMs": 96,
+            "costMicros": 1291,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 12,
+            "latestStartMs": 51,
+            "slackMs": 51,
+            "tailMs": 59,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n1",
+            "durationMs": 29,
+            "retryBoundMs": 29,
+            "costMicros": 1592,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 29,
+            "latestStartMs": 34,
+            "slackMs": 34,
+            "tailMs": 76,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 46,
+            "retryBoundMs": 101,
+            "costMicros": 1893,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 46,
+            "latestStartMs": 17,
+            "slackMs": 17,
+            "tailMs": 93,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 63,
+            "retryBoundMs": 220,
+            "costMicros": 2194,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 63,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 110,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 13,
+            "retryBoundMs": 103,
+            "costMicros": 2495,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 13,
+            "latestStartMs": 50,
+            "slackMs": 50,
+            "tailMs": 60,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 30,
+            "retryBoundMs": 30,
+            "costMicros": 2796,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 30,
+            "latestStartMs": 33,
+            "slackMs": 33,
+            "tailMs": 77,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 47,
+            "retryBoundMs": 117,
+            "costMicros": 3097,
+            "earliestStartMs": 63,
+            "earliestFinishMs": 110,
+            "latestStartMs": 63,
+            "slackMs": 0,
+            "tailMs": 47,
+            "level": 1,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n3",
+          "n6"
+        ],
+        "criticalPathMs": 110,
+        "totalWorkMs": 240,
+        "totalCostMicros": 15358,
+        "parallelLowerBoundMs": 80,
+        "resourceLowerBoundsMs": {
+          "cpu": 59,
+          "model": 42
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 12,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 0,
+          "endMs": 29,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 0,
+          "endMs": 46,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 12,
+          "endMs": 75,
+          "waitMs": 12,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 29,
+          "endMs": 42,
+          "waitMs": 29,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 42,
+          "endMs": 72,
+          "waitMs": 42,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 75,
+          "endMs": 122,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 122,
+      "peakParallel": 3,
+      "peakResources": {
+        "cpu": 2,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": false
+    }
+  },
+  {
+    "name": "fanin-nominal-id-capacity3",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "fanin 3",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "fanin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n5",
+              "n4",
+              "n3",
+              "n2",
+              "n1",
+              "n0"
+            ],
+            "durationMs": 47,
+            "costMicros": 3097,
+            "maxAttempts": 2,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 60,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "fanin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 30,
+            "costMicros": 2796,
+            "maxAttempts": 1,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "fanin task 4",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 13,
+            "costMicros": 2495,
+            "maxAttempts": 4,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 26
+          },
+          {
+            "id": "n3",
+            "name": "fanin task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 63,
+            "costMicros": 2194,
+            "maxAttempts": 3,
+            "backoffMs": 1,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 76,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "fanin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 46,
+            "costMicros": 1893,
+            "maxAttempts": 2,
+            "backoffMs": 9,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "fanin task 1",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 29,
+            "costMicros": 1592,
+            "maxAttempts": 1,
+            "backoffMs": 6,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 42
+          },
+          {
+            "id": "n0",
+            "name": "fanin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 12,
+            "costMicros": 1291,
+            "maxAttempts": 4,
+            "backoffMs": 3,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 25,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 6,
+        "resources": {
+          "cpu": 4,
+          "model": 3
+        },
+        "concurrencyLimits": {
+          "exclusive": 3
+        },
+        "mode": "nominal",
+        "priority": "id",
+        "budgetMicros": 100000,
+        "deadlineMs": 1000
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 12,
+            "retryBoundMs": 96,
+            "costMicros": 1291,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 12,
+            "latestStartMs": 51,
+            "slackMs": 51,
+            "tailMs": 59,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n1",
+            "durationMs": 29,
+            "retryBoundMs": 29,
+            "costMicros": 1592,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 29,
+            "latestStartMs": 34,
+            "slackMs": 34,
+            "tailMs": 76,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 46,
+            "retryBoundMs": 101,
+            "costMicros": 1893,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 46,
+            "latestStartMs": 17,
+            "slackMs": 17,
+            "tailMs": 93,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 63,
+            "retryBoundMs": 220,
+            "costMicros": 2194,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 63,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 110,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 13,
+            "retryBoundMs": 103,
+            "costMicros": 2495,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 13,
+            "latestStartMs": 50,
+            "slackMs": 50,
+            "tailMs": 60,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 30,
+            "retryBoundMs": 30,
+            "costMicros": 2796,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 30,
+            "latestStartMs": 33,
+            "slackMs": 33,
+            "tailMs": 77,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 47,
+            "retryBoundMs": 117,
+            "costMicros": 3097,
+            "earliestStartMs": 63,
+            "earliestFinishMs": 110,
+            "latestStartMs": 63,
+            "slackMs": 0,
+            "tailMs": 47,
+            "level": 1,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n3",
+          "n6"
+        ],
+        "criticalPathMs": 110,
+        "totalWorkMs": 240,
+        "totalCostMicros": 15358,
+        "parallelLowerBoundMs": 40,
+        "resourceLowerBoundsMs": {
+          "cpu": 30,
+          "model": 14
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 12,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 0,
+          "endMs": 29,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 0,
+          "endMs": 46,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 0,
+          "endMs": 63,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 0,
+          "endMs": 13,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 0,
+          "endMs": 30,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 63,
+          "endMs": 110,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 110,
+      "peakParallel": 6,
+      "peakResources": {
+        "cpu": 3,
+        "model": 2
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "fanin-retryBound-criticalPath-capacity0",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "fanin 0",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "fanin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 12,
+            "costMicros": 1291,
+            "maxAttempts": 4,
+            "backoffMs": 3,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 25,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "fanin task 1",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 29,
+            "costMicros": 1592,
+            "maxAttempts": 1,
+            "backoffMs": 6,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 42
+          },
+          {
+            "id": "n2",
+            "name": "fanin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 46,
+            "costMicros": 1893,
+            "maxAttempts": 2,
+            "backoffMs": 9,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "fanin task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 63,
+            "costMicros": 2194,
+            "maxAttempts": 3,
+            "backoffMs": 1,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 76,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "fanin task 4",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 13,
+            "costMicros": 2495,
+            "maxAttempts": 4,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 26
+          },
+          {
+            "id": "n5",
+            "name": "fanin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 30,
+            "costMicros": 2796,
+            "maxAttempts": 1,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "fanin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n0",
+              "n1",
+              "n2",
+              "n3",
+              "n4",
+              "n5"
+            ],
+            "durationMs": 47,
+            "costMicros": 3097,
+            "maxAttempts": 2,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 60,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 1,
+        "resources": {
+          "cpu": 1,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "retryBound",
+        "priority": "criticalPath",
+        "budgetMicros": 0,
+        "deadlineMs": 0
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 96,
+            "retryBoundMs": 96,
+            "costMicros": 5164,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 96,
+            "latestStartMs": 124,
+            "slackMs": 124,
+            "tailMs": 213,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n1",
+            "durationMs": 29,
+            "retryBoundMs": 29,
+            "costMicros": 1592,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 29,
+            "latestStartMs": 191,
+            "slackMs": 191,
+            "tailMs": 146,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 101,
+            "retryBoundMs": 101,
+            "costMicros": 3786,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 101,
+            "latestStartMs": 119,
+            "slackMs": 119,
+            "tailMs": 218,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 220,
+            "retryBoundMs": 220,
+            "costMicros": 6582,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 220,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 337,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 103,
+            "retryBoundMs": 103,
+            "costMicros": 9980,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 103,
+            "latestStartMs": 117,
+            "slackMs": 117,
+            "tailMs": 220,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 30,
+            "retryBoundMs": 30,
+            "costMicros": 2796,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 30,
+            "latestStartMs": 190,
+            "slackMs": 190,
+            "tailMs": 147,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 117,
+            "retryBoundMs": 117,
+            "costMicros": 6194,
+            "earliestStartMs": 220,
+            "earliestFinishMs": 337,
+            "latestStartMs": 220,
+            "slackMs": 0,
+            "tailMs": 117,
+            "level": 1,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n3",
+          "n6"
+        ],
+        "criticalPathMs": 337,
+        "totalWorkMs": 696,
+        "totalCostMicros": 36094,
+        "parallelLowerBoundMs": 696,
+        "resourceLowerBoundsMs": {
+          "cpu": 417,
+          "model": 132
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n3",
+          "startMs": 0,
+          "endMs": 220,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 220,
+          "endMs": 323,
+          "waitMs": 220,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 323,
+          "endMs": 424,
+          "waitMs": 323,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n0",
+          "startMs": 424,
+          "endMs": 520,
+          "waitMs": 424,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 520,
+          "endMs": 550,
+          "waitMs": 520,
+          "resources": {}
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 550,
+          "endMs": 579,
+          "waitMs": 550,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 579,
+          "endMs": 696,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 696,
+      "peakParallel": 1,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "fanin-retryBound-criticalPath-capacity1",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "fanin 1",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "fanin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n5",
+              "n4",
+              "n3",
+              "n2",
+              "n1",
+              "n0"
+            ],
+            "durationMs": 47,
+            "costMicros": 3097,
+            "maxAttempts": 2,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 60,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "fanin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 30,
+            "costMicros": 2796,
+            "maxAttempts": 1,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "fanin task 4",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 13,
+            "costMicros": 2495,
+            "maxAttempts": 4,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 26
+          },
+          {
+            "id": "n3",
+            "name": "fanin task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 63,
+            "costMicros": 2194,
+            "maxAttempts": 3,
+            "backoffMs": 1,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 76,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "fanin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 46,
+            "costMicros": 1893,
+            "maxAttempts": 2,
+            "backoffMs": 9,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "fanin task 1",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 29,
+            "costMicros": 1592,
+            "maxAttempts": 1,
+            "backoffMs": 6,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 42
+          },
+          {
+            "id": "n0",
+            "name": "fanin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 12,
+            "costMicros": 1291,
+            "maxAttempts": 4,
+            "backoffMs": 3,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 25,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 2,
+        "resources": {
+          "cpu": 1,
+          "model": 2
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "retryBound",
+        "priority": "criticalPath",
+        "budgetMicros": 10000,
+        "deadlineMs": 150
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 96,
+            "retryBoundMs": 96,
+            "costMicros": 5164,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 96,
+            "latestStartMs": 124,
+            "slackMs": 124,
+            "tailMs": 213,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n1",
+            "durationMs": 29,
+            "retryBoundMs": 29,
+            "costMicros": 1592,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 29,
+            "latestStartMs": 191,
+            "slackMs": 191,
+            "tailMs": 146,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 101,
+            "retryBoundMs": 101,
+            "costMicros": 3786,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 101,
+            "latestStartMs": 119,
+            "slackMs": 119,
+            "tailMs": 218,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 220,
+            "retryBoundMs": 220,
+            "costMicros": 6582,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 220,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 337,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 103,
+            "retryBoundMs": 103,
+            "costMicros": 9980,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 103,
+            "latestStartMs": 117,
+            "slackMs": 117,
+            "tailMs": 220,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 30,
+            "retryBoundMs": 30,
+            "costMicros": 2796,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 30,
+            "latestStartMs": 190,
+            "slackMs": 190,
+            "tailMs": 147,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 117,
+            "retryBoundMs": 117,
+            "costMicros": 6194,
+            "earliestStartMs": 220,
+            "earliestFinishMs": 337,
+            "latestStartMs": 220,
+            "slackMs": 0,
+            "tailMs": 117,
+            "level": 1,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n3",
+          "n6"
+        ],
+        "criticalPathMs": 337,
+        "totalWorkMs": 696,
+        "totalCostMicros": 36094,
+        "parallelLowerBoundMs": 348,
+        "resourceLowerBoundsMs": {
+          "cpu": 417,
+          "model": 66
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n3",
+          "startMs": 0,
+          "endMs": 220,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 0,
+          "endMs": 103,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 103,
+          "endMs": 204,
+          "waitMs": 103,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 204,
+          "endMs": 234,
+          "waitMs": 204,
+          "resources": {}
+        },
+        {
+          "nodeId": "n0",
+          "startMs": 220,
+          "endMs": 316,
+          "waitMs": 220,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 234,
+          "endMs": 263,
+          "waitMs": 234,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 316,
+          "endMs": 433,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 433,
+      "peakParallel": 2,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": false,
+      "withinDeadline": false,
+      "optimal": false
+    }
+  },
+  {
+    "name": "fanin-retryBound-criticalPath-capacity2",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "fanin 2",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "fanin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 12,
+            "costMicros": 1291,
+            "maxAttempts": 4,
+            "backoffMs": 3,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 25,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "fanin task 1",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 29,
+            "costMicros": 1592,
+            "maxAttempts": 1,
+            "backoffMs": 6,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 42
+          },
+          {
+            "id": "n2",
+            "name": "fanin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 46,
+            "costMicros": 1893,
+            "maxAttempts": 2,
+            "backoffMs": 9,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "fanin task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 63,
+            "costMicros": 2194,
+            "maxAttempts": 3,
+            "backoffMs": 1,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 76,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "fanin task 4",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 13,
+            "costMicros": 2495,
+            "maxAttempts": 4,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 26
+          },
+          {
+            "id": "n5",
+            "name": "fanin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 30,
+            "costMicros": 2796,
+            "maxAttempts": 1,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "fanin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n0",
+              "n1",
+              "n2",
+              "n3",
+              "n4",
+              "n5"
+            ],
+            "durationMs": 47,
+            "costMicros": 3097,
+            "maxAttempts": 2,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 60,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 3,
+        "resources": {
+          "cpu": 2,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 2
+        },
+        "mode": "retryBound",
+        "priority": "criticalPath",
+        "budgetMicros": 20000,
+        "deadlineMs": 300
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 96,
+            "retryBoundMs": 96,
+            "costMicros": 5164,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 96,
+            "latestStartMs": 124,
+            "slackMs": 124,
+            "tailMs": 213,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n1",
+            "durationMs": 29,
+            "retryBoundMs": 29,
+            "costMicros": 1592,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 29,
+            "latestStartMs": 191,
+            "slackMs": 191,
+            "tailMs": 146,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 101,
+            "retryBoundMs": 101,
+            "costMicros": 3786,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 101,
+            "latestStartMs": 119,
+            "slackMs": 119,
+            "tailMs": 218,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 220,
+            "retryBoundMs": 220,
+            "costMicros": 6582,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 220,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 337,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 103,
+            "retryBoundMs": 103,
+            "costMicros": 9980,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 103,
+            "latestStartMs": 117,
+            "slackMs": 117,
+            "tailMs": 220,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 30,
+            "retryBoundMs": 30,
+            "costMicros": 2796,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 30,
+            "latestStartMs": 190,
+            "slackMs": 190,
+            "tailMs": 147,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 117,
+            "retryBoundMs": 117,
+            "costMicros": 6194,
+            "earliestStartMs": 220,
+            "earliestFinishMs": 337,
+            "latestStartMs": 220,
+            "slackMs": 0,
+            "tailMs": 117,
+            "level": 1,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n3",
+          "n6"
+        ],
+        "criticalPathMs": 337,
+        "totalWorkMs": 696,
+        "totalCostMicros": 36094,
+        "parallelLowerBoundMs": 232,
+        "resourceLowerBoundsMs": {
+          "cpu": 209,
+          "model": 132
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n3",
+          "startMs": 0,
+          "endMs": 220,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 0,
+          "endMs": 103,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 0,
+          "endMs": 101,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n0",
+          "startMs": 101,
+          "endMs": 197,
+          "waitMs": 101,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 103,
+          "endMs": 133,
+          "waitMs": 103,
+          "resources": {}
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 133,
+          "endMs": 162,
+          "waitMs": 133,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 220,
+          "endMs": 337,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 337,
+      "peakParallel": 3,
+      "peakResources": {
+        "cpu": 2,
+        "model": 1
+      },
+      "withinBudget": false,
+      "withinDeadline": false,
+      "optimal": true
+    }
+  },
+  {
+    "name": "fanin-retryBound-criticalPath-capacity3",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "fanin 3",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "fanin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n5",
+              "n4",
+              "n3",
+              "n2",
+              "n1",
+              "n0"
+            ],
+            "durationMs": 47,
+            "costMicros": 3097,
+            "maxAttempts": 2,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 60,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "fanin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 30,
+            "costMicros": 2796,
+            "maxAttempts": 1,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "fanin task 4",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 13,
+            "costMicros": 2495,
+            "maxAttempts": 4,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 26
+          },
+          {
+            "id": "n3",
+            "name": "fanin task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 63,
+            "costMicros": 2194,
+            "maxAttempts": 3,
+            "backoffMs": 1,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 76,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "fanin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 46,
+            "costMicros": 1893,
+            "maxAttempts": 2,
+            "backoffMs": 9,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "fanin task 1",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 29,
+            "costMicros": 1592,
+            "maxAttempts": 1,
+            "backoffMs": 6,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 42
+          },
+          {
+            "id": "n0",
+            "name": "fanin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 12,
+            "costMicros": 1291,
+            "maxAttempts": 4,
+            "backoffMs": 3,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 25,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 6,
+        "resources": {
+          "cpu": 4,
+          "model": 3
+        },
+        "concurrencyLimits": {
+          "exclusive": 3
+        },
+        "mode": "retryBound",
+        "priority": "criticalPath",
+        "budgetMicros": 100000,
+        "deadlineMs": 1000
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 96,
+            "retryBoundMs": 96,
+            "costMicros": 5164,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 96,
+            "latestStartMs": 124,
+            "slackMs": 124,
+            "tailMs": 213,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n1",
+            "durationMs": 29,
+            "retryBoundMs": 29,
+            "costMicros": 1592,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 29,
+            "latestStartMs": 191,
+            "slackMs": 191,
+            "tailMs": 146,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 101,
+            "retryBoundMs": 101,
+            "costMicros": 3786,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 101,
+            "latestStartMs": 119,
+            "slackMs": 119,
+            "tailMs": 218,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 220,
+            "retryBoundMs": 220,
+            "costMicros": 6582,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 220,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 337,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 103,
+            "retryBoundMs": 103,
+            "costMicros": 9980,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 103,
+            "latestStartMs": 117,
+            "slackMs": 117,
+            "tailMs": 220,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 30,
+            "retryBoundMs": 30,
+            "costMicros": 2796,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 30,
+            "latestStartMs": 190,
+            "slackMs": 190,
+            "tailMs": 147,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 117,
+            "retryBoundMs": 117,
+            "costMicros": 6194,
+            "earliestStartMs": 220,
+            "earliestFinishMs": 337,
+            "latestStartMs": 220,
+            "slackMs": 0,
+            "tailMs": 117,
+            "level": 1,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n3",
+          "n6"
+        ],
+        "criticalPathMs": 337,
+        "totalWorkMs": 696,
+        "totalCostMicros": 36094,
+        "parallelLowerBoundMs": 116,
+        "resourceLowerBoundsMs": {
+          "cpu": 105,
+          "model": 44
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n3",
+          "startMs": 0,
+          "endMs": 220,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 0,
+          "endMs": 103,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 0,
+          "endMs": 101,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 96,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 0,
+          "endMs": 30,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 0,
+          "endMs": 29,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 220,
+          "endMs": 337,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 337,
+      "peakParallel": 6,
+      "peakResources": {
+        "cpu": 3,
+        "model": 2
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "fanin-retryBound-id-capacity0",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "fanin 0",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "fanin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 12,
+            "costMicros": 1291,
+            "maxAttempts": 4,
+            "backoffMs": 3,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 25,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "fanin task 1",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 29,
+            "costMicros": 1592,
+            "maxAttempts": 1,
+            "backoffMs": 6,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 42
+          },
+          {
+            "id": "n2",
+            "name": "fanin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 46,
+            "costMicros": 1893,
+            "maxAttempts": 2,
+            "backoffMs": 9,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "fanin task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 63,
+            "costMicros": 2194,
+            "maxAttempts": 3,
+            "backoffMs": 1,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 76,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "fanin task 4",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 13,
+            "costMicros": 2495,
+            "maxAttempts": 4,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 26
+          },
+          {
+            "id": "n5",
+            "name": "fanin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 30,
+            "costMicros": 2796,
+            "maxAttempts": 1,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "fanin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n0",
+              "n1",
+              "n2",
+              "n3",
+              "n4",
+              "n5"
+            ],
+            "durationMs": 47,
+            "costMicros": 3097,
+            "maxAttempts": 2,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 60,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 1,
+        "resources": {
+          "cpu": 1,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "retryBound",
+        "priority": "id",
+        "budgetMicros": 0,
+        "deadlineMs": 0
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 96,
+            "retryBoundMs": 96,
+            "costMicros": 5164,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 96,
+            "latestStartMs": 124,
+            "slackMs": 124,
+            "tailMs": 213,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n1",
+            "durationMs": 29,
+            "retryBoundMs": 29,
+            "costMicros": 1592,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 29,
+            "latestStartMs": 191,
+            "slackMs": 191,
+            "tailMs": 146,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 101,
+            "retryBoundMs": 101,
+            "costMicros": 3786,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 101,
+            "latestStartMs": 119,
+            "slackMs": 119,
+            "tailMs": 218,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 220,
+            "retryBoundMs": 220,
+            "costMicros": 6582,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 220,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 337,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 103,
+            "retryBoundMs": 103,
+            "costMicros": 9980,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 103,
+            "latestStartMs": 117,
+            "slackMs": 117,
+            "tailMs": 220,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 30,
+            "retryBoundMs": 30,
+            "costMicros": 2796,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 30,
+            "latestStartMs": 190,
+            "slackMs": 190,
+            "tailMs": 147,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 117,
+            "retryBoundMs": 117,
+            "costMicros": 6194,
+            "earliestStartMs": 220,
+            "earliestFinishMs": 337,
+            "latestStartMs": 220,
+            "slackMs": 0,
+            "tailMs": 117,
+            "level": 1,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n3",
+          "n6"
+        ],
+        "criticalPathMs": 337,
+        "totalWorkMs": 696,
+        "totalCostMicros": 36094,
+        "parallelLowerBoundMs": 696,
+        "resourceLowerBoundsMs": {
+          "cpu": 417,
+          "model": 132
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 96,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 96,
+          "endMs": 125,
+          "waitMs": 96,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 125,
+          "endMs": 226,
+          "waitMs": 125,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 226,
+          "endMs": 446,
+          "waitMs": 226,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 446,
+          "endMs": 549,
+          "waitMs": 446,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 549,
+          "endMs": 579,
+          "waitMs": 549,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 579,
+          "endMs": 696,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 696,
+      "peakParallel": 1,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "fanin-retryBound-id-capacity1",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "fanin 1",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "fanin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n5",
+              "n4",
+              "n3",
+              "n2",
+              "n1",
+              "n0"
+            ],
+            "durationMs": 47,
+            "costMicros": 3097,
+            "maxAttempts": 2,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 60,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "fanin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 30,
+            "costMicros": 2796,
+            "maxAttempts": 1,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "fanin task 4",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 13,
+            "costMicros": 2495,
+            "maxAttempts": 4,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 26
+          },
+          {
+            "id": "n3",
+            "name": "fanin task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 63,
+            "costMicros": 2194,
+            "maxAttempts": 3,
+            "backoffMs": 1,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 76,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "fanin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 46,
+            "costMicros": 1893,
+            "maxAttempts": 2,
+            "backoffMs": 9,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "fanin task 1",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 29,
+            "costMicros": 1592,
+            "maxAttempts": 1,
+            "backoffMs": 6,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 42
+          },
+          {
+            "id": "n0",
+            "name": "fanin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 12,
+            "costMicros": 1291,
+            "maxAttempts": 4,
+            "backoffMs": 3,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 25,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 2,
+        "resources": {
+          "cpu": 1,
+          "model": 2
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "retryBound",
+        "priority": "id",
+        "budgetMicros": 10000,
+        "deadlineMs": 150
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 96,
+            "retryBoundMs": 96,
+            "costMicros": 5164,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 96,
+            "latestStartMs": 124,
+            "slackMs": 124,
+            "tailMs": 213,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n1",
+            "durationMs": 29,
+            "retryBoundMs": 29,
+            "costMicros": 1592,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 29,
+            "latestStartMs": 191,
+            "slackMs": 191,
+            "tailMs": 146,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 101,
+            "retryBoundMs": 101,
+            "costMicros": 3786,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 101,
+            "latestStartMs": 119,
+            "slackMs": 119,
+            "tailMs": 218,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 220,
+            "retryBoundMs": 220,
+            "costMicros": 6582,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 220,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 337,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 103,
+            "retryBoundMs": 103,
+            "costMicros": 9980,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 103,
+            "latestStartMs": 117,
+            "slackMs": 117,
+            "tailMs": 220,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 30,
+            "retryBoundMs": 30,
+            "costMicros": 2796,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 30,
+            "latestStartMs": 190,
+            "slackMs": 190,
+            "tailMs": 147,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 117,
+            "retryBoundMs": 117,
+            "costMicros": 6194,
+            "earliestStartMs": 220,
+            "earliestFinishMs": 337,
+            "latestStartMs": 220,
+            "slackMs": 0,
+            "tailMs": 117,
+            "level": 1,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n3",
+          "n6"
+        ],
+        "criticalPathMs": 337,
+        "totalWorkMs": 696,
+        "totalCostMicros": 36094,
+        "parallelLowerBoundMs": 348,
+        "resourceLowerBoundsMs": {
+          "cpu": 417,
+          "model": 66
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 96,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 0,
+          "endMs": 29,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 29,
+          "endMs": 59,
+          "waitMs": 29,
+          "resources": {}
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 96,
+          "endMs": 197,
+          "waitMs": 96,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 96,
+          "endMs": 316,
+          "waitMs": 96,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 197,
+          "endMs": 300,
+          "waitMs": 197,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 316,
+          "endMs": 433,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 433,
+      "peakParallel": 2,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": false,
+      "withinDeadline": false,
+      "optimal": false
+    }
+  },
+  {
+    "name": "fanin-retryBound-id-capacity2",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "fanin 2",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "fanin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 12,
+            "costMicros": 1291,
+            "maxAttempts": 4,
+            "backoffMs": 3,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 25,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "fanin task 1",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 29,
+            "costMicros": 1592,
+            "maxAttempts": 1,
+            "backoffMs": 6,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 42
+          },
+          {
+            "id": "n2",
+            "name": "fanin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 46,
+            "costMicros": 1893,
+            "maxAttempts": 2,
+            "backoffMs": 9,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "fanin task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 63,
+            "costMicros": 2194,
+            "maxAttempts": 3,
+            "backoffMs": 1,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 76,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "fanin task 4",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 13,
+            "costMicros": 2495,
+            "maxAttempts": 4,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 26
+          },
+          {
+            "id": "n5",
+            "name": "fanin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 30,
+            "costMicros": 2796,
+            "maxAttempts": 1,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "fanin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n0",
+              "n1",
+              "n2",
+              "n3",
+              "n4",
+              "n5"
+            ],
+            "durationMs": 47,
+            "costMicros": 3097,
+            "maxAttempts": 2,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 60,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 3,
+        "resources": {
+          "cpu": 2,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 2
+        },
+        "mode": "retryBound",
+        "priority": "id",
+        "budgetMicros": 20000,
+        "deadlineMs": 300
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 96,
+            "retryBoundMs": 96,
+            "costMicros": 5164,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 96,
+            "latestStartMs": 124,
+            "slackMs": 124,
+            "tailMs": 213,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n1",
+            "durationMs": 29,
+            "retryBoundMs": 29,
+            "costMicros": 1592,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 29,
+            "latestStartMs": 191,
+            "slackMs": 191,
+            "tailMs": 146,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 101,
+            "retryBoundMs": 101,
+            "costMicros": 3786,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 101,
+            "latestStartMs": 119,
+            "slackMs": 119,
+            "tailMs": 218,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 220,
+            "retryBoundMs": 220,
+            "costMicros": 6582,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 220,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 337,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 103,
+            "retryBoundMs": 103,
+            "costMicros": 9980,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 103,
+            "latestStartMs": 117,
+            "slackMs": 117,
+            "tailMs": 220,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 30,
+            "retryBoundMs": 30,
+            "costMicros": 2796,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 30,
+            "latestStartMs": 190,
+            "slackMs": 190,
+            "tailMs": 147,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 117,
+            "retryBoundMs": 117,
+            "costMicros": 6194,
+            "earliestStartMs": 220,
+            "earliestFinishMs": 337,
+            "latestStartMs": 220,
+            "slackMs": 0,
+            "tailMs": 117,
+            "level": 1,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n3",
+          "n6"
+        ],
+        "criticalPathMs": 337,
+        "totalWorkMs": 696,
+        "totalCostMicros": 36094,
+        "parallelLowerBoundMs": 232,
+        "resourceLowerBoundsMs": {
+          "cpu": 209,
+          "model": 132
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 96,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 0,
+          "endMs": 29,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 0,
+          "endMs": 101,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 29,
+          "endMs": 249,
+          "waitMs": 29,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 96,
+          "endMs": 199,
+          "waitMs": 96,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 101,
+          "endMs": 131,
+          "waitMs": 101,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 249,
+          "endMs": 366,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 366,
+      "peakParallel": 3,
+      "peakResources": {
+        "cpu": 2,
+        "model": 1
+      },
+      "withinBudget": false,
+      "withinDeadline": false,
+      "optimal": false
+    }
+  },
+  {
+    "name": "fanin-retryBound-id-capacity3",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "fanin 3",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "fanin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n5",
+              "n4",
+              "n3",
+              "n2",
+              "n1",
+              "n0"
+            ],
+            "durationMs": 47,
+            "costMicros": 3097,
+            "maxAttempts": 2,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 60,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "fanin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 30,
+            "costMicros": 2796,
+            "maxAttempts": 1,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "fanin task 4",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 13,
+            "costMicros": 2495,
+            "maxAttempts": 4,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 26
+          },
+          {
+            "id": "n3",
+            "name": "fanin task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 63,
+            "costMicros": 2194,
+            "maxAttempts": 3,
+            "backoffMs": 1,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 76,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "fanin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 46,
+            "costMicros": 1893,
+            "maxAttempts": 2,
+            "backoffMs": 9,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "fanin task 1",
+            "kind": "tool",
+            "dependsOn": [],
+            "durationMs": 29,
+            "costMicros": 1592,
+            "maxAttempts": 1,
+            "backoffMs": 6,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 42
+          },
+          {
+            "id": "n0",
+            "name": "fanin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 12,
+            "costMicros": 1291,
+            "maxAttempts": 4,
+            "backoffMs": 3,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 25,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 6,
+        "resources": {
+          "cpu": 4,
+          "model": 3
+        },
+        "concurrencyLimits": {
+          "exclusive": 3
+        },
+        "mode": "retryBound",
+        "priority": "id",
+        "budgetMicros": 100000,
+        "deadlineMs": 1000
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 96,
+            "retryBoundMs": 96,
+            "costMicros": 5164,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 96,
+            "latestStartMs": 124,
+            "slackMs": 124,
+            "tailMs": 213,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n1",
+            "durationMs": 29,
+            "retryBoundMs": 29,
+            "costMicros": 1592,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 29,
+            "latestStartMs": 191,
+            "slackMs": 191,
+            "tailMs": 146,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 101,
+            "retryBoundMs": 101,
+            "costMicros": 3786,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 101,
+            "latestStartMs": 119,
+            "slackMs": 119,
+            "tailMs": 218,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 220,
+            "retryBoundMs": 220,
+            "costMicros": 6582,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 220,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 337,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 103,
+            "retryBoundMs": 103,
+            "costMicros": 9980,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 103,
+            "latestStartMs": 117,
+            "slackMs": 117,
+            "tailMs": 220,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 30,
+            "retryBoundMs": 30,
+            "costMicros": 2796,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 30,
+            "latestStartMs": 190,
+            "slackMs": 190,
+            "tailMs": 147,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 117,
+            "retryBoundMs": 117,
+            "costMicros": 6194,
+            "earliestStartMs": 220,
+            "earliestFinishMs": 337,
+            "latestStartMs": 220,
+            "slackMs": 0,
+            "tailMs": 117,
+            "level": 1,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0",
+          "n1",
+          "n2",
+          "n3",
+          "n4",
+          "n5"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n3",
+          "n6"
+        ],
+        "criticalPathMs": 337,
+        "totalWorkMs": 696,
+        "totalCostMicros": 36094,
+        "parallelLowerBoundMs": 116,
+        "resourceLowerBoundsMs": {
+          "cpu": 105,
+          "model": 44
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 96,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 0,
+          "endMs": 29,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 0,
+          "endMs": 101,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 0,
+          "endMs": 220,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 0,
+          "endMs": 103,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 0,
+          "endMs": 30,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 220,
+          "endMs": 337,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 337,
+      "peakParallel": 6,
+      "peakResources": {
+        "cpu": 3,
+        "model": 2
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  }
+]

@@ -1,0 +1,5906 @@
+[
+  {
+    "name": "diamonds-nominal-criticalPath-capacity0",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "diamonds 0",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "diamonds task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 33,
+            "costMicros": 1097,
+            "maxAttempts": 2,
+            "backoffMs": 1,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 46,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "diamonds task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 50,
+            "costMicros": 1398,
+            "maxAttempts": 3,
+            "backoffMs": 4,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 63
+          },
+          {
+            "id": "n2",
+            "name": "diamonds task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 67,
+            "costMicros": 1699,
+            "maxAttempts": 4,
+            "backoffMs": 7,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "diamonds task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n1",
+              "n2"
+            ],
+            "durationMs": 17,
+            "costMicros": 2000,
+            "maxAttempts": 1,
+            "backoffMs": 10,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 30,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "diamonds task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 34,
+            "costMicros": 2301,
+            "maxAttempts": 2,
+            "backoffMs": 2,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 47
+          },
+          {
+            "id": "n5",
+            "name": "diamonds task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 51,
+            "costMicros": 2602,
+            "maxAttempts": 3,
+            "backoffMs": 5,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "diamonds task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n4",
+              "n5"
+            ],
+            "durationMs": 68,
+            "costMicros": 2903,
+            "maxAttempts": 4,
+            "backoffMs": 8,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 81,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 1,
+        "resources": {
+          "cpu": 1,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "nominal",
+        "priority": "criticalPath",
+        "budgetMicros": 0,
+        "deadlineMs": 0
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2"
+        ],
+        [
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 33,
+            "retryBoundMs": 80,
+            "costMicros": 1097,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 33,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 236,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 50,
+            "retryBoundMs": 187,
+            "costMicros": 1398,
+            "earliestStartMs": 33,
+            "earliestFinishMs": 83,
+            "latestStartMs": 50,
+            "slackMs": 17,
+            "tailMs": 186,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 67,
+            "retryBoundMs": 315,
+            "costMicros": 1699,
+            "earliestStartMs": 33,
+            "earliestFinishMs": 100,
+            "latestStartMs": 33,
+            "slackMs": 0,
+            "tailMs": 203,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 17,
+            "retryBoundMs": 17,
+            "costMicros": 2000,
+            "earliestStartMs": 100,
+            "earliestFinishMs": 117,
+            "latestStartMs": 100,
+            "slackMs": 0,
+            "tailMs": 136,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 34,
+            "retryBoundMs": 83,
+            "costMicros": 2301,
+            "earliestStartMs": 117,
+            "earliestFinishMs": 151,
+            "latestStartMs": 134,
+            "slackMs": 17,
+            "tailMs": 102,
+            "level": 3,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 51,
+            "retryBoundMs": 168,
+            "costMicros": 2602,
+            "earliestStartMs": 117,
+            "earliestFinishMs": 168,
+            "latestStartMs": 117,
+            "slackMs": 0,
+            "tailMs": 119,
+            "level": 3,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 68,
+            "retryBoundMs": 415,
+            "costMicros": 2903,
+            "earliestStartMs": 168,
+            "earliestFinishMs": 236,
+            "latestStartMs": 168,
+            "slackMs": 0,
+            "tailMs": 68,
+            "level": 4,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n2",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 236,
+        "totalWorkMs": 320,
+        "totalCostMicros": 14000,
+        "parallelLowerBoundMs": 320,
+        "resourceLowerBoundsMs": {
+          "cpu": 202,
+          "model": 84
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 33,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 33,
+          "endMs": 100,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 100,
+          "endMs": 150,
+          "waitMs": 67,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 150,
+          "endMs": 167,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 167,
+          "endMs": 218,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 218,
+          "endMs": 252,
+          "waitMs": 51,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 252,
+          "endMs": 320,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 320,
+      "peakParallel": 1,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "diamonds-nominal-criticalPath-capacity1",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "diamonds 1",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "diamonds task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n5",
+              "n4"
+            ],
+            "durationMs": 68,
+            "costMicros": 2903,
+            "maxAttempts": 4,
+            "backoffMs": 8,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 81,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "diamonds task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 51,
+            "costMicros": 2602,
+            "maxAttempts": 3,
+            "backoffMs": 5,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "diamonds task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 34,
+            "costMicros": 2301,
+            "maxAttempts": 2,
+            "backoffMs": 2,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 47
+          },
+          {
+            "id": "n3",
+            "name": "diamonds task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n2",
+              "n1"
+            ],
+            "durationMs": 17,
+            "costMicros": 2000,
+            "maxAttempts": 1,
+            "backoffMs": 10,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 30,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "diamonds task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 67,
+            "costMicros": 1699,
+            "maxAttempts": 4,
+            "backoffMs": 7,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "diamonds task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 50,
+            "costMicros": 1398,
+            "maxAttempts": 3,
+            "backoffMs": 4,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 63
+          },
+          {
+            "id": "n0",
+            "name": "diamonds task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 33,
+            "costMicros": 1097,
+            "maxAttempts": 2,
+            "backoffMs": 1,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 46,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 2,
+        "resources": {
+          "cpu": 1,
+          "model": 2
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "nominal",
+        "priority": "criticalPath",
+        "budgetMicros": 10000,
+        "deadlineMs": 150
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2"
+        ],
+        [
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 33,
+            "retryBoundMs": 80,
+            "costMicros": 1097,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 33,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 236,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 50,
+            "retryBoundMs": 187,
+            "costMicros": 1398,
+            "earliestStartMs": 33,
+            "earliestFinishMs": 83,
+            "latestStartMs": 50,
+            "slackMs": 17,
+            "tailMs": 186,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 67,
+            "retryBoundMs": 315,
+            "costMicros": 1699,
+            "earliestStartMs": 33,
+            "earliestFinishMs": 100,
+            "latestStartMs": 33,
+            "slackMs": 0,
+            "tailMs": 203,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 17,
+            "retryBoundMs": 17,
+            "costMicros": 2000,
+            "earliestStartMs": 100,
+            "earliestFinishMs": 117,
+            "latestStartMs": 100,
+            "slackMs": 0,
+            "tailMs": 136,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 34,
+            "retryBoundMs": 83,
+            "costMicros": 2301,
+            "earliestStartMs": 117,
+            "earliestFinishMs": 151,
+            "latestStartMs": 134,
+            "slackMs": 17,
+            "tailMs": 102,
+            "level": 3,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 51,
+            "retryBoundMs": 168,
+            "costMicros": 2602,
+            "earliestStartMs": 117,
+            "earliestFinishMs": 168,
+            "latestStartMs": 117,
+            "slackMs": 0,
+            "tailMs": 119,
+            "level": 3,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 68,
+            "retryBoundMs": 415,
+            "costMicros": 2903,
+            "earliestStartMs": 168,
+            "earliestFinishMs": 236,
+            "latestStartMs": 168,
+            "slackMs": 0,
+            "tailMs": 68,
+            "level": 4,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n2",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 236,
+        "totalWorkMs": 320,
+        "totalCostMicros": 14000,
+        "parallelLowerBoundMs": 160,
+        "resourceLowerBoundsMs": {
+          "cpu": 202,
+          "model": 42
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 33,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 33,
+          "endMs": 100,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 33,
+          "endMs": 83,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 100,
+          "endMs": 117,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 117,
+          "endMs": 168,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 117,
+          "endMs": 151,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 168,
+          "endMs": 236,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 236,
+      "peakParallel": 2,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": false,
+      "withinDeadline": false,
+      "optimal": true
+    }
+  },
+  {
+    "name": "diamonds-nominal-criticalPath-capacity2",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "diamonds 2",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "diamonds task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 33,
+            "costMicros": 1097,
+            "maxAttempts": 2,
+            "backoffMs": 1,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 46,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "diamonds task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 50,
+            "costMicros": 1398,
+            "maxAttempts": 3,
+            "backoffMs": 4,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 63
+          },
+          {
+            "id": "n2",
+            "name": "diamonds task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 67,
+            "costMicros": 1699,
+            "maxAttempts": 4,
+            "backoffMs": 7,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "diamonds task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n1",
+              "n2"
+            ],
+            "durationMs": 17,
+            "costMicros": 2000,
+            "maxAttempts": 1,
+            "backoffMs": 10,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 30,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "diamonds task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 34,
+            "costMicros": 2301,
+            "maxAttempts": 2,
+            "backoffMs": 2,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 47
+          },
+          {
+            "id": "n5",
+            "name": "diamonds task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 51,
+            "costMicros": 2602,
+            "maxAttempts": 3,
+            "backoffMs": 5,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "diamonds task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n4",
+              "n5"
+            ],
+            "durationMs": 68,
+            "costMicros": 2903,
+            "maxAttempts": 4,
+            "backoffMs": 8,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 81,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 3,
+        "resources": {
+          "cpu": 2,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 2
+        },
+        "mode": "nominal",
+        "priority": "criticalPath",
+        "budgetMicros": 20000,
+        "deadlineMs": 300
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2"
+        ],
+        [
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 33,
+            "retryBoundMs": 80,
+            "costMicros": 1097,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 33,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 236,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 50,
+            "retryBoundMs": 187,
+            "costMicros": 1398,
+            "earliestStartMs": 33,
+            "earliestFinishMs": 83,
+            "latestStartMs": 50,
+            "slackMs": 17,
+            "tailMs": 186,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 67,
+            "retryBoundMs": 315,
+            "costMicros": 1699,
+            "earliestStartMs": 33,
+            "earliestFinishMs": 100,
+            "latestStartMs": 33,
+            "slackMs": 0,
+            "tailMs": 203,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 17,
+            "retryBoundMs": 17,
+            "costMicros": 2000,
+            "earliestStartMs": 100,
+            "earliestFinishMs": 117,
+            "latestStartMs": 100,
+            "slackMs": 0,
+            "tailMs": 136,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 34,
+            "retryBoundMs": 83,
+            "costMicros": 2301,
+            "earliestStartMs": 117,
+            "earliestFinishMs": 151,
+            "latestStartMs": 134,
+            "slackMs": 17,
+            "tailMs": 102,
+            "level": 3,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 51,
+            "retryBoundMs": 168,
+            "costMicros": 2602,
+            "earliestStartMs": 117,
+            "earliestFinishMs": 168,
+            "latestStartMs": 117,
+            "slackMs": 0,
+            "tailMs": 119,
+            "level": 3,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 68,
+            "retryBoundMs": 415,
+            "costMicros": 2903,
+            "earliestStartMs": 168,
+            "earliestFinishMs": 236,
+            "latestStartMs": 168,
+            "slackMs": 0,
+            "tailMs": 68,
+            "level": 4,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n2",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 236,
+        "totalWorkMs": 320,
+        "totalCostMicros": 14000,
+        "parallelLowerBoundMs": 107,
+        "resourceLowerBoundsMs": {
+          "cpu": 101,
+          "model": 84
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 33,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 33,
+          "endMs": 100,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 33,
+          "endMs": 83,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 100,
+          "endMs": 117,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 117,
+          "endMs": 168,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 117,
+          "endMs": 151,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 168,
+          "endMs": 236,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 236,
+      "peakParallel": 2,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "diamonds-nominal-criticalPath-capacity3",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "diamonds 3",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "diamonds task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n5",
+              "n4"
+            ],
+            "durationMs": 68,
+            "costMicros": 2903,
+            "maxAttempts": 4,
+            "backoffMs": 8,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 81,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "diamonds task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 51,
+            "costMicros": 2602,
+            "maxAttempts": 3,
+            "backoffMs": 5,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "diamonds task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 34,
+            "costMicros": 2301,
+            "maxAttempts": 2,
+            "backoffMs": 2,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 47
+          },
+          {
+            "id": "n3",
+            "name": "diamonds task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n2",
+              "n1"
+            ],
+            "durationMs": 17,
+            "costMicros": 2000,
+            "maxAttempts": 1,
+            "backoffMs": 10,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 30,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "diamonds task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 67,
+            "costMicros": 1699,
+            "maxAttempts": 4,
+            "backoffMs": 7,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "diamonds task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 50,
+            "costMicros": 1398,
+            "maxAttempts": 3,
+            "backoffMs": 4,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 63
+          },
+          {
+            "id": "n0",
+            "name": "diamonds task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 33,
+            "costMicros": 1097,
+            "maxAttempts": 2,
+            "backoffMs": 1,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 46,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 6,
+        "resources": {
+          "cpu": 4,
+          "model": 3
+        },
+        "concurrencyLimits": {
+          "exclusive": 3
+        },
+        "mode": "nominal",
+        "priority": "criticalPath",
+        "budgetMicros": 100000,
+        "deadlineMs": 1000
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2"
+        ],
+        [
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 33,
+            "retryBoundMs": 80,
+            "costMicros": 1097,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 33,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 236,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 50,
+            "retryBoundMs": 187,
+            "costMicros": 1398,
+            "earliestStartMs": 33,
+            "earliestFinishMs": 83,
+            "latestStartMs": 50,
+            "slackMs": 17,
+            "tailMs": 186,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 67,
+            "retryBoundMs": 315,
+            "costMicros": 1699,
+            "earliestStartMs": 33,
+            "earliestFinishMs": 100,
+            "latestStartMs": 33,
+            "slackMs": 0,
+            "tailMs": 203,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 17,
+            "retryBoundMs": 17,
+            "costMicros": 2000,
+            "earliestStartMs": 100,
+            "earliestFinishMs": 117,
+            "latestStartMs": 100,
+            "slackMs": 0,
+            "tailMs": 136,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 34,
+            "retryBoundMs": 83,
+            "costMicros": 2301,
+            "earliestStartMs": 117,
+            "earliestFinishMs": 151,
+            "latestStartMs": 134,
+            "slackMs": 17,
+            "tailMs": 102,
+            "level": 3,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 51,
+            "retryBoundMs": 168,
+            "costMicros": 2602,
+            "earliestStartMs": 117,
+            "earliestFinishMs": 168,
+            "latestStartMs": 117,
+            "slackMs": 0,
+            "tailMs": 119,
+            "level": 3,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 68,
+            "retryBoundMs": 415,
+            "costMicros": 2903,
+            "earliestStartMs": 168,
+            "earliestFinishMs": 236,
+            "latestStartMs": 168,
+            "slackMs": 0,
+            "tailMs": 68,
+            "level": 4,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n2",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 236,
+        "totalWorkMs": 320,
+        "totalCostMicros": 14000,
+        "parallelLowerBoundMs": 54,
+        "resourceLowerBoundsMs": {
+          "cpu": 51,
+          "model": 28
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 33,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 33,
+          "endMs": 100,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 33,
+          "endMs": 83,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 100,
+          "endMs": 117,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 117,
+          "endMs": 168,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 117,
+          "endMs": 151,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 168,
+          "endMs": 236,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 236,
+      "peakParallel": 2,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "diamonds-nominal-id-capacity0",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "diamonds 0",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "diamonds task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 33,
+            "costMicros": 1097,
+            "maxAttempts": 2,
+            "backoffMs": 1,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 46,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "diamonds task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 50,
+            "costMicros": 1398,
+            "maxAttempts": 3,
+            "backoffMs": 4,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 63
+          },
+          {
+            "id": "n2",
+            "name": "diamonds task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 67,
+            "costMicros": 1699,
+            "maxAttempts": 4,
+            "backoffMs": 7,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "diamonds task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n1",
+              "n2"
+            ],
+            "durationMs": 17,
+            "costMicros": 2000,
+            "maxAttempts": 1,
+            "backoffMs": 10,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 30,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "diamonds task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 34,
+            "costMicros": 2301,
+            "maxAttempts": 2,
+            "backoffMs": 2,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 47
+          },
+          {
+            "id": "n5",
+            "name": "diamonds task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 51,
+            "costMicros": 2602,
+            "maxAttempts": 3,
+            "backoffMs": 5,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "diamonds task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n4",
+              "n5"
+            ],
+            "durationMs": 68,
+            "costMicros": 2903,
+            "maxAttempts": 4,
+            "backoffMs": 8,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 81,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 1,
+        "resources": {
+          "cpu": 1,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "nominal",
+        "priority": "id",
+        "budgetMicros": 0,
+        "deadlineMs": 0
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2"
+        ],
+        [
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 33,
+            "retryBoundMs": 80,
+            "costMicros": 1097,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 33,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 236,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 50,
+            "retryBoundMs": 187,
+            "costMicros": 1398,
+            "earliestStartMs": 33,
+            "earliestFinishMs": 83,
+            "latestStartMs": 50,
+            "slackMs": 17,
+            "tailMs": 186,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 67,
+            "retryBoundMs": 315,
+            "costMicros": 1699,
+            "earliestStartMs": 33,
+            "earliestFinishMs": 100,
+            "latestStartMs": 33,
+            "slackMs": 0,
+            "tailMs": 203,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 17,
+            "retryBoundMs": 17,
+            "costMicros": 2000,
+            "earliestStartMs": 100,
+            "earliestFinishMs": 117,
+            "latestStartMs": 100,
+            "slackMs": 0,
+            "tailMs": 136,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 34,
+            "retryBoundMs": 83,
+            "costMicros": 2301,
+            "earliestStartMs": 117,
+            "earliestFinishMs": 151,
+            "latestStartMs": 134,
+            "slackMs": 17,
+            "tailMs": 102,
+            "level": 3,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 51,
+            "retryBoundMs": 168,
+            "costMicros": 2602,
+            "earliestStartMs": 117,
+            "earliestFinishMs": 168,
+            "latestStartMs": 117,
+            "slackMs": 0,
+            "tailMs": 119,
+            "level": 3,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 68,
+            "retryBoundMs": 415,
+            "costMicros": 2903,
+            "earliestStartMs": 168,
+            "earliestFinishMs": 236,
+            "latestStartMs": 168,
+            "slackMs": 0,
+            "tailMs": 68,
+            "level": 4,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n2",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 236,
+        "totalWorkMs": 320,
+        "totalCostMicros": 14000,
+        "parallelLowerBoundMs": 320,
+        "resourceLowerBoundsMs": {
+          "cpu": 202,
+          "model": 84
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 33,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 33,
+          "endMs": 83,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 83,
+          "endMs": 150,
+          "waitMs": 50,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 150,
+          "endMs": 167,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 167,
+          "endMs": 201,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 201,
+          "endMs": 252,
+          "waitMs": 34,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 252,
+          "endMs": 320,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 320,
+      "peakParallel": 1,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "diamonds-nominal-id-capacity1",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "diamonds 1",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "diamonds task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n5",
+              "n4"
+            ],
+            "durationMs": 68,
+            "costMicros": 2903,
+            "maxAttempts": 4,
+            "backoffMs": 8,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 81,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "diamonds task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 51,
+            "costMicros": 2602,
+            "maxAttempts": 3,
+            "backoffMs": 5,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "diamonds task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 34,
+            "costMicros": 2301,
+            "maxAttempts": 2,
+            "backoffMs": 2,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 47
+          },
+          {
+            "id": "n3",
+            "name": "diamonds task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n2",
+              "n1"
+            ],
+            "durationMs": 17,
+            "costMicros": 2000,
+            "maxAttempts": 1,
+            "backoffMs": 10,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 30,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "diamonds task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 67,
+            "costMicros": 1699,
+            "maxAttempts": 4,
+            "backoffMs": 7,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "diamonds task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 50,
+            "costMicros": 1398,
+            "maxAttempts": 3,
+            "backoffMs": 4,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 63
+          },
+          {
+            "id": "n0",
+            "name": "diamonds task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 33,
+            "costMicros": 1097,
+            "maxAttempts": 2,
+            "backoffMs": 1,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 46,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 2,
+        "resources": {
+          "cpu": 1,
+          "model": 2
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "nominal",
+        "priority": "id",
+        "budgetMicros": 10000,
+        "deadlineMs": 150
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2"
+        ],
+        [
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 33,
+            "retryBoundMs": 80,
+            "costMicros": 1097,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 33,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 236,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 50,
+            "retryBoundMs": 187,
+            "costMicros": 1398,
+            "earliestStartMs": 33,
+            "earliestFinishMs": 83,
+            "latestStartMs": 50,
+            "slackMs": 17,
+            "tailMs": 186,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 67,
+            "retryBoundMs": 315,
+            "costMicros": 1699,
+            "earliestStartMs": 33,
+            "earliestFinishMs": 100,
+            "latestStartMs": 33,
+            "slackMs": 0,
+            "tailMs": 203,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 17,
+            "retryBoundMs": 17,
+            "costMicros": 2000,
+            "earliestStartMs": 100,
+            "earliestFinishMs": 117,
+            "latestStartMs": 100,
+            "slackMs": 0,
+            "tailMs": 136,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 34,
+            "retryBoundMs": 83,
+            "costMicros": 2301,
+            "earliestStartMs": 117,
+            "earliestFinishMs": 151,
+            "latestStartMs": 134,
+            "slackMs": 17,
+            "tailMs": 102,
+            "level": 3,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 51,
+            "retryBoundMs": 168,
+            "costMicros": 2602,
+            "earliestStartMs": 117,
+            "earliestFinishMs": 168,
+            "latestStartMs": 117,
+            "slackMs": 0,
+            "tailMs": 119,
+            "level": 3,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 68,
+            "retryBoundMs": 415,
+            "costMicros": 2903,
+            "earliestStartMs": 168,
+            "earliestFinishMs": 236,
+            "latestStartMs": 168,
+            "slackMs": 0,
+            "tailMs": 68,
+            "level": 4,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n2",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 236,
+        "totalWorkMs": 320,
+        "totalCostMicros": 14000,
+        "parallelLowerBoundMs": 160,
+        "resourceLowerBoundsMs": {
+          "cpu": 202,
+          "model": 42
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 33,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 33,
+          "endMs": 83,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 33,
+          "endMs": 100,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 100,
+          "endMs": 117,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 117,
+          "endMs": 151,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 117,
+          "endMs": 168,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 168,
+          "endMs": 236,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 236,
+      "peakParallel": 2,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": false,
+      "withinDeadline": false,
+      "optimal": true
+    }
+  },
+  {
+    "name": "diamonds-nominal-id-capacity2",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "diamonds 2",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "diamonds task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 33,
+            "costMicros": 1097,
+            "maxAttempts": 2,
+            "backoffMs": 1,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 46,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "diamonds task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 50,
+            "costMicros": 1398,
+            "maxAttempts": 3,
+            "backoffMs": 4,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 63
+          },
+          {
+            "id": "n2",
+            "name": "diamonds task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 67,
+            "costMicros": 1699,
+            "maxAttempts": 4,
+            "backoffMs": 7,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "diamonds task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n1",
+              "n2"
+            ],
+            "durationMs": 17,
+            "costMicros": 2000,
+            "maxAttempts": 1,
+            "backoffMs": 10,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 30,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "diamonds task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 34,
+            "costMicros": 2301,
+            "maxAttempts": 2,
+            "backoffMs": 2,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 47
+          },
+          {
+            "id": "n5",
+            "name": "diamonds task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 51,
+            "costMicros": 2602,
+            "maxAttempts": 3,
+            "backoffMs": 5,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "diamonds task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n4",
+              "n5"
+            ],
+            "durationMs": 68,
+            "costMicros": 2903,
+            "maxAttempts": 4,
+            "backoffMs": 8,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 81,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 3,
+        "resources": {
+          "cpu": 2,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 2
+        },
+        "mode": "nominal",
+        "priority": "id",
+        "budgetMicros": 20000,
+        "deadlineMs": 300
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2"
+        ],
+        [
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 33,
+            "retryBoundMs": 80,
+            "costMicros": 1097,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 33,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 236,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 50,
+            "retryBoundMs": 187,
+            "costMicros": 1398,
+            "earliestStartMs": 33,
+            "earliestFinishMs": 83,
+            "latestStartMs": 50,
+            "slackMs": 17,
+            "tailMs": 186,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 67,
+            "retryBoundMs": 315,
+            "costMicros": 1699,
+            "earliestStartMs": 33,
+            "earliestFinishMs": 100,
+            "latestStartMs": 33,
+            "slackMs": 0,
+            "tailMs": 203,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 17,
+            "retryBoundMs": 17,
+            "costMicros": 2000,
+            "earliestStartMs": 100,
+            "earliestFinishMs": 117,
+            "latestStartMs": 100,
+            "slackMs": 0,
+            "tailMs": 136,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 34,
+            "retryBoundMs": 83,
+            "costMicros": 2301,
+            "earliestStartMs": 117,
+            "earliestFinishMs": 151,
+            "latestStartMs": 134,
+            "slackMs": 17,
+            "tailMs": 102,
+            "level": 3,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 51,
+            "retryBoundMs": 168,
+            "costMicros": 2602,
+            "earliestStartMs": 117,
+            "earliestFinishMs": 168,
+            "latestStartMs": 117,
+            "slackMs": 0,
+            "tailMs": 119,
+            "level": 3,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 68,
+            "retryBoundMs": 415,
+            "costMicros": 2903,
+            "earliestStartMs": 168,
+            "earliestFinishMs": 236,
+            "latestStartMs": 168,
+            "slackMs": 0,
+            "tailMs": 68,
+            "level": 4,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n2",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 236,
+        "totalWorkMs": 320,
+        "totalCostMicros": 14000,
+        "parallelLowerBoundMs": 107,
+        "resourceLowerBoundsMs": {
+          "cpu": 101,
+          "model": 84
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 33,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 33,
+          "endMs": 83,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 33,
+          "endMs": 100,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 100,
+          "endMs": 117,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 117,
+          "endMs": 151,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 117,
+          "endMs": 168,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 168,
+          "endMs": 236,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 236,
+      "peakParallel": 2,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "diamonds-nominal-id-capacity3",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "diamonds 3",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "diamonds task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n5",
+              "n4"
+            ],
+            "durationMs": 68,
+            "costMicros": 2903,
+            "maxAttempts": 4,
+            "backoffMs": 8,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 81,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "diamonds task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 51,
+            "costMicros": 2602,
+            "maxAttempts": 3,
+            "backoffMs": 5,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "diamonds task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 34,
+            "costMicros": 2301,
+            "maxAttempts": 2,
+            "backoffMs": 2,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 47
+          },
+          {
+            "id": "n3",
+            "name": "diamonds task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n2",
+              "n1"
+            ],
+            "durationMs": 17,
+            "costMicros": 2000,
+            "maxAttempts": 1,
+            "backoffMs": 10,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 30,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "diamonds task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 67,
+            "costMicros": 1699,
+            "maxAttempts": 4,
+            "backoffMs": 7,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "diamonds task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 50,
+            "costMicros": 1398,
+            "maxAttempts": 3,
+            "backoffMs": 4,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 63
+          },
+          {
+            "id": "n0",
+            "name": "diamonds task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 33,
+            "costMicros": 1097,
+            "maxAttempts": 2,
+            "backoffMs": 1,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 46,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 6,
+        "resources": {
+          "cpu": 4,
+          "model": 3
+        },
+        "concurrencyLimits": {
+          "exclusive": 3
+        },
+        "mode": "nominal",
+        "priority": "id",
+        "budgetMicros": 100000,
+        "deadlineMs": 1000
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2"
+        ],
+        [
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 33,
+            "retryBoundMs": 80,
+            "costMicros": 1097,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 33,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 236,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 50,
+            "retryBoundMs": 187,
+            "costMicros": 1398,
+            "earliestStartMs": 33,
+            "earliestFinishMs": 83,
+            "latestStartMs": 50,
+            "slackMs": 17,
+            "tailMs": 186,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 67,
+            "retryBoundMs": 315,
+            "costMicros": 1699,
+            "earliestStartMs": 33,
+            "earliestFinishMs": 100,
+            "latestStartMs": 33,
+            "slackMs": 0,
+            "tailMs": 203,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 17,
+            "retryBoundMs": 17,
+            "costMicros": 2000,
+            "earliestStartMs": 100,
+            "earliestFinishMs": 117,
+            "latestStartMs": 100,
+            "slackMs": 0,
+            "tailMs": 136,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 34,
+            "retryBoundMs": 83,
+            "costMicros": 2301,
+            "earliestStartMs": 117,
+            "earliestFinishMs": 151,
+            "latestStartMs": 134,
+            "slackMs": 17,
+            "tailMs": 102,
+            "level": 3,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 51,
+            "retryBoundMs": 168,
+            "costMicros": 2602,
+            "earliestStartMs": 117,
+            "earliestFinishMs": 168,
+            "latestStartMs": 117,
+            "slackMs": 0,
+            "tailMs": 119,
+            "level": 3,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 68,
+            "retryBoundMs": 415,
+            "costMicros": 2903,
+            "earliestStartMs": 168,
+            "earliestFinishMs": 236,
+            "latestStartMs": 168,
+            "slackMs": 0,
+            "tailMs": 68,
+            "level": 4,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n2",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 236,
+        "totalWorkMs": 320,
+        "totalCostMicros": 14000,
+        "parallelLowerBoundMs": 54,
+        "resourceLowerBoundsMs": {
+          "cpu": 51,
+          "model": 28
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 33,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 33,
+          "endMs": 83,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 33,
+          "endMs": 100,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 100,
+          "endMs": 117,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 117,
+          "endMs": 151,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 117,
+          "endMs": 168,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 168,
+          "endMs": 236,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 236,
+      "peakParallel": 2,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "diamonds-retryBound-criticalPath-capacity0",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "diamonds 0",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "diamonds task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 33,
+            "costMicros": 1097,
+            "maxAttempts": 2,
+            "backoffMs": 1,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 46,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "diamonds task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 50,
+            "costMicros": 1398,
+            "maxAttempts": 3,
+            "backoffMs": 4,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 63
+          },
+          {
+            "id": "n2",
+            "name": "diamonds task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 67,
+            "costMicros": 1699,
+            "maxAttempts": 4,
+            "backoffMs": 7,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "diamonds task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n1",
+              "n2"
+            ],
+            "durationMs": 17,
+            "costMicros": 2000,
+            "maxAttempts": 1,
+            "backoffMs": 10,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 30,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "diamonds task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 34,
+            "costMicros": 2301,
+            "maxAttempts": 2,
+            "backoffMs": 2,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 47
+          },
+          {
+            "id": "n5",
+            "name": "diamonds task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 51,
+            "costMicros": 2602,
+            "maxAttempts": 3,
+            "backoffMs": 5,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "diamonds task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n4",
+              "n5"
+            ],
+            "durationMs": 68,
+            "costMicros": 2903,
+            "maxAttempts": 4,
+            "backoffMs": 8,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 81,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 1,
+        "resources": {
+          "cpu": 1,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "retryBound",
+        "priority": "criticalPath",
+        "budgetMicros": 0,
+        "deadlineMs": 0
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2"
+        ],
+        [
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 80,
+            "retryBoundMs": 80,
+            "costMicros": 2194,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 80,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 995,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 187,
+            "retryBoundMs": 187,
+            "costMicros": 4194,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 267,
+            "latestStartMs": 208,
+            "slackMs": 128,
+            "tailMs": 787,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 315,
+            "retryBoundMs": 315,
+            "costMicros": 6796,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 395,
+            "latestStartMs": 80,
+            "slackMs": 0,
+            "tailMs": 915,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 17,
+            "retryBoundMs": 17,
+            "costMicros": 2000,
+            "earliestStartMs": 395,
+            "earliestFinishMs": 412,
+            "latestStartMs": 395,
+            "slackMs": 0,
+            "tailMs": 600,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 83,
+            "retryBoundMs": 83,
+            "costMicros": 4602,
+            "earliestStartMs": 412,
+            "earliestFinishMs": 495,
+            "latestStartMs": 497,
+            "slackMs": 85,
+            "tailMs": 498,
+            "level": 3,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 168,
+            "retryBoundMs": 168,
+            "costMicros": 7806,
+            "earliestStartMs": 412,
+            "earliestFinishMs": 580,
+            "latestStartMs": 412,
+            "slackMs": 0,
+            "tailMs": 583,
+            "level": 3,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 415,
+            "retryBoundMs": 415,
+            "costMicros": 11612,
+            "earliestStartMs": 580,
+            "earliestFinishMs": 995,
+            "latestStartMs": 580,
+            "slackMs": 0,
+            "tailMs": 415,
+            "level": 4,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n2",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 995,
+        "totalWorkMs": 1265,
+        "totalCostMicros": 39204,
+        "parallelLowerBoundMs": 1265,
+        "resourceLowerBoundsMs": {
+          "cpu": 893,
+          "model": 270
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 80,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 80,
+          "endMs": 395,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 395,
+          "endMs": 582,
+          "waitMs": 315,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 582,
+          "endMs": 599,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 599,
+          "endMs": 767,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 767,
+          "endMs": 850,
+          "waitMs": 168,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 850,
+          "endMs": 1265,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 1265,
+      "peakParallel": 1,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "diamonds-retryBound-criticalPath-capacity1",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "diamonds 1",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "diamonds task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n5",
+              "n4"
+            ],
+            "durationMs": 68,
+            "costMicros": 2903,
+            "maxAttempts": 4,
+            "backoffMs": 8,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 81,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "diamonds task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 51,
+            "costMicros": 2602,
+            "maxAttempts": 3,
+            "backoffMs": 5,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "diamonds task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 34,
+            "costMicros": 2301,
+            "maxAttempts": 2,
+            "backoffMs": 2,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 47
+          },
+          {
+            "id": "n3",
+            "name": "diamonds task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n2",
+              "n1"
+            ],
+            "durationMs": 17,
+            "costMicros": 2000,
+            "maxAttempts": 1,
+            "backoffMs": 10,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 30,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "diamonds task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 67,
+            "costMicros": 1699,
+            "maxAttempts": 4,
+            "backoffMs": 7,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "diamonds task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 50,
+            "costMicros": 1398,
+            "maxAttempts": 3,
+            "backoffMs": 4,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 63
+          },
+          {
+            "id": "n0",
+            "name": "diamonds task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 33,
+            "costMicros": 1097,
+            "maxAttempts": 2,
+            "backoffMs": 1,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 46,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 2,
+        "resources": {
+          "cpu": 1,
+          "model": 2
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "retryBound",
+        "priority": "criticalPath",
+        "budgetMicros": 10000,
+        "deadlineMs": 150
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2"
+        ],
+        [
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 80,
+            "retryBoundMs": 80,
+            "costMicros": 2194,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 80,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 995,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 187,
+            "retryBoundMs": 187,
+            "costMicros": 4194,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 267,
+            "latestStartMs": 208,
+            "slackMs": 128,
+            "tailMs": 787,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 315,
+            "retryBoundMs": 315,
+            "costMicros": 6796,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 395,
+            "latestStartMs": 80,
+            "slackMs": 0,
+            "tailMs": 915,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 17,
+            "retryBoundMs": 17,
+            "costMicros": 2000,
+            "earliestStartMs": 395,
+            "earliestFinishMs": 412,
+            "latestStartMs": 395,
+            "slackMs": 0,
+            "tailMs": 600,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 83,
+            "retryBoundMs": 83,
+            "costMicros": 4602,
+            "earliestStartMs": 412,
+            "earliestFinishMs": 495,
+            "latestStartMs": 497,
+            "slackMs": 85,
+            "tailMs": 498,
+            "level": 3,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 168,
+            "retryBoundMs": 168,
+            "costMicros": 7806,
+            "earliestStartMs": 412,
+            "earliestFinishMs": 580,
+            "latestStartMs": 412,
+            "slackMs": 0,
+            "tailMs": 583,
+            "level": 3,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 415,
+            "retryBoundMs": 415,
+            "costMicros": 11612,
+            "earliestStartMs": 580,
+            "earliestFinishMs": 995,
+            "latestStartMs": 580,
+            "slackMs": 0,
+            "tailMs": 415,
+            "level": 4,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n2",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 995,
+        "totalWorkMs": 1265,
+        "totalCostMicros": 39204,
+        "parallelLowerBoundMs": 633,
+        "resourceLowerBoundsMs": {
+          "cpu": 893,
+          "model": 135
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 80,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 80,
+          "endMs": 395,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 80,
+          "endMs": 267,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 395,
+          "endMs": 412,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 412,
+          "endMs": 580,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 412,
+          "endMs": 495,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 580,
+          "endMs": 995,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 995,
+      "peakParallel": 2,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": false,
+      "withinDeadline": false,
+      "optimal": true
+    }
+  },
+  {
+    "name": "diamonds-retryBound-criticalPath-capacity2",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "diamonds 2",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "diamonds task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 33,
+            "costMicros": 1097,
+            "maxAttempts": 2,
+            "backoffMs": 1,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 46,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "diamonds task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 50,
+            "costMicros": 1398,
+            "maxAttempts": 3,
+            "backoffMs": 4,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 63
+          },
+          {
+            "id": "n2",
+            "name": "diamonds task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 67,
+            "costMicros": 1699,
+            "maxAttempts": 4,
+            "backoffMs": 7,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "diamonds task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n1",
+              "n2"
+            ],
+            "durationMs": 17,
+            "costMicros": 2000,
+            "maxAttempts": 1,
+            "backoffMs": 10,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 30,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "diamonds task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 34,
+            "costMicros": 2301,
+            "maxAttempts": 2,
+            "backoffMs": 2,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 47
+          },
+          {
+            "id": "n5",
+            "name": "diamonds task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 51,
+            "costMicros": 2602,
+            "maxAttempts": 3,
+            "backoffMs": 5,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "diamonds task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n4",
+              "n5"
+            ],
+            "durationMs": 68,
+            "costMicros": 2903,
+            "maxAttempts": 4,
+            "backoffMs": 8,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 81,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 3,
+        "resources": {
+          "cpu": 2,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 2
+        },
+        "mode": "retryBound",
+        "priority": "criticalPath",
+        "budgetMicros": 20000,
+        "deadlineMs": 300
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2"
+        ],
+        [
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 80,
+            "retryBoundMs": 80,
+            "costMicros": 2194,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 80,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 995,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 187,
+            "retryBoundMs": 187,
+            "costMicros": 4194,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 267,
+            "latestStartMs": 208,
+            "slackMs": 128,
+            "tailMs": 787,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 315,
+            "retryBoundMs": 315,
+            "costMicros": 6796,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 395,
+            "latestStartMs": 80,
+            "slackMs": 0,
+            "tailMs": 915,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 17,
+            "retryBoundMs": 17,
+            "costMicros": 2000,
+            "earliestStartMs": 395,
+            "earliestFinishMs": 412,
+            "latestStartMs": 395,
+            "slackMs": 0,
+            "tailMs": 600,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 83,
+            "retryBoundMs": 83,
+            "costMicros": 4602,
+            "earliestStartMs": 412,
+            "earliestFinishMs": 495,
+            "latestStartMs": 497,
+            "slackMs": 85,
+            "tailMs": 498,
+            "level": 3,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 168,
+            "retryBoundMs": 168,
+            "costMicros": 7806,
+            "earliestStartMs": 412,
+            "earliestFinishMs": 580,
+            "latestStartMs": 412,
+            "slackMs": 0,
+            "tailMs": 583,
+            "level": 3,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 415,
+            "retryBoundMs": 415,
+            "costMicros": 11612,
+            "earliestStartMs": 580,
+            "earliestFinishMs": 995,
+            "latestStartMs": 580,
+            "slackMs": 0,
+            "tailMs": 415,
+            "level": 4,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n2",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 995,
+        "totalWorkMs": 1265,
+        "totalCostMicros": 39204,
+        "parallelLowerBoundMs": 422,
+        "resourceLowerBoundsMs": {
+          "cpu": 447,
+          "model": 270
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 80,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 80,
+          "endMs": 395,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 80,
+          "endMs": 267,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 395,
+          "endMs": 412,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 412,
+          "endMs": 580,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 412,
+          "endMs": 495,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 580,
+          "endMs": 995,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 995,
+      "peakParallel": 2,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": false,
+      "withinDeadline": false,
+      "optimal": true
+    }
+  },
+  {
+    "name": "diamonds-retryBound-criticalPath-capacity3",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "diamonds 3",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "diamonds task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n5",
+              "n4"
+            ],
+            "durationMs": 68,
+            "costMicros": 2903,
+            "maxAttempts": 4,
+            "backoffMs": 8,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 81,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "diamonds task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 51,
+            "costMicros": 2602,
+            "maxAttempts": 3,
+            "backoffMs": 5,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "diamonds task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 34,
+            "costMicros": 2301,
+            "maxAttempts": 2,
+            "backoffMs": 2,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 47
+          },
+          {
+            "id": "n3",
+            "name": "diamonds task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n2",
+              "n1"
+            ],
+            "durationMs": 17,
+            "costMicros": 2000,
+            "maxAttempts": 1,
+            "backoffMs": 10,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 30,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "diamonds task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 67,
+            "costMicros": 1699,
+            "maxAttempts": 4,
+            "backoffMs": 7,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "diamonds task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 50,
+            "costMicros": 1398,
+            "maxAttempts": 3,
+            "backoffMs": 4,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 63
+          },
+          {
+            "id": "n0",
+            "name": "diamonds task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 33,
+            "costMicros": 1097,
+            "maxAttempts": 2,
+            "backoffMs": 1,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 46,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 6,
+        "resources": {
+          "cpu": 4,
+          "model": 3
+        },
+        "concurrencyLimits": {
+          "exclusive": 3
+        },
+        "mode": "retryBound",
+        "priority": "criticalPath",
+        "budgetMicros": 100000,
+        "deadlineMs": 1000
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2"
+        ],
+        [
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 80,
+            "retryBoundMs": 80,
+            "costMicros": 2194,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 80,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 995,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 187,
+            "retryBoundMs": 187,
+            "costMicros": 4194,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 267,
+            "latestStartMs": 208,
+            "slackMs": 128,
+            "tailMs": 787,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 315,
+            "retryBoundMs": 315,
+            "costMicros": 6796,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 395,
+            "latestStartMs": 80,
+            "slackMs": 0,
+            "tailMs": 915,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 17,
+            "retryBoundMs": 17,
+            "costMicros": 2000,
+            "earliestStartMs": 395,
+            "earliestFinishMs": 412,
+            "latestStartMs": 395,
+            "slackMs": 0,
+            "tailMs": 600,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 83,
+            "retryBoundMs": 83,
+            "costMicros": 4602,
+            "earliestStartMs": 412,
+            "earliestFinishMs": 495,
+            "latestStartMs": 497,
+            "slackMs": 85,
+            "tailMs": 498,
+            "level": 3,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 168,
+            "retryBoundMs": 168,
+            "costMicros": 7806,
+            "earliestStartMs": 412,
+            "earliestFinishMs": 580,
+            "latestStartMs": 412,
+            "slackMs": 0,
+            "tailMs": 583,
+            "level": 3,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 415,
+            "retryBoundMs": 415,
+            "costMicros": 11612,
+            "earliestStartMs": 580,
+            "earliestFinishMs": 995,
+            "latestStartMs": 580,
+            "slackMs": 0,
+            "tailMs": 415,
+            "level": 4,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n2",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 995,
+        "totalWorkMs": 1265,
+        "totalCostMicros": 39204,
+        "parallelLowerBoundMs": 211,
+        "resourceLowerBoundsMs": {
+          "cpu": 224,
+          "model": 90
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 80,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 80,
+          "endMs": 395,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 80,
+          "endMs": 267,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 395,
+          "endMs": 412,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 412,
+          "endMs": 580,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 412,
+          "endMs": 495,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 580,
+          "endMs": 995,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 995,
+      "peakParallel": 2,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "diamonds-retryBound-id-capacity0",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "diamonds 0",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "diamonds task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 33,
+            "costMicros": 1097,
+            "maxAttempts": 2,
+            "backoffMs": 1,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 46,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "diamonds task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 50,
+            "costMicros": 1398,
+            "maxAttempts": 3,
+            "backoffMs": 4,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 63
+          },
+          {
+            "id": "n2",
+            "name": "diamonds task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 67,
+            "costMicros": 1699,
+            "maxAttempts": 4,
+            "backoffMs": 7,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "diamonds task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n1",
+              "n2"
+            ],
+            "durationMs": 17,
+            "costMicros": 2000,
+            "maxAttempts": 1,
+            "backoffMs": 10,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 30,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "diamonds task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 34,
+            "costMicros": 2301,
+            "maxAttempts": 2,
+            "backoffMs": 2,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 47
+          },
+          {
+            "id": "n5",
+            "name": "diamonds task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 51,
+            "costMicros": 2602,
+            "maxAttempts": 3,
+            "backoffMs": 5,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "diamonds task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n4",
+              "n5"
+            ],
+            "durationMs": 68,
+            "costMicros": 2903,
+            "maxAttempts": 4,
+            "backoffMs": 8,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 81,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 1,
+        "resources": {
+          "cpu": 1,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "retryBound",
+        "priority": "id",
+        "budgetMicros": 0,
+        "deadlineMs": 0
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2"
+        ],
+        [
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 80,
+            "retryBoundMs": 80,
+            "costMicros": 2194,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 80,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 995,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 187,
+            "retryBoundMs": 187,
+            "costMicros": 4194,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 267,
+            "latestStartMs": 208,
+            "slackMs": 128,
+            "tailMs": 787,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 315,
+            "retryBoundMs": 315,
+            "costMicros": 6796,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 395,
+            "latestStartMs": 80,
+            "slackMs": 0,
+            "tailMs": 915,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 17,
+            "retryBoundMs": 17,
+            "costMicros": 2000,
+            "earliestStartMs": 395,
+            "earliestFinishMs": 412,
+            "latestStartMs": 395,
+            "slackMs": 0,
+            "tailMs": 600,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 83,
+            "retryBoundMs": 83,
+            "costMicros": 4602,
+            "earliestStartMs": 412,
+            "earliestFinishMs": 495,
+            "latestStartMs": 497,
+            "slackMs": 85,
+            "tailMs": 498,
+            "level": 3,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 168,
+            "retryBoundMs": 168,
+            "costMicros": 7806,
+            "earliestStartMs": 412,
+            "earliestFinishMs": 580,
+            "latestStartMs": 412,
+            "slackMs": 0,
+            "tailMs": 583,
+            "level": 3,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 415,
+            "retryBoundMs": 415,
+            "costMicros": 11612,
+            "earliestStartMs": 580,
+            "earliestFinishMs": 995,
+            "latestStartMs": 580,
+            "slackMs": 0,
+            "tailMs": 415,
+            "level": 4,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n2",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 995,
+        "totalWorkMs": 1265,
+        "totalCostMicros": 39204,
+        "parallelLowerBoundMs": 1265,
+        "resourceLowerBoundsMs": {
+          "cpu": 893,
+          "model": 270
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 80,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 80,
+          "endMs": 267,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 267,
+          "endMs": 582,
+          "waitMs": 187,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 582,
+          "endMs": 599,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 599,
+          "endMs": 682,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 682,
+          "endMs": 850,
+          "waitMs": 83,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 850,
+          "endMs": 1265,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 1265,
+      "peakParallel": 1,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "diamonds-retryBound-id-capacity1",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "diamonds 1",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "diamonds task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n5",
+              "n4"
+            ],
+            "durationMs": 68,
+            "costMicros": 2903,
+            "maxAttempts": 4,
+            "backoffMs": 8,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 81,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "diamonds task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 51,
+            "costMicros": 2602,
+            "maxAttempts": 3,
+            "backoffMs": 5,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "diamonds task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 34,
+            "costMicros": 2301,
+            "maxAttempts": 2,
+            "backoffMs": 2,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 47
+          },
+          {
+            "id": "n3",
+            "name": "diamonds task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n2",
+              "n1"
+            ],
+            "durationMs": 17,
+            "costMicros": 2000,
+            "maxAttempts": 1,
+            "backoffMs": 10,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 30,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "diamonds task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 67,
+            "costMicros": 1699,
+            "maxAttempts": 4,
+            "backoffMs": 7,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "diamonds task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 50,
+            "costMicros": 1398,
+            "maxAttempts": 3,
+            "backoffMs": 4,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 63
+          },
+          {
+            "id": "n0",
+            "name": "diamonds task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 33,
+            "costMicros": 1097,
+            "maxAttempts": 2,
+            "backoffMs": 1,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 46,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 2,
+        "resources": {
+          "cpu": 1,
+          "model": 2
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "retryBound",
+        "priority": "id",
+        "budgetMicros": 10000,
+        "deadlineMs": 150
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2"
+        ],
+        [
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 80,
+            "retryBoundMs": 80,
+            "costMicros": 2194,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 80,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 995,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 187,
+            "retryBoundMs": 187,
+            "costMicros": 4194,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 267,
+            "latestStartMs": 208,
+            "slackMs": 128,
+            "tailMs": 787,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 315,
+            "retryBoundMs": 315,
+            "costMicros": 6796,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 395,
+            "latestStartMs": 80,
+            "slackMs": 0,
+            "tailMs": 915,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 17,
+            "retryBoundMs": 17,
+            "costMicros": 2000,
+            "earliestStartMs": 395,
+            "earliestFinishMs": 412,
+            "latestStartMs": 395,
+            "slackMs": 0,
+            "tailMs": 600,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 83,
+            "retryBoundMs": 83,
+            "costMicros": 4602,
+            "earliestStartMs": 412,
+            "earliestFinishMs": 495,
+            "latestStartMs": 497,
+            "slackMs": 85,
+            "tailMs": 498,
+            "level": 3,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 168,
+            "retryBoundMs": 168,
+            "costMicros": 7806,
+            "earliestStartMs": 412,
+            "earliestFinishMs": 580,
+            "latestStartMs": 412,
+            "slackMs": 0,
+            "tailMs": 583,
+            "level": 3,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 415,
+            "retryBoundMs": 415,
+            "costMicros": 11612,
+            "earliestStartMs": 580,
+            "earliestFinishMs": 995,
+            "latestStartMs": 580,
+            "slackMs": 0,
+            "tailMs": 415,
+            "level": 4,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n2",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 995,
+        "totalWorkMs": 1265,
+        "totalCostMicros": 39204,
+        "parallelLowerBoundMs": 633,
+        "resourceLowerBoundsMs": {
+          "cpu": 893,
+          "model": 135
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 80,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 80,
+          "endMs": 267,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 80,
+          "endMs": 395,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 395,
+          "endMs": 412,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 412,
+          "endMs": 495,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 412,
+          "endMs": 580,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 580,
+          "endMs": 995,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 995,
+      "peakParallel": 2,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": false,
+      "withinDeadline": false,
+      "optimal": true
+    }
+  },
+  {
+    "name": "diamonds-retryBound-id-capacity2",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "diamonds 2",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "diamonds task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 33,
+            "costMicros": 1097,
+            "maxAttempts": 2,
+            "backoffMs": 1,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 46,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "diamonds task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 50,
+            "costMicros": 1398,
+            "maxAttempts": 3,
+            "backoffMs": 4,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 63
+          },
+          {
+            "id": "n2",
+            "name": "diamonds task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 67,
+            "costMicros": 1699,
+            "maxAttempts": 4,
+            "backoffMs": 7,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "diamonds task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n1",
+              "n2"
+            ],
+            "durationMs": 17,
+            "costMicros": 2000,
+            "maxAttempts": 1,
+            "backoffMs": 10,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 30,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "diamonds task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 34,
+            "costMicros": 2301,
+            "maxAttempts": 2,
+            "backoffMs": 2,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 47
+          },
+          {
+            "id": "n5",
+            "name": "diamonds task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 51,
+            "costMicros": 2602,
+            "maxAttempts": 3,
+            "backoffMs": 5,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "diamonds task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n4",
+              "n5"
+            ],
+            "durationMs": 68,
+            "costMicros": 2903,
+            "maxAttempts": 4,
+            "backoffMs": 8,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 81,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 3,
+        "resources": {
+          "cpu": 2,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 2
+        },
+        "mode": "retryBound",
+        "priority": "id",
+        "budgetMicros": 20000,
+        "deadlineMs": 300
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2"
+        ],
+        [
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 80,
+            "retryBoundMs": 80,
+            "costMicros": 2194,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 80,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 995,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 187,
+            "retryBoundMs": 187,
+            "costMicros": 4194,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 267,
+            "latestStartMs": 208,
+            "slackMs": 128,
+            "tailMs": 787,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 315,
+            "retryBoundMs": 315,
+            "costMicros": 6796,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 395,
+            "latestStartMs": 80,
+            "slackMs": 0,
+            "tailMs": 915,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 17,
+            "retryBoundMs": 17,
+            "costMicros": 2000,
+            "earliestStartMs": 395,
+            "earliestFinishMs": 412,
+            "latestStartMs": 395,
+            "slackMs": 0,
+            "tailMs": 600,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 83,
+            "retryBoundMs": 83,
+            "costMicros": 4602,
+            "earliestStartMs": 412,
+            "earliestFinishMs": 495,
+            "latestStartMs": 497,
+            "slackMs": 85,
+            "tailMs": 498,
+            "level": 3,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 168,
+            "retryBoundMs": 168,
+            "costMicros": 7806,
+            "earliestStartMs": 412,
+            "earliestFinishMs": 580,
+            "latestStartMs": 412,
+            "slackMs": 0,
+            "tailMs": 583,
+            "level": 3,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 415,
+            "retryBoundMs": 415,
+            "costMicros": 11612,
+            "earliestStartMs": 580,
+            "earliestFinishMs": 995,
+            "latestStartMs": 580,
+            "slackMs": 0,
+            "tailMs": 415,
+            "level": 4,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n2",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 995,
+        "totalWorkMs": 1265,
+        "totalCostMicros": 39204,
+        "parallelLowerBoundMs": 422,
+        "resourceLowerBoundsMs": {
+          "cpu": 447,
+          "model": 270
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 80,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 80,
+          "endMs": 267,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 80,
+          "endMs": 395,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 395,
+          "endMs": 412,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 412,
+          "endMs": 495,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 412,
+          "endMs": 580,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 580,
+          "endMs": 995,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 995,
+      "peakParallel": 2,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": false,
+      "withinDeadline": false,
+      "optimal": true
+    }
+  },
+  {
+    "name": "diamonds-retryBound-id-capacity3",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "diamonds 3",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "diamonds task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n5",
+              "n4"
+            ],
+            "durationMs": 68,
+            "costMicros": 2903,
+            "maxAttempts": 4,
+            "backoffMs": 8,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 81,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "diamonds task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 51,
+            "costMicros": 2602,
+            "maxAttempts": 3,
+            "backoffMs": 5,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "diamonds task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 34,
+            "costMicros": 2301,
+            "maxAttempts": 2,
+            "backoffMs": 2,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 47
+          },
+          {
+            "id": "n3",
+            "name": "diamonds task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n2",
+              "n1"
+            ],
+            "durationMs": 17,
+            "costMicros": 2000,
+            "maxAttempts": 1,
+            "backoffMs": 10,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 30,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "diamonds task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 67,
+            "costMicros": 1699,
+            "maxAttempts": 4,
+            "backoffMs": 7,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "diamonds task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 50,
+            "costMicros": 1398,
+            "maxAttempts": 3,
+            "backoffMs": 4,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 63
+          },
+          {
+            "id": "n0",
+            "name": "diamonds task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 33,
+            "costMicros": 1097,
+            "maxAttempts": 2,
+            "backoffMs": 1,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 46,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 6,
+        "resources": {
+          "cpu": 4,
+          "model": 3
+        },
+        "concurrencyLimits": {
+          "exclusive": 3
+        },
+        "mode": "retryBound",
+        "priority": "id",
+        "budgetMicros": 100000,
+        "deadlineMs": 1000
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2"
+        ],
+        [
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 80,
+            "retryBoundMs": 80,
+            "costMicros": 2194,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 80,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 995,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 187,
+            "retryBoundMs": 187,
+            "costMicros": 4194,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 267,
+            "latestStartMs": 208,
+            "slackMs": 128,
+            "tailMs": 787,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 315,
+            "retryBoundMs": 315,
+            "costMicros": 6796,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 395,
+            "latestStartMs": 80,
+            "slackMs": 0,
+            "tailMs": 915,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 17,
+            "retryBoundMs": 17,
+            "costMicros": 2000,
+            "earliestStartMs": 395,
+            "earliestFinishMs": 412,
+            "latestStartMs": 395,
+            "slackMs": 0,
+            "tailMs": 600,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 83,
+            "retryBoundMs": 83,
+            "costMicros": 4602,
+            "earliestStartMs": 412,
+            "earliestFinishMs": 495,
+            "latestStartMs": 497,
+            "slackMs": 85,
+            "tailMs": 498,
+            "level": 3,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 168,
+            "retryBoundMs": 168,
+            "costMicros": 7806,
+            "earliestStartMs": 412,
+            "earliestFinishMs": 580,
+            "latestStartMs": 412,
+            "slackMs": 0,
+            "tailMs": 583,
+            "level": 3,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 415,
+            "retryBoundMs": 415,
+            "costMicros": 11612,
+            "earliestStartMs": 580,
+            "earliestFinishMs": 995,
+            "latestStartMs": 580,
+            "slackMs": 0,
+            "tailMs": 415,
+            "level": 4,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n2",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 995,
+        "totalWorkMs": 1265,
+        "totalCostMicros": 39204,
+        "parallelLowerBoundMs": 211,
+        "resourceLowerBoundsMs": {
+          "cpu": 224,
+          "model": 90
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 80,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 80,
+          "endMs": 267,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 80,
+          "endMs": 395,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 395,
+          "endMs": 412,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 412,
+          "endMs": 495,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 412,
+          "endMs": 580,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 580,
+          "endMs": 995,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 995,
+      "peakParallel": 2,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  }
+]
