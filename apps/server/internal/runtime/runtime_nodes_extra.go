@@ -130,6 +130,35 @@ func (h *handler) runtimeMeshStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"meshConnected": connected, "hasAuthKey": cfg["authKeyEnc"] != nil, "tags": tags, "hostJoinsTailscale": false, "meshProvider": cfg["provider"]})
 }
+// agentBinariesDir is where packaged node artifacts are served from.
+func agentBinariesDir() string {
+	if base := os.Getenv("ZAKURA_AGENT_BINARIES_DIR"); base != "" {
+		return base
+	}
+	if base := os.Getenv("ZAKURA_AGENT_BINARY_DIR"); base != "" {
+		return base
+	}
+	return "../agent/dist"
+}
+
+// stdioBridgeArtifact returns the download path and SHA-256 of the static bridge
+// for an architecture, so a node verifies what it mounts into MCP containers.
+func stdioBridgeArtifact(arch string) (string, string, error) {
+	if arch != "amd64" && arch != "arm64" {
+		return "", "", fmt.Errorf("no stdio bridge for %s", arch)
+	}
+	f, err := os.Open(filepath.Join(agentBinariesDir(), "zakura-stdio-bridge_linux_"+arch))
+	if err != nil {
+		return "", "", fmt.Errorf("stdio bridge artifact missing on the server: %w", err)
+	}
+	defer f.Close()
+	sum := sha256.New()
+	if _, err := io.Copy(sum, f); err != nil {
+		return "", "", err
+	}
+	return "/api/runtime-nodes/agent-binaries/linux/" + arch + "?component=stdio-bridge", hex.EncodeToString(sum.Sum(nil)), nil
+}
+
 func (h *handler) runtimeAgentBinary(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	sum := sha256.Sum256([]byte(token))
@@ -143,15 +172,19 @@ func (h *handler) runtimeAgentBinary(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "invalid platform")
 		return
 	}
-	base := os.Getenv("ZAKURA_AGENT_BINARIES_DIR")
-	if base == "" {
-		base = os.Getenv("ZAKURA_AGENT_BINARY_DIR")
+	base := agentBinariesDir()
+	component := "zakura-agent"
+	if r.URL.Query().Get("component") == "stdio-bridge" {
+		// Static bridge a node mounts read-only into OCI MCP containers.
+		if osName != "linux" {
+			httpx.Error(w, http.StatusNotFound, "stdio bridge is only built for linux")
+			return
+		}
+		http.ServeFile(w, r, filepath.Join(base, "zakura-stdio-bridge_linux_"+arch))
+		return
 	}
-	if base == "" {
-		base = "../agent/dist"
-	}
-	name := "zakura-agent_" + osName + "_" + arch
-	legacyName := "zakura-agent"
+	name := component + "_" + osName + "_" + arch
+	legacyName := component
 	if osName == "windows" {
 		name += ".exe"
 		legacyName += ".exe"

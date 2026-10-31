@@ -266,6 +266,11 @@ func validateAgentBinary(path string) error {
 	return nil
 }
 
+// Download fetches url into dest and returns its SHA-256 (hex).
+func Download(ctx context.Context, url string, dest io.Writer) (string, error) {
+	return downloadFile(ctx, url, dest, 2*time.Minute, nil)
+}
+
 func downloadFile(ctx context.Context, url string, dest io.Writer, idleTimeout time.Duration, progress func(UpdateProgress)) (string, error) {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)

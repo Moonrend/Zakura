@@ -88,12 +88,12 @@ func specFromInspectJSON(raw []byte) (RunSpec, error) {
 		Command:    c.Config.Cmd,
 		WorkingDir: c.Config.WorkingDir,
 		Labels:     c.Config.Labels,
-		Privileged: c.HostConfig.Privileged,
-		Restart:    c.HostConfig.RestartPolicy.Name,
-		Env:        map[string]string{},
+		// Upgrades never carry privilege forward; the replacement is hardened.
+		Restart: c.HostConfig.RestartPolicy.Name,
+		Env:     map[string]string{},
 	}
 	net := c.HostConfig.NetworkMode
-	if net != "" && net != "default" && net != "bridge" && net != "host" {
+	if net != "" && net != "default" && net != "bridge" && net != "host" && !strings.HasPrefix(net, "container:") && net != EgressNetworkName {
 		spec.Network = net
 	}
 	for _, e := range c.Config.Env {

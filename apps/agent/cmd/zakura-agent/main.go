@@ -58,6 +58,7 @@ func main() {
 	}
 	log.Printf("zakura-agent %s 启动 kind=%s goos=%s/%s data=%s", sys.Version, *kind, runtime.GOOS, runtime.GOARCH, *data)
 	h := rpc.New(*kind, *data)
+	h.ServerURL = *server
 	run := func(ctx context.Context) {
 		nodeToken := *token
 		var heartbeat func()

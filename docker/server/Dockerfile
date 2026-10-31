@@ -16,7 +16,8 @@ COPY apps/server/ ./
 COPY apps/agent/ ../agent/
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -buildvcs=false -trimpath -ldflags='-s -w' -o /out/zakura-server ./cmd/zakura-server && \
     CGO_ENABLED=1 go build -buildvcs=false -trimpath -ldflags='-s -w' -o /out/zakura-db ./cmd/zakura-db && \
-    CGO_ENABLED=1 go build -buildvcs=false -trimpath -ldflags='-s -w' -o /out/zakura-stdio-bridge ./cmd/zakura-stdio-bridge
+    CGO_ENABLED=1 go build -buildvcs=false -trimpath -ldflags='-s -w' -o /out/zakura-stdio-bridge ./cmd/zakura-stdio-bridge && \
+    for arch in amd64 arm64; do CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -buildvcs=false -trimpath -ldflags='-s -w' -o /out/bridges/zakura-stdio-bridge_linux_$arch ./cmd/zakura-stdio-bridge; done
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl libsqlite3-0 tzdata && rm -rf /var/lib/apt/lists/*
@@ -25,6 +26,8 @@ COPY --from=build /out/zakura-server /usr/local/bin/zakura-server
 COPY --from=build /out/zakura-db /usr/local/bin/zakura-db
 COPY --from=build /out/zakura-stdio-bridge /usr/local/bin/zakura-stdio-bridge
 COPY --from=agent /src/dist /app/apps/agent/dist
+# Static bridges that nodes mount read-only into OCI MCP containers.
+COPY --from=build /out/bridges/ /app/apps/agent/dist/
 USER zakura
 WORKDIR /data
 ENV LISTEN_ADDR=:8787 \

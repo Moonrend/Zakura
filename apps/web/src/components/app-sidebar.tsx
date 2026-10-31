@@ -224,6 +224,11 @@ function buildServerChildren(showPlatformServices: boolean): SubNavItem[] {
       icon: Activity,
     },
     {
+      href: "/dashboard/network/egress",
+      label: "出口策略",
+      icon: Route,
+    },
+    {
       href: "/dashboard/network/security",
       label: "网络安全",
       icon: Shield,

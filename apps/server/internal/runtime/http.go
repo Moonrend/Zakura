@@ -112,6 +112,7 @@ func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) MCPInstanceLifecyc
 		h.registerCore(api)
 		h.registerComputers(api)
 		h.registerWorkspaceDisks(api)
+		h.registerNodeEgress(api)
 		h.registerAutomation(api)
 		h.registerInteractions(api)
 		h.registerZakuraBotApp(api)

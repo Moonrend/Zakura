@@ -72,6 +72,8 @@ type RunSpec struct {
 	Restart    string            `json:"restart"`
 	Privileged bool              `json:"privileged"`
 	StdinOpen  bool              `json:"stdinOpen"`
+
+	entrypoint string // set only by CreateWithEntrypoint, never from RPC input
 }
 
 type Port struct {
@@ -164,7 +166,20 @@ func Create(ctx context.Context, spec RunSpec) (ContainerInfo, error) {
 	return run(ctx, spec, false)
 }
 
+// CreateWithEntrypoint creates a container whose entrypoint is replaced (used to
+// run the stdio bridge as PID 1 of an unmodified MCP image).
+func CreateWithEntrypoint(ctx context.Context, spec RunSpec, entrypoint string) (ContainerInfo, error) {
+	if strings.TrimSpace(spec.Name) == "" || strings.TrimSpace(spec.Image) == "" || !strings.HasPrefix(entrypoint, "/") {
+		return ContainerInfo{}, fmt.Errorf("name, image and an absolute entrypoint are required")
+	}
+	spec.entrypoint = entrypoint
+	return run(ctx, spec, false)
+}
+
 func run(ctx context.Context, spec RunSpec, replace bool) (ContainerInfo, error) {
+	if err := validateHardening(spec); err != nil {
+		return ContainerInfo{}, err
+	}
 	for _, volume := range spec.Volumes {
 		if err := volume.validate(); err != nil {
 			return ContainerInfo{}, err
@@ -197,8 +212,9 @@ func run(ctx context.Context, spec RunSpec, replace bool) (ContainerInfo, error)
 	if spec.Network != "" && spec.Network != "bridge" && spec.Network != "default" {
 		args = append(args, "--network", spec.Network)
 	}
-	if spec.Privileged {
-		args = append(args, "--privileged")
+	args = append(args, hardeningArgs(spec)...)
+	if spec.entrypoint != "" {
+		args = append(args, "--entrypoint", spec.entrypoint)
 	}
 	for k, v := range spec.Env {
 		args = append(args, "-e", k+"="+v)

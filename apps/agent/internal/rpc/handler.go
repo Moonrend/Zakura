@@ -29,8 +29,11 @@ type Handler struct {
 	ptys             map[string]*host.LiveStream
 	workspaceStreams map[string]protocol.Binding
 	streamOwner      string
-	mu               sync.Mutex
-	migrationMu      sync.Mutex
+	// ServerURL is the control plane this node dials; relative downloads
+	// (such as the stdio bridge) resolve against it.
+	ServerURL   string
+	mu          sync.Mutex
+	migrationMu sync.Mutex
 }
 
 func New(kind, storageRoot string) *Handler {
@@ -125,6 +128,12 @@ func (h *Handler) Dispatch(ctx context.Context, msg Msg, send func(Msg)) {
 			info.StreamOwner = h.streamOwner
 			result = info
 		}
+	case "mcp.oci.create":
+		result, err = h.mcpOCICreate(ctx, msg.Params)
+	case "egress.apply":
+		result, err = h.egressApply(ctx, msg.Params)
+	case "egress.status":
+		result = h.egressStatus()
 	case "sys.update":
 		var p sys.UpdateParams
 		if err = json.Unmarshal(msg.Params, &p); err != nil {

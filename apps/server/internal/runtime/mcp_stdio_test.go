@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -190,7 +192,7 @@ func TestImportStdioProvisionsNativeBridgeOnRunner(t *testing.T) {
 			var result any
 			switch frame.Method {
 			case "sys.info":
-				result = map[string]any{"version": "test", "kind": "computer", "storageRoot": "/srv/zakura", "capabilities": map[string]any{"docker": true}, "hostInfo": map[string]any{"primaryIp": bridgeURL.Hostname(), "hostname": "runner.local", "platform": "linux"}}
+				result = map[string]any{"version": "test", "kind": "computer", "storageRoot": "/srv/zakura", "capabilities": map[string]any{"docker": true, "mcpOCIDirect": true}, "hostInfo": map[string]any{"primaryIp": bridgeURL.Hostname(), "hostname": "runner.local", "platform": "linux", "arch": "amd64"}}
 			case "docker.pull":
 				result = map[string]any{"ok": true}
 			case "host.fs.mkdir":
@@ -199,7 +201,8 @@ func TestImportStdioProvisionsNativeBridgeOnRunner(t *testing.T) {
 					return
 				}
 				result = map[string]any{"ok": true, "path": frame.Params["path"], "abs": "/srv/zakura/workspaces/" + space.ID + "/.zakura/components/id-000003"}
-			case "docker.create":
+			case "docker.create", "mcp.oci.create":
+				frame.Params["_method"] = frame.Method
 				runRequest <- frame.Params
 				container = map[string]any{"dockerId": "docker-1", "name": frame.Params["name"], "image": frame.Params["image"], "labels": frame.Params["labels"], "status": "running", "ports": []map[string]any{{"containerPort": 3100, "hostPort": bridgePort, "protocol": "tcp"}}}
 				result = container
@@ -240,23 +243,32 @@ func TestImportStdioProvisionsNativeBridgeOnRunner(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Setenv("ZAKURA_STDIO_BRIDGE_IMAGE", "bridge:test")
-	code, out := doJSON(t, server.Client(), "POST", server.URL+"/api/mcp/import-stdio", token, map[string]any{"name": "Local tools", "command": "docker", "args": []string{"run", "-i", "server"}, "env": map[string]string{"DEMO": "yes"}, "packageManager": "oci", "runtimeNodeId": "node", "agentIds": []string{agent.ID}})
+	artifacts := t.TempDir()
+	if err := os.WriteFile(filepath.Join(artifacts, "zakura-stdio-bridge_linux_amd64"), []byte("bridge"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ZAKURA_AGENT_BINARIES_DIR", artifacts)
+	code, out := doJSON(t, server.Client(), "POST", server.URL+"/api/mcp/import-stdio", token, map[string]any{"name": "Local tools", "command": "docker", "args": []string{"run", "-i", "-e", "DEMO", "server", "--flag"}, "env": map[string]string{"DEMO": "yes", "UNDECLARED": "no"}, "packageManager": "oci", "runtimeNodeId": "node", "agentIds": []string{agent.ID}})
 	if code != 201 || out["started"] != true {
 		t.Fatalf("import stdio: %d %#v", code, out)
 	}
 	select {
 	case params := <-runRequest:
-		command, _ := params["command"].([]any)
-		if len(command) != 1 || command[0] != "/usr/local/bin/zakura-stdio-bridge" || params["image"] != "bridge:test" {
-			t.Fatalf("native bridge launch: %#v", params)
+		// The node starts the MCP image itself: no bridge image, no command
+		// line execution and never a Docker socket.
+		if params["_method"] != "mcp.oci.create" || params["image"] != "server" || fmt.Sprint(params["args"]) != "[--flag]" {
+			t.Fatalf("OCI MCP launch: %#v", params)
 		}
 		env, _ := params["env"].(map[string]any)
-		if env["MCP_COMMAND"] != "docker" || env["MCP_ARGS"] != `["run","-i","server"]` || env["DEMO"] != "yes" || env["DOCKER_HOST"] != "unix:///var/run/docker.sock" {
-			t.Fatalf("bridge environment: %#v", env)
+		if env["DEMO"] != "yes" || env["UNDECLARED"] != nil || env["DOCKER_HOST"] != nil {
+			t.Fatalf("OCI environment must be exactly the declared -e entries: %#v", env)
 		}
-		volumes, _ := params["volumes"].([]any)
-		if len(volumes) != 2 || volumes[0].(map[string]any)["containerPath"] != "/data" || volumes[1].(map[string]any)["hostPath"] != "/var/run/docker.sock" || volumes[1].(map[string]any)["containerPath"] != "/var/run/docker.sock" {
-			t.Fatalf("OCI Docker socket mount: %#v", params["volumes"])
+		bridgeSum := sha256.Sum256([]byte("bridge"))
+		if params["bridgeSha256"] != hex.EncodeToString(bridgeSum[:]) || !strings.HasPrefix(fmt.Sprint(params["bridgeUrl"]), "/api/runtime-nodes/agent-binaries/linux/amd64") {
+			t.Fatalf("bridge artifact not pinned: %#v", params)
+		}
+		if raw, _ := json.Marshal(params); strings.Contains(string(raw), "docker.sock") {
+			t.Fatalf("Docker socket reached the node request: %s", raw)
 		}
 	case err := <-runnerErrors:
 		t.Fatal(err)

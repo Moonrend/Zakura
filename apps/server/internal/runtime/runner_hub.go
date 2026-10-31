@@ -201,6 +201,8 @@ func (h *handler) runnerHubHTTP(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		s.ready.Store(true)
 		go h.hub.publishNodeChanged(nodeID)
+		// A restarted node starts with no policy; re-apply the stored one.
+		go func() { _ = h.pushNodeEgress(h.deps.RunContext(), nodeID) }()
 	}
 	h.hub.mu.Unlock()
 	if err != nil {

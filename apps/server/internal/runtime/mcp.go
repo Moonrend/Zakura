@@ -871,14 +871,23 @@ func (h *handler) provisionStdioMCPWithLease(ctx context.Context, tenant, instan
 			packageManager = "npm"
 		}
 	}
-	if exec.workspace != nil && packageManager == "oci" {
-		return errors.New("OCI stdio MCP is unavailable on managed disks because nested Docker writers are not tracked")
+	var oci ociMCPSpec
+	if packageManager == "oci" {
+		if exec.workspace != nil {
+			return errors.New("OCI stdio MCP is unavailable on managed disks; use an npm, pypi or binary MCP")
+		}
+		if oci, err = parseOCIMCPCommand(body.Command, body.Args); err != nil {
+			return err
+		}
 	}
 	envName := map[string]string{"npm": "ZAKURA_STDIO_NODE_IMAGE", "pypi": "ZAKURA_STDIO_PYTHON_IMAGE", "oci": "ZAKURA_STDIO_OCI_IMAGE", "binary": "ZAKURA_STDIO_BINARY_IMAGE"}[packageManager]
 	if envName == "" {
 		return errors.New("packageManager must be npm, pypi, oci, or binary")
 	}
 	image := strings.TrimSpace(body.Image)
+	if packageManager == "oci" {
+		image = oci.Image
+	}
 	if image == "" {
 		image = strings.TrimSpace(os.Getenv("ZAKURA_STDIO_BRIDGE_IMAGE"))
 	}
@@ -905,8 +914,10 @@ func (h *handler) provisionStdioMCPWithLease(ctx context.Context, tenant, instan
 	capabilities := map[string]any{}
 	_ = json.Unmarshal([]byte(hostInfo), &host)
 	_ = json.Unmarshal([]byte(capabilitiesRaw), &capabilities)
-	if err = runner.call(ctx, "docker.pull", map[string]any{"image": image}, nil); err != nil {
-		return err
+	if packageManager != "oci" {
+		if err = runner.call(ctx, "docker.pull", map[string]any{"image": image}, nil); err != nil {
+			return err
+		}
 	}
 	env := map[string]string{"MCP_COMMAND": body.Command, "MCP_CWD": body.WorkingDir, "MCP_PORT": "3100", "MCP_PATH": "/mcp"}
 	args, _ := json.Marshal(body.Args)
@@ -916,6 +927,19 @@ func (h *handler) provisionStdioMCPWithLease(ctx context.Context, tenant, instan
 			return errors.New("stdio environment cannot override bridge control variables")
 		}
 		env[key] = value
+	}
+	ociEnv := map[string]string{}
+	if packageManager == "oci" {
+		// Only what the docker run line declared reaches the MCP container:
+		// literal -e values, and -e NAME passthroughs filled from the MCP env.
+		for key, value := range oci.Env {
+			ociEnv[key] = value
+		}
+		for _, key := range oci.EnvPass {
+			if value, ok := body.Env[key]; ok {
+				ociEnv[key] = value
+			}
+		}
 	}
 	var dataRoot struct {
 		Abs string `json:"abs"`
@@ -933,11 +957,15 @@ func (h *handler) provisionStdioMCPWithLease(ctx context.Context, tenant, instan
 	if packageManager == "oci" {
 		platform, _ := host["platform"].(string)
 		dockerCap, _ := capabilities["docker"].(bool)
+		direct, _ := capabilities["mcpOCIDirect"].(bool)
 		if platform != "linux" || !dockerCap {
 			return errors.New("OCI stdio MCP requires a Linux runner with Docker capability")
 		}
-		env["DOCKER_HOST"] = "unix:///var/run/docker.sock"
-		volumes = append(volumes, map[string]any{"hostPath": "/var/run/docker.sock", "containerPath": "/var/run/docker.sock"})
+		if !direct {
+			// Older nodes would need the Docker socket mounted into the bridge,
+			// which hands the node to the MCP configuration. Never fall back.
+			return errors.New("OCI stdio MCP requires an upgraded node; older nodes would need Docker socket access")
+		}
 	}
 	var running struct {
 		DockerID, Name, Image, Status string
@@ -950,10 +978,18 @@ func (h *handler) provisionStdioMCPWithLease(ctx context.Context, tenant, instan
 		return err
 	}
 	createParams := map[string]any{"name": "zakura-stdio-" + instanceID, "image": image, "command": []string{"/usr/local/bin/zakura-stdio-bridge"}, "env": env, "labels": map[string]string{"zakura.instance": instanceID, "zakura.purpose": "component", "zakura.space": owner, "zakura.computer": exec.computer.ID, "zakura.tenant": tenant}, "ports": []map[string]any{{"containerPort": 3100, "protocol": "tcp"}}, "volumes": volumes, "workingDir": body.WorkingDir, "restart": "unless-stopped"}
-	if exec.workspace != nil {
+	switch {
+	case packageManager == "oci":
+		arch, _ := host["arch"].(string)
+		bridgeURL, bridgeSHA, bridgeErr := stdioBridgeArtifact(arch)
+		if bridgeErr != nil {
+			return bridgeErr
+		}
+		err = runner.call(ctx, "mcp.oci.create", map[string]any{"name": createParams["name"], "image": image, "args": oci.Args, "env": ociEnv, "labels": createParams["labels"], "dataDir": dataRoot.Abs, "port": 3100, "bridgeUrl": bridgeURL, "bridgeSha256": bridgeSHA}, &running)
+	case exec.workspace != nil:
 		createParams["name"] = "zakura-stdio-" + h.store.id()
 		err = h.createWorkspaceSidecar(ctx, runner, exec, createParams, &running)
-	} else {
+	default:
 		err = runner.call(ctx, "docker.create", createParams, &running)
 	}
 	if err != nil {

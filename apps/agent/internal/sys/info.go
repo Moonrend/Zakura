@@ -80,6 +80,12 @@ func Collect(kind, storageRoot string) InfoResult {
 			// (rpc.rejectUnpinnedDiskAccess), so pinned writers are the only
 			// path into a disk and revocation is authoritative.
 			"workspaceProtocolV2": true,
+			// Containers are always unprivileged; egress.apply confines them to
+			// an internal network behind the node's filtering proxy.
+			"containerHardening": true,
+			// OCI MCP images run under a read-only bridge, never with Docker access.
+			"mcpOCIDirect": true,
+			"egressPolicy": runtime.GOOS == "linux",
 		},
 		HostInfo:    hi,
 		StorageRoot: storageRoot,
