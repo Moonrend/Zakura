@@ -25,7 +25,8 @@ type ServerState = {
   workspaceCleanups?: WorkspaceCleanup[];
   space: { runtimeNodeId: string | null; workspaceKind: string; enableComputer: boolean; lastError: string | null; workspaceGeneration?: number };
   /** 实时状态：由服务端在请求时询问节点得到，不读取数据库缓存 */
-  workspace: { state: "none" | "running" | "stopped" | "offline" | "unknown"; operation: string | null; error: string | null };
+  // 旧版服务端没有该字段，前端须能容忍缺失
+  workspace?: { state: "none" | "running" | "stopped" | "offline" | "unknown"; operation: string | null; error: string | null };
 };
 type Migration = { id: string; status: string; phase?: string | null; message?: string | null; error?: string | null; progressPct?: number };
 const statusText: Record<string, string> = { none: "尚未创建", running: "运行中", stopped: "已停止", offline: "节点离线", unknown: "无法确认状态" };
@@ -107,8 +108,8 @@ export function ServerComputerControls({ spaceId, onChanged }: { spaceId: string
   }, [base, spaceId]);
 
   const initialized = Boolean(state?.space.runtimeNodeId);
-  const running = state?.workspace.state === "running";
-  const operation = state?.workspace.operation ?? null;
+  const running = state?.workspace?.state === "running";
+  const operation = state?.workspace?.operation ?? null;
   const pending = Boolean(operation) || activeMigration(migration);
   const online = nodes.filter(node => !diskNodeUnavailableReason(node));
   const targets = nodes.filter(node => !workspaceNodeUnavailableReason(node) && node.id !== state?.space.runtimeNodeId);
@@ -166,7 +167,7 @@ export function ServerComputerControls({ spaceId, onChanged }: { spaceId: string
     {state ? <>
       <div className="space-y-3 rounded-xl bg-card p-4 shadow-surface-2">
         {initialized ? <>
-          <div className="flex flex-wrap items-center justify-between gap-3"><div className="min-w-0"><p className="text-sm">{operation ? operationText[operation] ?? "正在处理" : activeMigration(migration) ? "正在迁移" : statusText[state.workspace.state] ?? "无法确认状态"}</p><p className="mt-1 break-words text-xs text-muted-foreground">{nodes.find(node => node.id === state.space.runtimeNodeId)?.name ?? "当前节点不可用"}</p></div>
+          <div className="flex flex-wrap items-center justify-between gap-3"><div className="min-w-0"><p className="text-sm">{operation ? operationText[operation] ?? "正在处理" : activeMigration(migration) ? "正在迁移" : (state.workspace ? statusText[state.workspace.state] : undefined) ?? "无法确认状态"}</p><p className="mt-1 break-words text-xs text-muted-foreground">{nodes.find(node => node.id === state.space.runtimeNodeId)?.name ?? "当前节点不可用"}</p></div>
             <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={busy} onClick={() => void load().catch(err => setError(String(err)))}>刷新</Button><Button size="sm" variant="outline" disabled={busy || pending || loading} onClick={() => void action(running ? "stop" : "start")}>{busy ? "处理中…" : running ? "停止" : state.space.lastError ? "重试" : "启动"}</Button>{!state.workspaceInstance ? <Button size="sm" variant="ghost" disabled={busy || pending || loading} onClick={() => setMigrating(value => !value)}>迁移节点</Button> : <Button size="sm" variant="ghost" disabled={busy || loading || activeMigration(migration)} onClick={() => { setDeleteDisk(false); setError(""); setDeletion({ instanceId: state.workspaceInstance!.instanceId, requestId: crypto.randomUUID() }); }}>删除工作区</Button>}</div>
           </div>
           {migrating ? <div className="space-y-2"><Label htmlFor="workspace-migration">目标节点</Label><select id="workspace-migration" value={target} onChange={event => setTarget(event.target.value)} className="h-9 w-full rounded-md border bg-background px-2 text-sm"><option value="">选择目标节点</option>{targets.map(node => <option key={node.id} value={node.id}>{node.name}</option>)}</select><Button size="sm" disabled={busy || !target} onClick={() => void migrate()}>迁移</Button></div> : null}
@@ -178,7 +179,7 @@ export function ServerComputerControls({ spaceId, onChanged }: { spaceId: string
         {nodeIssue ? <p role="status" className="break-words text-xs text-muted-foreground">{nodeIssue}</p> : null}
         {!initialized && !online.length && unavailable.length ? <ul className="space-y-1 text-xs text-muted-foreground">{unavailable.map(node => <li key={node.id} className="break-words">{node.name}：{diskNodeUnavailableReason(node)}</li>)}</ul> : null}
         {migration ? <p role="status" className="break-words text-xs text-muted-foreground">{phaseText[migration.phase ?? ""] ?? (activeMigration(migration) ? "迁移中" : migration.status === "failed" ? "迁移失败" : "迁移已结束")}{migration.message ? ` · ${migration.message}` : ""}{migration.error ? ` · ${migration.error}` : ""}</p> : null}
-        {error || state.workspace.error || state.space.lastError ? <p role="alert" className="break-words text-xs text-destructive">{error || state.workspace.error || state.space.lastError}</p> : null}
+        {error || state.workspace?.error || state.space.lastError ? <p role="alert" className="break-words text-xs text-destructive">{error || state.workspace?.error || state.space.lastError}</p> : null}
       </div>
       {state.workspaceDisk ? <p className="text-xs text-muted-foreground">数据盘：{state.workspaceDisk.name}，{diskStateText[state.workspaceDisk.state] ?? "状态待确认"}</p> : null}
       {state.workspaceCleanups?.map(job => <div key={job.id} role="status" className="space-y-1 text-sm"><p>旧工作区等待清理{job.deleteDisk ? "，随后删除数据盘" : "，保留数据盘"}。</p><p className="text-xs text-muted-foreground">节点离线时，远端容器可能仍在运行。新工作区可以使用另一块盘。{job.lastError ? ` ${job.lastError}` : ""}</p></div>)}
