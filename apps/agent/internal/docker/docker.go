@@ -99,6 +99,9 @@ type ContainerInfo struct {
 	Status   string            `json:"status"`
 	Ports    []Port            `json:"ports"`
 	Labels   map[string]string `json:"labels"`
+	// IPs maps network name to the container address on it; the node uses it
+	// to reach unpublished services (MCP bridges) without exposing ports.
+	IPs map[string]string `json:"ips,omitempty"`
 }
 
 func (v Volume) validate() error {
@@ -326,6 +329,9 @@ func Inspect(ctx context.Context, idOrName string) (ContainerInfo, error) {
 				HostIP   string `json:"HostIp"`
 				HostPort string `json:"HostPort"`
 			} `json:"Ports"`
+			Networks map[string]struct {
+				IPAddress string `json:"IPAddress"`
+			} `json:"Networks"`
 		} `json:"NetworkSettings"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil || len(raw) == 0 {
@@ -349,6 +355,14 @@ func Inspect(ctx context.Context, idOrName string) (ContainerInfo, error) {
 			p.HostIP = binds[0].HostIP
 		}
 		info.Ports = append(info.Ports, p)
+	}
+	for name, network := range c.NetworkSettings.Networks {
+		if network.IPAddress != "" {
+			if info.IPs == nil {
+				info.IPs = map[string]string{}
+			}
+			info.IPs[name] = network.IPAddress
+		}
 	}
 	return info, nil
 }

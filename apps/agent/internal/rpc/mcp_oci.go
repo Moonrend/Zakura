@@ -89,6 +89,10 @@ func (h *Handler) mcpOCICreate(ctx context.Context, raw json.RawMessage) (any, e
 		Labels  map[string]string `json:"labels"`
 		DataDir string            `json:"dataDir"`
 		Port    int               `json:"port"`
+		// Publish exposes the port on the host for control planes that predate
+		// the mcp.http relay. Relay-capable control planes leave it false, so
+		// the container joins the internal egress network.
+		Publish bool `json:"publish"`
 		// Bridge download path on the control plane, verified by digest.
 		BridgeURL    string `json:"bridgeUrl"`
 		BridgeSHA256 string `json:"bridgeSha256"`
@@ -142,9 +146,12 @@ func (h *Handler) mcpOCICreate(ctx context.Context, raw json.RawMessage) (any, e
 		}
 		volumes = append(volumes, docker.Volume{HostPath: data, ContainerPath: "/data"})
 	}
+	var ports []docker.Port
+	if request.Publish {
+		ports = []docker.Port{{ContainerPort: request.Port, Protocol: "tcp"}}
+	}
 	return docker.CreateWithEntrypoint(ctx, docker.RunSpec{
 		Name: request.Name, Image: request.Image, Env: env, Labels: request.Labels,
-		Ports: []docker.Port{{ContainerPort: request.Port, Protocol: "tcp"}}, Volumes: volumes,
-		Restart: "unless-stopped", StdinOpen: false,
+		Ports: ports, Volumes: volumes, Restart: "unless-stopped",
 	}, mcpBridgePath)
 }

@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -95,6 +96,13 @@ func TestMCPRPCNegotiatesStreamableHTTPSession(t *testing.T) {
 }
 
 func TestImportStdioProvisionsNativeBridgeOnRunner(t *testing.T) {
+	t.Run("relay", func(t *testing.T) { testImportStdioBridge(t, true) })
+	t.Run("published-port", func(t *testing.T) { testImportStdioBridge(t, false) })
+}
+
+// relay=true is a current node: the bridge publishes no port and the server
+// reaches it only through mcp.http over the node connection.
+func testImportStdioBridge(t *testing.T, relay bool) {
 	var bridgeInit, bridgeList, bridgeDelete atomic.Int64
 	bridgeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/health" {
@@ -192,7 +200,7 @@ func TestImportStdioProvisionsNativeBridgeOnRunner(t *testing.T) {
 			var result any
 			switch frame.Method {
 			case "sys.info":
-				result = map[string]any{"version": "test", "kind": "computer", "storageRoot": "/srv/zakura", "capabilities": map[string]any{"docker": true, "mcpOCIDirect": true}, "hostInfo": map[string]any{"primaryIp": bridgeURL.Hostname(), "hostname": "runner.local", "platform": "linux", "arch": "amd64"}}
+				result = map[string]any{"version": "test", "kind": "computer", "storageRoot": "/srv/zakura", "capabilities": map[string]any{"docker": true, "mcpOCIDirect": true, "mcpRelay": relay}, "hostInfo": map[string]any{"primaryIp": bridgeURL.Hostname(), "hostname": "runner.local", "platform": "linux", "arch": "amd64"}}
 			case "docker.pull":
 				result = map[string]any{"ok": true}
 			case "host.fs.mkdir":
@@ -201,8 +209,37 @@ func TestImportStdioProvisionsNativeBridgeOnRunner(t *testing.T) {
 					return
 				}
 				result = map[string]any{"ok": true, "path": frame.Params["path"], "abs": "/srv/zakura/workspaces/" + space.ID + "/.zakura/components/id-000003"}
+			case "mcp.http":
+				if !relay {
+					runnerErrors <- fmt.Errorf("legacy node received a relay request")
+					return
+				}
+				if container == nil || frame.Params["container"] != container["dockerId"] || frame.Params["port"] != float64(3100) {
+					runnerErrors <- fmt.Errorf("relay target: %#v", frame.Params)
+					return
+				}
+				body, _ := base64.StdEncoding.DecodeString(fmt.Sprint(frame.Params["body"]))
+				method, _ := frame.Params["method"].(string)
+				req, _ := http.NewRequest(method, bridgeServer.URL+fmt.Sprint(frame.Params["path"]), strings.NewReader(string(body)))
+				if headers, ok := frame.Params["headers"].(map[string]any); ok {
+					for key, value := range headers {
+						req.Header.Set(key, fmt.Sprint(value))
+					}
+				}
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					runnerErrors <- err
+					return
+				}
+				payload, _ := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				result = map[string]any{"status": resp.StatusCode, "headers": map[string]string{"Content-Type": resp.Header.Get("Content-Type"), "Mcp-Session-Id": resp.Header.Get("Mcp-Session-Id")}, "body": base64.StdEncoding.EncodeToString(payload)}
 			case "docker.create", "mcp.oci.create":
 				frame.Params["_method"] = frame.Method
+				if relay && (frame.Params["ports"] != nil || frame.Params["publish"] == true) {
+					runnerErrors <- fmt.Errorf("relay node asked to publish a port: %#v", frame.Params)
+					return
+				}
 				runRequest <- frame.Params
 				container = map[string]any{"dockerId": "docker-1", "name": frame.Params["name"], "image": frame.Params["image"], "labels": frame.Params["labels"], "status": "running", "ports": []map[string]any{{"containerPort": 3100, "hostPort": bridgePort, "protocol": "tcp"}}}
 				result = container
@@ -277,6 +314,9 @@ func TestImportStdioProvisionsNativeBridgeOnRunner(t *testing.T) {
 	}
 	var config, status string
 	expectedEndpoint := `"url":"` + bridgeServer.URL + `/mcp"`
+	if relay {
+		expectedEndpoint = `"url":"zakura-relay://node/docker-1:3100/mcp"`
+	}
 	if err = d.DB.QueryRow(`SELECT config_json,status FROM component_instances WHERE tenant_id='tenant'`).Scan(&config, &status); err != nil || status != "running" || !strings.Contains(config, expectedEndpoint) || !strings.Contains(config, `"runtimeNodeId":"node"`) || !strings.Contains(config, `"packageManager":"oci"`) {
 		t.Fatalf("persisted component config/status: err=%v status=%q config=%s", err, status, config)
 	}

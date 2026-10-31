@@ -128,6 +128,8 @@ func (h *Handler) Dispatch(ctx context.Context, msg Msg, send func(Msg)) {
 			info.StreamOwner = h.streamOwner
 			result = info
 		}
+	case "mcp.http":
+		result, err = h.mcpHTTP(ctx, msg.Params)
 	case "mcp.oci.create":
 		result, err = h.mcpOCICreate(ctx, msg.Params)
 	case "egress.apply":

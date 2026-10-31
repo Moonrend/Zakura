@@ -80,8 +80,13 @@ func TestMain(m *testing.M) {
 		}
 		var container docker.ContainerInfo
 		_ = json.Unmarshal(raw, &container)
+		networks := map[string]any{}
+		for name, ip := range container.IPs {
+			networks[name] = map[string]any{"IPAddress": ip}
+		}
 		raw, _ = json.Marshal([]any{map[string]any{"Id": container.DockerID, "Name": "/" + container.Name,
-			"State": map[string]any{"Status": container.Status}, "Config": map[string]any{"Image": container.Image, "Labels": container.Labels}}})
+			"State": map[string]any{"Status": container.Status}, "Config": map[string]any{"Image": container.Image, "Labels": container.Labels},
+			"NetworkSettings": map[string]any{"Networks": networks}}})
 		fmt.Println(string(raw))
 	default:
 		os.Exit(94)

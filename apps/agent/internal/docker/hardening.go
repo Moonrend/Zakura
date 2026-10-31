@@ -92,9 +92,9 @@ func hardeningArgs(spec RunSpec) []string {
 		args = append(args, "--shm-size", "1g")
 	}
 	if egress := egressNetwork(); egress != "" && (spec.Network == "" || spec.Network == "bridge" || spec.Network == "default") {
-		// Docker cannot publish ports from an internal network, so services the
-		// server reaches by port (stdio MCP bridges) stay on the bridge and only
-		// get the proxy settings. Everything else has no route except the proxy.
+		// Docker cannot publish ports from an internal network. MCP bridges no
+		// longer publish (the node relays to them), so only legacy callers that
+		// still request a port stay on the bridge with proxy settings.
 		if len(spec.Ports) == 0 {
 			args = append(args, "--network", egress)
 		}

@@ -85,6 +85,9 @@ func Collect(kind, storageRoot string) InfoResult {
 			"containerHardening": true,
 			// OCI MCP images run under a read-only bridge, never with Docker access.
 			"mcpOCIDirect": true,
+			// MCP bridges are reached through the node (mcp.http); they publish
+			// no host port and can sit on the internal egress network.
+			"mcpRelay":     true,
 			"egressPolicy": runtime.GOOS == "linux",
 		},
 		HostInfo:    hi,

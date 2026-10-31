@@ -228,11 +228,23 @@ func (h *handler) mcpRPC(ctx context.Context, inst mcpInstance, method string, p
 		}
 	}
 	u, e := url.Parse(cfg.URL)
-	if e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+	relayed := isMCPRelayEndpoint(cfg.URL)
+	if e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https" && !relayed) {
 		return nil, errors.New("invalid MCP URL")
 	}
 	var safe *url.URL
-	if cfg.RuntimeNodeID == "" {
+	if relayed {
+		// A relay endpoint is pinned to its node; it is only valid for the
+		// tenant-owned node recorded on the instance.
+		if cfg.RuntimeNodeID == "" || u.Host != cfg.RuntimeNodeID || inst.TenantID == "" {
+			return nil, errors.New("MCP relay endpoint does not match its runtime node")
+		}
+		var owned int64
+		if e = h.deps.Gorm.WithContext(ctx).Table("runtime_nodes").Where("id=? AND (tenant_id=? OR is_shared=TRUE)", cfg.RuntimeNodeID, inst.TenantID).Count(&owned).Error; e != nil || owned != 1 {
+			return nil, errors.New("MCP runtime node is unavailable")
+		}
+		safe = u
+	} else if cfg.RuntimeNodeID == "" {
 		safe, e = safeProviderURL(cfg.URL, "")
 		if e != nil {
 			return nil, e
@@ -260,6 +272,7 @@ func (h *handler) mcpRPC(ctx context.Context, inst mcpInstance, method string, p
 		}
 		safe = u
 	}
+	client := h.mcpHTTPClient(cfg.URL)
 	type callResult struct {
 		result json.RawMessage
 		sid    string
@@ -306,7 +319,7 @@ func (h *handler) mcpRPC(ctx context.Context, inst mcpInstance, method string, p
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
-		resp, err := h.service.gateway.client.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			return callResult{}, err
 		}
@@ -385,7 +398,7 @@ func (h *handler) mcpRPC(ctx context.Context, inst mcpInstance, method string, p
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
-		if resp, err := h.service.gateway.client.Do(req); err == nil {
+		if resp, err := client.Do(req); err == nil {
 			_ = resp.Body.Close()
 		}
 	}()
@@ -977,7 +990,11 @@ func (h *handler) provisionStdioMCPWithLease(ctx context.Context, tenant, instan
 	if err = lease.check(ctx); err != nil {
 		return err
 	}
+	relay, _ := capabilities["mcpRelay"].(bool)
 	createParams := map[string]any{"name": "zakura-stdio-" + instanceID, "image": image, "command": []string{"/usr/local/bin/zakura-stdio-bridge"}, "env": env, "labels": map[string]string{"zakura.instance": instanceID, "zakura.purpose": "component", "zakura.space": owner, "zakura.computer": exec.computer.ID, "zakura.tenant": tenant}, "ports": []map[string]any{{"containerPort": 3100, "protocol": "tcp"}}, "volumes": volumes, "workingDir": body.WorkingDir, "restart": "unless-stopped"}
+	if relay {
+		delete(createParams, "ports")
+	}
 	switch {
 	case packageManager == "oci":
 		arch, _ := host["arch"].(string)
@@ -985,7 +1002,7 @@ func (h *handler) provisionStdioMCPWithLease(ctx context.Context, tenant, instan
 		if bridgeErr != nil {
 			return bridgeErr
 		}
-		err = runner.call(ctx, "mcp.oci.create", map[string]any{"name": createParams["name"], "image": image, "args": oci.Args, "env": ociEnv, "labels": createParams["labels"], "dataDir": dataRoot.Abs, "port": 3100, "bridgeUrl": bridgeURL, "bridgeSha256": bridgeSHA}, &running)
+		err = runner.call(ctx, "mcp.oci.create", map[string]any{"name": createParams["name"], "image": image, "args": oci.Args, "env": ociEnv, "labels": createParams["labels"], "dataDir": dataRoot.Abs, "port": 3100, "publish": !relay, "bridgeUrl": bridgeURL, "bridgeSha256": bridgeSHA}, &running)
 	case exec.workspace != nil:
 		createParams["name"] = "zakura-stdio-" + h.store.id()
 		err = h.createWorkspaceSidecar(ctx, runner, exec, createParams, &running)
@@ -1032,23 +1049,28 @@ func (h *handler) provisionStdioMCPWithLease(ctx context.Context, tenant, instan
 		_ = remote.call(ctx, "docker.logs", map[string]any{"id": running.DockerID, "tail": 50}, &logs)
 		return cleanup(fmt.Errorf("stdio bridge container did not stay running (image must contain /usr/local/bin/zakura-stdio-bridge and the requested runtime): %s", strings.TrimSpace(logs.Logs)))
 	}
-	port := 0
-	for _, candidate := range running.Ports {
-		if candidate.ContainerPort == 3100 {
-			port = candidate.HostPort
+	var endpoint string
+	if relay {
+		endpoint = mcpRelayEndpoint(nodeID, running.DockerID, 3100)
+	} else {
+		port := 0
+		for _, candidate := range running.Ports {
+			if candidate.ContainerPort == 3100 {
+				port = candidate.HostPort
+			}
 		}
+		if port == 0 {
+			return cleanup(errors.New("runner did not publish stdio bridge port"))
+		}
+		hostname, _ := host["primaryIp"].(string)
+		if hostname == "" {
+			hostname, _ = host["hostname"].(string)
+		}
+		if hostname == "" {
+			return cleanup(errors.New("runtime node did not report an address"))
+		}
+		endpoint = fmt.Sprintf("http://%s:%d/mcp", hostname, port)
 	}
-	if port == 0 {
-		return cleanup(errors.New("runner did not publish stdio bridge port"))
-	}
-	hostname, _ := host["primaryIp"].(string)
-	if hostname == "" {
-		hostname, _ = host["hostname"].(string)
-	}
-	if hostname == "" {
-		return cleanup(errors.New("runtime node did not report an address"))
-	}
-	endpoint := fmt.Sprintf("http://%s:%d/mcp", hostname, port)
 	if err = h.probeStdioBridge(ctx, endpoint); err != nil {
 		return cleanup(fmt.Errorf("stdio bridge readiness failed: %w", err))
 	}
@@ -1083,6 +1105,7 @@ func (h *handler) provisionStdioMCPWithLease(ctx context.Context, tenant, instan
 
 func (h *handler) probeStdioBridge(ctx context.Context, endpoint string) error {
 	base := strings.TrimSuffix(endpoint, "/mcp")
+	client := h.mcpHTTPClient(endpoint)
 	var last error
 	for attempt := 0; attempt < 20; attempt++ {
 		if attempt > 0 {
@@ -1094,7 +1117,7 @@ func (h *handler) probeStdioBridge(ctx context.Context, endpoint string) error {
 		}
 		callCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		req, _ := http.NewRequestWithContext(callCtx, http.MethodGet, base+"/health", nil)
-		resp, err := h.service.gateway.client.Do(req)
+		resp, err := client.Do(req)
 		if err == nil {
 			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 			_ = resp.Body.Close()
@@ -1124,7 +1147,7 @@ func (h *handler) probeStdioBridge(ctx context.Context, endpoint string) error {
 		if sid != "" {
 			req.Header.Set("Mcp-Session-Id", sid)
 		}
-		resp, err := h.service.gateway.client.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1160,7 +1183,7 @@ func (h *handler) probeStdioBridge(ctx context.Context, endpoint string) error {
 			defer cancel()
 			req, _ := http.NewRequestWithContext(cleanupCtx, http.MethodDelete, endpoint, nil)
 			req.Header.Set("Mcp-Session-Id", sid)
-			if resp, err := h.service.gateway.client.Do(req); err == nil {
+			if resp, err := client.Do(req); err == nil {
 				_ = resp.Body.Close()
 			}
 		}()
