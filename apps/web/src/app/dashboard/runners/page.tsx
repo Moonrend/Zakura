@@ -2,98 +2,65 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { toast } from "sonner";
+import { Cpu, MoreHorizontal, Plus } from "lucide-react";
 import {
-  Cpu,
-  Globe,
-  Loader2,
-  Network,
-  Plus,
-  RefreshCw,
-  Server,
-  Trash2,
-} from "lucide-react";
-import {
-  createRuntimeNode,
+  deleteNodeDescription,
   deleteRuntimeNode,
   formatBytes,
   isRunnerHostInfo,
-  kindLabel,
   listRuntimeNodes,
   statusLabel,
-  statusVariant,
-  type RunnerInstallPackage,
   type RuntimeNode,
 } from "@/lib/runners";
-import {
-  TailscaleMeshPanel,
-  type TailscaleMeshReady,
-} from "@/components/tailscale-mesh-panel";
+import { formatAbsolute, formatRelative } from "@/lib/format";
 import { subscribePlatformEvents } from "@/lib/platform-events";
-import { RunnerInstallPanel } from "@/components/runner-install-panel";
-import { SettingsHeader, TableActions } from "@/components/settings-shell";
+import { useImageUpdateStatus } from "@/components/image-update-status";
+import { AddDeviceDialog } from "@/components/add-device-dialog";
+import { NodeStatusDot } from "@/components/node-status-dot";
+import { SettingsHeader } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
-import { useConfirmDialog } from "@/components/ui/confirm-dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { PageLoading } from "@/components/ui/progress-linear";
 import { SearchField } from "@/components/ui/search-field";
 import { useFuzzySearch } from "@/hooks/use-fuzzy-search";
-import { cn } from "@/lib/utils";
-
-type AccessMode = "public" | "tailscale" | null;
 
 export default function RunnersPage() {
+  const router = useRouter();
   const { confirm } = useConfirmDialog();
+  const updates = useImageUpdateStatus();
   const [rows, setRows] = useState<RuntimeNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
+  const [adding, setAdding] = useState(false);
   const filtered = useFuzzySearch(rows, q, {
     keys: [
       { name: "name", weight: 3 },
-      { name: "kind", weight: 1 },
       { name: "hostInfo.hostname", weight: 2 },
       { name: "hostInfo.primaryIp", weight: 2 },
-      { name: "endpoint", weight: 1 },
     ],
   });
-  const [refreshing, setRefreshing] = useState(false);
-  const [open, setOpen] = useState(false);
-  const [name, setName] = useState("");
-  const [createKind, setCreateKind] = useState<"computer" | "server">("computer");
-  const [accessMode, setAccessMode] = useState<AccessMode>("public");
-  const [meshReady, setMeshReady] = useState(false);
-  const [platformMode, setPlatformMode] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [created, setCreated] = useState<{
-    node: RuntimeNode;
-    token: string;
-    install: RunnerInstallPackage | null;
-  } | null>(null);
 
-  const load = useCallback(async (silent = false) => {
+  const load = useCallback(async () => {
     try {
-      if (silent) setRefreshing(true);
-      else setLoading(true);
       setRows(await listRuntimeNodes());
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
-      setRefreshing(false);
     }
   }, []);
 
-  // Runner 心跳经平台事件推送；回到前台时刷新一次，不再定时轮询
+  // 心跳经平台事件推送；回到前台时刷新一次，不定时轮询，也不需要手动刷新按钮
   useEffect(() => {
     void load();
     let last = 0;
@@ -101,7 +68,7 @@ export default function RunnersPage() {
       const now = Date.now();
       if (now - last < 4000) return;
       last = now;
-      void load(true);
+      void load();
     };
     const unsubscribe = subscribePlatformEvents((ev) => {
       if (ev.type === "runner_node") throttledReload();
@@ -116,376 +83,152 @@ export default function RunnersPage() {
     };
   }, [load]);
 
-  function resetDialog() {
-    setCreated(null);
-    setName("");
-    setAccessMode(null);
-    setMeshReady(false);
-    setPlatformMode(false);
-  }
-
-  function onMeshStatus(status: TailscaleMeshReady) {
-    setMeshReady(status.ready);
-    setPlatformMode(status.platformMode);
-    if (status.platformMode) {
-      setAccessMode("tailscale");
+  async function remove(node: RuntimeNode) {
+    if (!(await confirm({ title: `删除「${node.name}」？`, description: deleteNodeDescription, confirmLabel: "删除" }))) return;
+    try {
+      await deleteRuntimeNode(node.id);
+      toast.success("已删除");
+      await load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
     }
   }
 
-  const onlineCount = rows.filter((r) => r.status === "online").length;
-  const canSubmit =
-    Boolean(name.trim()) &&
-    accessMode != null &&
-    (accessMode === "public" ? !platformMode : meshReady);
+  const pendingUpdates = updates.nodesWithUpdates || updates.nodesNeedingRecreate;
 
   return (
     <div className="space-y-5">
       <SettingsHeader
-        title="电脑与服务器"
+        title="设备"
+        description="安装 zakura-agent 的电脑或服务器，为空间提供工作区和数据盘。"
         actions={
-          <>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={refreshing}
-              onClick={() => void load(true)}
-            >
-              <RefreshCw className={refreshing ? "animate-spin" : undefined} />
-              刷新
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                resetDialog();
-                setCreateKind("computer");
-                setOpen(true);
-              }}
-            >
-              <Plus />
-              添加电脑
-            </Button>
-            <Button
-              size="sm"
-              onClick={() => {
-                resetDialog();
-                setCreateKind("server");
-                setOpen(true);
-              }}
-            >
-              <Plus />
-              添加服务器
-            </Button>
-          </>
+          <Button size="sm" onClick={() => setAdding(true)}>
+            <Plus />
+            添加设备
+          </Button>
         }
       />
 
-      <div className="grid gap-3 sm:grid-cols-3">
-        <div className="surface-interactive rounded-lg bg-card shadow-surface-2 p-4">
-          <div className="text-xs text-muted-foreground">节点总数</div>
-          <div className="mt-1 text-2xl font-semibold tabular-nums tracking-tight">{rows.length}</div>
+      {pendingUpdates ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-card px-4 py-3 shadow-surface-2">
+          <p className="text-sm">
+            {updates.nodesWithUpdates
+              ? `${updates.nodesWithUpdates} 台设备有可用更新`
+              : `${updates.nodesNeedingRecreate} 台设备需重建容器以使用新版本`}
+          </p>
+          <Button size="sm" variant="outline" nativeButton={false} render={<Link href="/dashboard/runners/upgrades" />}>
+            查看更新
+          </Button>
         </div>
-        <div className="surface-interactive rounded-lg bg-card shadow-surface-2 p-4">
-          <div className="text-xs text-muted-foreground">在线</div>
-          <div className="mt-1 text-2xl font-semibold tabular-nums tracking-tight text-success">
-            {onlineCount}
-          </div>
-        </div>
-        <div className="surface-interactive rounded-lg bg-card shadow-surface-2 p-4">
-          <div className="text-xs text-muted-foreground">电脑 / 服务器</div>
-          <div className="mt-1 text-2xl font-semibold tabular-nums tracking-tight">
-            {rows.filter((r) => r.kind === "computer").length}
-            {" / "}
-            {rows.filter((r) => r.kind === "server").length}
-          </div>
-        </div>
-      </div>
+      ) : null}
 
       {loading ? (
         <PageLoading />
+      ) : !rows.length ? (
+        <div className="flex flex-col items-center gap-3 rounded-lg bg-card px-6 py-12 text-center shadow-surface-2">
+          <Cpu className="size-8 text-muted-foreground/60" />
+          <div className="space-y-1">
+            <p className="text-sm font-medium">还没有设备</p>
+            <p className="text-sm text-muted-foreground">在任意 Linux、macOS 或 Windows 机器上运行一条安装命令即可接入。</p>
+          </div>
+          <Button size="sm" onClick={() => setAdding(true)}>
+            <Plus />
+            添加设备
+          </Button>
+        </div>
       ) : (
         <>
           {rows.length > 5 ? (
-            <SearchField
-              value={q}
-              onValueChange={setQ}
-              placeholder="搜索 Runner（名称、主机、IP）"
-              className="max-w-sm"
-            />
+            <SearchField value={q} onValueChange={setQ} placeholder="搜索名称、主机名或 IP" className="max-w-sm" />
           ) : null}
           <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>名称</TableHead>
-              <TableHead>类型</TableHead>
-              <TableHead>状态</TableHead>
-              <TableHead>主机 / IP</TableHead>
-              <TableHead>Endpoint</TableHead>
-              <TableHead>最近心跳</TableHead>
-              <TableHead className="w-[1%]" />
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {filtered.map((r) => {
-              const host = isRunnerHostInfo(r.hostInfo) ? r.hostInfo : {};
-              const hostLine =
-                host.hostname || host.primaryIp
-                  ? [host.hostname, host.primaryIp].filter(Boolean).join(" · ")
-                  : "—";
-              const disk =
-                host.disk?.freeBytes != null
-                  ? `可用 ${formatBytes(host.disk.freeBytes)}`
-                  : null;
-              return (
-                <TableRow key={r.id}>
-                  <TableCell>
-                    <Link
-                      href={`/dashboard/runners/${r.id}`}
-                      className="font-medium hover:underline"
-                    >
-                      {r.name}
-                    </Link>
-                    <div className="text-[11px] text-muted-foreground font-mono">
-                      {r.id}
-                    </div>
-                    {r.access === "shared" || r.isShared ? (
-                      <Badge variant="secondary" className="mt-1">
-                        共享
-                      </Badge>
-                    ) : null}
-                    {r.needsReinstall ? (
-                      <Badge variant="destructive" className="mt-1">
-                        需重装
-                      </Badge>
-                    ) : null}
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant="outline">{kindLabel(r.kind)}</Badge>
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant={statusVariant(r.status)}>
-                      {statusLabel(r.status)}
-                    </Badge>
-                  </TableCell>
-                  <TableCell>
-                    <div className="text-xs">{hostLine}</div>
-                    {disk ? (
-                      <div className="text-[11px] text-muted-foreground">{disk}</div>
-                    ) : null}
-                  </TableCell>
-                  <TableCell className="max-w-[160px] truncate text-xs font-mono text-muted-foreground">
-                    {r.endpoint || "—"}
-                  </TableCell>
-                  <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
-                    {r.lastSeenAt
-                      ? new Date(r.lastSeenAt).toLocaleString()
-                      : "—"}
-                  </TableCell>
-                  <TableCell>
-                    <TableActions>
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        title="详情"
-                        nativeButton={false}
-                        render={<Link href={`/dashboard/runners/${r.id}`} />}
-                      >
-                        <Server />
-                      </Button>
-                      {r.kind !== "local" && r.access !== "shared" ? (
-                        <Button
-                          size="icon"
-                          variant="ghost"
-                          title="删除"
-                          onClick={async () => {
-                            if (!(await confirm({ title: `删除 Runner「${r.name}」？`, description: "撤销节点连接并停止同步待清理任务。远端文件和容器不会被自动删除，保留盘不可再用于重建。请先删除或迁移当前工作区。", confirmLabel: "删除" }))) {
-                              return;
-                            }
-                            try {
-                              await deleteRuntimeNode(r.id);
-                              toast.success("已删除");
-                              await load(true);
-                            } catch (err) {
-                              toast.error(
-                                err instanceof Error ? err.message : String(err),
-                              );
-                            }
-                          }}
+            <TableHeader>
+              <TableRow>
+                <TableHead>名称</TableHead>
+                <TableHead>状态</TableHead>
+                <TableHead className="hidden md:table-cell">系统</TableHead>
+                <TableHead className="hidden md:table-cell">可用磁盘</TableHead>
+                <TableHead className="hidden sm:table-cell">最近在线</TableHead>
+                <TableHead className="w-[1%]" />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {filtered.map((r) => {
+                const host = isRunnerHostInfo(r.hostInfo) ? r.hostInfo : {};
+                const hostLine = [host.hostname, host.primaryIp].filter(Boolean).join(" · ");
+                const manageable = r.kind !== "local" && r.access !== "shared";
+                return (
+                  <TableRow
+                    key={r.id}
+                    className="cursor-pointer"
+                    onClick={() => router.push(`/dashboard/runners/${r.id}`)}
+                  >
+                    <TableCell>
+                      <div className="flex items-center gap-2">
+                        <Link
+                          href={`/dashboard/runners/${r.id}`}
+                          className="font-medium hover:underline"
+                          onClick={(e) => e.stopPropagation()}
                         >
-                          <Trash2 />
-                        </Button>
+                          {r.name}
+                        </Link>
+                        {r.access === "shared" || r.isShared ? <Badge variant="secondary">共享</Badge> : null}
+                        {r.needsReinstall ? <Badge variant="destructive">需重装</Badge> : null}
+                      </div>
+                      {hostLine ? <div className="text-xs text-muted-foreground">{hostLine}</div> : null}
+                    </TableCell>
+                    <TableCell>
+                      <span className="inline-flex items-center gap-1.5 text-sm">
+                        <NodeStatusDot status={r.status} />
+                        {r.lastSeenAt || r.kind === "local" ? statusLabel(r.status) : "等待安装"}
+                      </span>
+                    </TableCell>
+                    <TableCell className="hidden text-xs text-muted-foreground md:table-cell">
+                      {[host.platform, host.arch].filter(Boolean).join(" / ") || "—"}
+                    </TableCell>
+                    <TableCell className="hidden text-xs text-muted-foreground tabular-nums md:table-cell">
+                      {host.disk?.freeBytes != null ? formatBytes(host.disk.freeBytes) : "—"}
+                    </TableCell>
+                    <TableCell
+                      className="hidden text-xs text-muted-foreground whitespace-nowrap sm:table-cell"
+                      title={formatAbsolute(r.lastSeenAt)}
+                    >
+                      {r.status === "online" ? "现在" : formatRelative(r.lastSeenAt)}
+                    </TableCell>
+                    <TableCell onClick={(e) => e.stopPropagation()}>
+                      {manageable ? (
+                        <DropdownMenu>
+                          <DropdownMenuTrigger render={<Button size="icon-sm" variant="ghost" aria-label="设备操作" />}>
+                            <MoreHorizontal />
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-auto min-w-32">
+                            <DropdownMenuItem render={<Link href={`/dashboard/runners/${r.id}`} />}>详情</DropdownMenuItem>
+                            <DropdownMenuItem variant="destructive" onClick={() => void remove(r)}>删除</DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
                       ) : null}
-                    </TableActions>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+              {!filtered.length ? (
+                <TableRow>
+                  <TableCell colSpan={6} className="py-10 text-center text-muted-foreground">
+                    没有匹配「{q}」的设备
                   </TableCell>
                 </TableRow>
-              );
-            })}
-            {!filtered.length ? (
-              <TableRow>
-                <TableCell colSpan={7} className="py-10 text-center text-muted-foreground">
-                  <div className="flex flex-col items-center gap-2">
-                    <Cpu className="size-8 opacity-40" />
-                    <div>{rows.length ? `没有匹配「${q}」的节点` : "暂无电脑或服务器"}</div>
-                  </div>
-                </TableCell>
-              </TableRow>
-            ) : null}
-          </TableBody>
+              ) : null}
+            </TableBody>
           </Table>
         </>
       )}
 
-      <Dialog
-        open={open}
-        onOpenChange={(v) => {
-          setOpen(v);
-          if (!v) resetDialog();
-        }}
-      >
-        <DialogContent className="max-w-lg sm:max-w-xl">
-          <DialogHeader>
-            <DialogTitle>
-              {created
-                ? "安装 zakura-agent"
-                : createKind === "server"
-                  ? "添加 Docker 服务器"
-                  : "添加直连电脑"}
-            </DialogTitle>
-          </DialogHeader>
-
-          {created ? (
-            <div className="space-y-4">
-              {created.install ? (
-                <RunnerInstallPanel install={created.install} compact />
-              ) : (
-                <p className="text-sm text-destructive">无法生成安装命令</p>
-              )}
-              <DialogFooter className="gap-2 sm:justify-between">
-                <Button
-                  variant="outline"
-                  nativeButton={false}
-                  render={<Link href={`/dashboard/runners/${created.node.id}`} />}
-                >
-                  查看节点
-                </Button>
-                <Button onClick={() => setOpen(false)}>完成</Button>
-              </DialogFooter>
-            </div>
-          ) : (
-            <form
-              className="space-y-4"
-              onSubmit={async (e) => {
-                e.preventDefault();
-                if (!name.trim()) {
-                  toast.error("请填写名称");
-                  return;
-                }
-                if (!accessMode) {
-                  setAccessMode("public");
-                }
-                if (accessMode === "tailscale" && !meshReady) {
-                  toast.error("请先完成 Tailscale 连接");
-                  return;
-                }
-                if (accessMode === "public" && platformMode) {
-                  toast.error("当前部署要求 Runner 必须加入组网");
-                  return;
-                }
-                setBusy(true);
-                try {
-                  const res = await createRuntimeNode({
-                    name: name.trim(),
-                    kind: createKind,
-                    enableTailscale: accessMode === "tailscale",
-                  });
-                  setCreated(res);
-                  await load(true);
-                } catch (err) {
-                  toast.error(err instanceof Error ? err.message : String(err));
-                } finally {
-                  setBusy(false);
-                }
-              }}
-            >
-              <div className="space-y-1.5">
-                <Label htmlFor="runner-name">显示名称</Label>
-                <Input
-                  id="runner-name"
-                  placeholder="例如：办公室 Linux 主机"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  autoFocus
-                />
-              </div>
-
-              <div className="space-y-2">
-                <Label>访问方式</Label>
-                <div className="grid gap-2 sm:grid-cols-2">
-                  <button
-                    type="button"
-                    disabled={platformMode}
-                    onClick={() => {
-                      setAccessMode("public");
-                      setMeshReady(false);
-                    }}
-                    className={cn(
-                      "rounded-lg border px-3 py-2.5 text-left transition-colors disabled:opacity-50",
-                      accessMode === "public"
-                        ? "border-foreground/40 bg-muted/60"
-                        : "border-border/60 hover:bg-muted/30",
-                    )}
-                  >
-                    <div className="flex items-center gap-1.5 text-sm font-medium">
-                      <Globe className="size-3.5 opacity-70" />
-                      有公网
-                    </div>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setAccessMode("tailscale")}
-                    className={cn(
-                      "rounded-lg border px-3 py-2.5 text-left transition-colors",
-                      accessMode === "tailscale"
-                        ? "border-foreground/40 bg-muted/60"
-                        : "border-border/60 hover:bg-muted/30",
-                    )}
-                  >
-                    <div className="flex items-center gap-1.5 text-sm font-medium">
-                      <Network className="size-3.5 opacity-70" />
-                      无公网 / NAT
-                    </div>
-                  </button>
-                </div>
-              </div>
-
-              {/* 仅在选定「无公网」后才加载组网状态与配置，避免打开弹窗就打慢接口 */}
-              {accessMode === "public" && platformMode ? (
-                <div className="rounded-lg border border-border/60 px-3 py-2.5 text-[11px] text-muted-foreground">
-                  平台托管组网下请改选「无公网 / NAT」
-                </div>
-              ) : null}
-
-              {accessMode === "tailscale" ? (
-                <div className="space-y-2 rounded-lg border border-border/60 p-3">
-                  <div className="text-xs font-medium">组网配置</div>
-                  <TailscaleMeshPanel
-                    key="runner-register-mesh"
-                    compact
-                    onStatusChange={onMeshStatus}
-                  />
-                </div>
-              ) : null}
-
-              <DialogFooter>
-                <Button type="submit" className="w-full" disabled={busy || !canSubmit}>
-                  {busy ? <Loader2 className="animate-spin" /> : <Plus />}
-                  创建 Runner
-                </Button>
-              </DialogFooter>
-            </form>
-          )}
-        </DialogContent>
-      </Dialog>
+      <AddDeviceDialog
+        open={adding}
+        onOpenChange={setAdding}
+        nodes={rows}
+        onCreated={() => void load()}
+      />
     </div>
   );
 }

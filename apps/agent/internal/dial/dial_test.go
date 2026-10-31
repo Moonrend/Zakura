@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/Moonrend/Zakura/apps/agent/internal/rpc"
+	"github.com/gorilla/websocket"
 )
 
 func TestHubURL(t *testing.T) {

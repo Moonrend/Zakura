@@ -7,7 +7,6 @@ import {
   Activity,
   AlarmClock,
   ArrowLeft,
-  ArrowUpCircle,
   Bot,
   Brain,
   Cable,
@@ -177,15 +176,14 @@ function advancedSectionActive(pathname: string) {
 }
 
 function buildServerChildren(showPlatformServices: boolean): SubNavItem[] {
+  // 网络各子页由页内标签切换，侧边栏只保留一级入口；升级入口并入设备页。
   const children: SubNavItem[] = [
     {
       href: "/dashboard/runners",
       label: "设备",
       icon: HardDrive,
-      isActive: (path) =>
-        path === "/dashboard/runners" ||
-        (path.startsWith("/dashboard/runners/") &&
-          !path.startsWith("/dashboard/runners/upgrades")),
+      isActive: (path) => defaultActive(path, "/dashboard/runners"),
+      showImageUpdates: true,
     },
     {
       href: "/dashboard/disks",
@@ -194,44 +192,10 @@ function buildServerChildren(showPlatformServices: boolean): SubNavItem[] {
       isActive: (path) => defaultActive(path, "/dashboard/disks"),
     },
     {
-      href: "/dashboard/runners/upgrades",
-      label: "升级中心",
-      icon: ArrowUpCircle,
-      isActive: (path) =>
-        path === "/dashboard/runners/upgrades" ||
-        path.startsWith("/dashboard/runners/upgrades/"),
-      showImageUpdates: true,
-    },
-    {
       href: "/dashboard/network",
-      label: "网络概览",
+      label: "网络",
       icon: Network,
-      isActive: (path) => path === "/dashboard/network",
-    },
-    {
-      href: "/dashboard/network/mesh",
-      label: "组网",
-      icon: Cable,
-    },
-    {
-      href: "/dashboard/network/exposure",
-      label: "端口暴露",
-      icon: Globe,
-    },
-    {
-      href: "/dashboard/network/active",
-      label: "活跃暴露",
-      icon: Activity,
-    },
-    {
-      href: "/dashboard/network/egress",
-      label: "出口策略",
-      icon: Route,
-    },
-    {
-      href: "/dashboard/network/security",
-      label: "网络安全",
-      icon: Shield,
+      isActive: (path) => defaultActive(path, "/dashboard/network"),
     },
   ];
   if (showPlatformServices) {

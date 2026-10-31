@@ -4,859 +4,467 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { toast } from "sonner";
-import {
-  ArrowLeft,
-  Boxes,
-  Loader2,
-  Network,
-  Plus,
-  RefreshCw,
-  Save,
-  Square,
-  Trash2,
-  AlertCircle,
-  CheckCircle2,
-} from "lucide-react";
+import { ArrowLeft, ChevronRight, Loader2, MoreHorizontal, Plus, Square } from "lucide-react";
 import {
   allocateNodeContainer,
+  deleteNodeDescription,
   deleteRuntimeNode,
+  fetchImageUpdates,
   fetchRunnerDetail,
   fetchRunnerInstall,
-  fetchRunnerVersion,
-  fetchImageUpdates,
   formatBytes,
   isRunnerHostInfo,
-  kindLabel,
   listNodeContainers,
   patchRuntimeNode,
   pickInstallPackage,
-  refreshWorkspaceImage,
-  statusLabel,
-  statusVariant,
-  stopContainer,
-  updateRunner,
+  resolveImageUpdateKind,
   runnerUpdateProgressText,
-  type RunnerUpdateStatus,
+  statusLabel,
+  stopContainer,
+  upgradeNodeImage,
+  type ImageUpdateEntry,
   type ManagedContainerRow,
   type RunnerHostInfo,
-  type RunnerInstallBundle,
   type RunnerInstallPackage,
-  type RunnerVersionInfo,
-  type ImageUpdateEntry,
   type RuntimeNode,
 } from "@/lib/runners";
+import { formatAbsolute, formatRelative } from "@/lib/format";
+import { subscribePlatformEvents } from "@/lib/platform-events";
 import { RunnerInstallPanel } from "@/components/runner-install-panel";
-import {
-  SettingsField,
-  SettingsHeader,
-  SettingsSection,
-  TableActions,
-} from "@/components/settings-shell";
+import { NodeStatusDot } from "@/components/node-status-dot";
+import { SettingsField, SettingsHeader, SettingsSection, TableActions } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
-import { useConfirmDialog } from "@/components/ui/confirm-dialog";
+import { Badge } from "@/components/ui/badge";
+import { Disclosure } from "@/components/ui/disclosure";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
 import { PageLoading } from "@/components/ui/progress-linear";
-import { Switch } from "@/components/ui/switch";
+import { useConfirmDialog } from "@/components/ui/confirm-dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { cn } from "@/lib/utils";
 
 function hostInfoOf(node: RuntimeNode): RunnerHostInfo {
   return isRunnerHostInfo(node.hostInfo) ? (node.hostInfo as RunnerHostInfo) : {};
 }
 
+const actionable = (entry: ImageUpdateEntry) => entry.updateAvailable || entry.runningStale;
+
 export default function RunnerDetailPage() {
   const { confirm } = useConfirmDialog();
-  const params = useParams<{ id: string }>();
+  const { id } = useParams<{ id: string }>();
   const router = useRouter();
-  const id = params.id;
 
   const [node, setNode] = useState<RuntimeNode | null>(null);
-  const [name, setName] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [installBundle, setInstallBundle] = useState<RunnerInstallBundle | null>(null);
-  const [installError, setInstallError] = useState<string | null>(null);
-  const [installBusy, setInstallBusy] = useState(false);
-  const [wantTailscale, setWantTailscale] = useState(false);
-  const [meshAvailable, setMeshAvailable] = useState(false);
   const [containers, setContainers] = useState<ManagedContainerRow[]>([]);
-  const [containersBusy, setContainersBusy] = useState(false);
+  const [install, setInstall] = useState<RunnerInstallPackage | null>(null);
+  const [installError, setInstallError] = useState<string | null>(null);
+  const [updates, setUpdates] = useState<ImageUpdateEntry[] | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [updating, setUpdating] = useState(false);
+  const [progress, setProgress] = useState("");
+  const [advanced, setAdvanced] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [draft, setDraft] = useState("");
   const [allocOpen, setAllocOpen] = useState(false);
-  const [allocForm, setAllocForm] = useState({
-    image: "python:3.12-slim",
-    name: "",
-    purpose: "ephemeral",
-    allocatedTo: "",
-  });
-  const [versionInfo, setVersionInfo] = useState<RunnerVersionInfo | null>(null);
-  const [versionBusy, setVersionBusy] = useState(false);
-  const [updateBusy, setUpdateBusy] = useState(false);
-  const [updateStatus, setUpdateStatus] = useState<RunnerUpdateStatus | null>(null);
-  const [imageUpdates, setImageUpdates] = useState<ImageUpdateEntry[] | null>(null);
-  const [imageUpdatesBusy, setImageUpdatesBusy] = useState(false);
 
+  const manageable = (n: RuntimeNode | null) => Boolean(n && n.kind !== "local" && n.access !== "shared");
+
+  // 安装命令：平台组网可用时直接给组网版本（公网 / NAT 都可用），不让用户选。
   const loadInstall = useCallback(async () => {
-    setInstallBusy(true);
     setInstallError(null);
     try {
-      const res = await fetchRunnerInstall(id);
-      setInstallBundle(res);
-      setMeshAvailable(
-        Boolean(
-          res.meshConnected ||
-            res.meshProvider === "headscale-platform" ||
-            res.installTailscale,
-        ),
-      );
+      const bundle = await fetchRunnerInstall(id);
+      setInstall(pickInstallPackage(bundle, true));
     } catch (err) {
-      setInstallBundle(null);
+      setInstall(null);
       setInstallError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setInstallBusy(false);
     }
   }, [id]);
 
-  const loadContainers = useCallback(async () => {
-    setContainersBusy(true);
+  const checkUpdates = useCallback(async (pull = false) => {
+    setChecking(true);
     try {
-      const list = await listNodeContainers(id);
-      setContainers(list);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
-    } finally {
-      setContainersBusy(false);
-    }
-  }, [id]);
-
-  const loadVersion = useCallback(async () => {
-    setVersionBusy(true);
-    try {
-      const info = await fetchRunnerVersion(id);
-      setVersionInfo(info);
+      const res = await fetchImageUpdates(id, { runnerOnly: !pull, allowPullFallback: pull });
+      setUpdates(res.images ?? []);
     } catch {
-      /* offline / unavailable */
+      setUpdates(null);
     } finally {
-      setVersionBusy(false);
+      setChecking(false);
     }
   }, [id]);
 
-  const loadImageUpdates = useCallback(async (includeWorkspace = false) => {
-    setImageUpdatesBusy(true);
+  const load = useCallback(async (initial = false) => {
     try {
-      const res = await fetchImageUpdates(id, { runnerOnly: !includeWorkspace, allowPullFallback: includeWorkspace });
-      setImageUpdates(res.images ?? []);
-    } catch {
-      setImageUpdates(null);
-    } finally {
-      setImageUpdatesBusy(false);
-    }
-  }, [id]);
-
-  const load = useCallback(async () => {
-    try {
-      setLoading(true);
-      setInstallError(null);
       const res = await fetchRunnerDetail(id);
       setNode(res.node);
-      setName(res.node.name);
-      const preferTs = Boolean(res.node.labels?.enableTailscale);
-      setWantTailscale(preferTs);
       setContainers(res.containers);
-      setMeshAvailable(
-        Boolean(res.meshConnected || res.meshProvider === "headscale-platform"),
-      );
-      if (res.tailscaleError) setInstallError(res.tailscaleError);
-      // Keep these callbacks independent of node state: setNode must not trigger
-      // another detail -> install -> image-check cycle.
-      if (res.node.kind !== "local" && res.node.access !== "shared") {
+      if (initial && manageable(res.node)) {
         void loadInstall();
-      } else {
-        setInstallBundle(null);
-      }
-      // Probe live Runner version/image for the update panel (remote only)
-      if (res.node.kind !== "local" && res.node.access !== "shared") {
-        void loadVersion();
-        void loadImageUpdates();
+        if (res.node.status === "online") void checkUpdates();
       }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
     }
-  }, [id, loadInstall, loadVersion, loadImageUpdates]);
+  }, [id, loadInstall, checkUpdates]);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    void load(true);
+    let last = 0;
+    const reload = () => {
+      const now = Date.now();
+      if (now - last < 4000) return;
+      last = now;
+      void load();
+    };
+    return subscribePlatformEvents((ev) => {
+      if (ev.type === "runner_node" && ev.nodeId === id) reload();
+    }, reload);
+  }, [id, load]);
 
-  const install: RunnerInstallPackage | null = installBundle
-    ? pickInstallPackage(installBundle, wantTailscale)
-    : null;
-  const canEnableTailscale = Boolean(installBundle?.installTailscale) || meshAvailable;
-  async function save() {
-    if (!node) return;
-    setBusy(true);
+  async function rename() {
+    if (!node || !draft.trim()) return;
     try {
-      const updated = await patchRuntimeNode(node.id, {
-        name: name.trim() || node.name,
-      });
-      setNode(updated);
-      setName(updated.name);
-      toast.success("已保存");
+      setNode(await patchRuntimeNode(node.id, { name: draft.trim() }));
+      setRenaming(false);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
     }
   }
 
-  const isRemoteUpdatable = node?.kind !== "local" && node?.access !== "shared";
-
-  async function handleUpdateRunner() {
-    if (!node) return;
-    setUpdateBusy(true);
-    setUpdateStatus(null);
+  async function remove() {
+    if (!node || !(await confirm({ title: `删除「${node.name}」？`, description: deleteNodeDescription, confirmLabel: "删除" }))) return;
     try {
-      const result = await updateRunner(node.id, {}, setUpdateStatus);
-      toast.success(result.update.note || "代理更新完成，已重新上线");
-      setNode((current) => current ? { ...current, agentVersion: result.version ?? current.agentVersion, status: "online" } : current);
-      void loadVersion();
-      void loadImageUpdates();
-    } catch (err) {
-      const error = err instanceof Error ? err.message : String(err);
-      setUpdateStatus((current) => current ? { ...current, phase: "failed", error } : current);
-      toast.error(error);
-    } finally {
-      setUpdateBusy(false);
-    }
-  }
-
-  async function handleRefreshWorkspaceImage() {
-    if (!node) return;
-    setVersionBusy(true);
-    try {
-      const result = await refreshWorkspaceImage(node.id, {
-        recreateRunning: true,
-      });
-      toast.success(
-        `容器已刷新${result.recreated.length ? `，已重建 ${result.recreated.length} 个` : ""}`,
-      );
-      void loadImageUpdates();
-      void loadContainers();
+      await deleteRuntimeNode(node.id);
+      toast.success("已删除");
+      router.push("/dashboard/runners");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
-    } finally {
-      setVersionBusy(false);
     }
   }
 
-  if (loading || !node) {
-    return <PageLoading />;
+  // 一个按钮完成所有更新：先刷新工作区容器，最后再重启代理，避免代理重连打断容器重建。
+  async function updateAll() {
+    if (!node || !updates) return;
+    const pending = updates.filter(actionable).sort((a, b) => Number(resolveImageUpdateKind(a) === "runner") - Number(resolveImageUpdateKind(b) === "runner"));
+    if (!pending.length) return;
+    setUpdating(true);
+    setProgress("");
+    try {
+      for (const entry of pending) {
+        await upgradeNodeImage(node.id, entry, (u) => setProgress(runnerUpdateProgressText(u)));
+      }
+      setProgress("");
+      toast.success("更新完成");
+      void load();
+      void checkUpdates();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setProgress(`更新失败：${msg}`);
+      toast.error(msg);
+    } finally {
+      setUpdating(false);
+    }
   }
+
+  if (!node) return <PageLoading />;
 
   const host = hostInfoOf(node);
   const interfaces = host.interfaces ?? [];
-  const externalIfaces = interfaces.filter((i) => !i.internal);
-  const internalIfaces = interfaces.filter((i) => i.internal);
-  const needsInstall =
-    node.kind !== "local" && (node.status === "offline" || !node.lastSeenAt);
   const isLocal = node.kind === "local";
-  const isSharedAccess = node.access === "shared";
+  const canManage = manageable(node);
+  const online = node.status === "online";
+  const neverConnected = !isLocal && !node.lastSeenAt;
+  const pendingUpdates = updates?.filter(actionable) ?? [];
+  const probeFailed = updates?.some((entry) => entry.error) ?? false;
 
-  const installSection =
-    node.kind !== "local" && !isSharedAccess ? (
-      <SettingsSection title="安装">
-        <div className="mb-3 flex flex-wrap items-center justify-end gap-2">
-          <div className="mr-auto flex flex-col gap-1 text-xs">
-            <div className="flex items-center gap-2">
-              <Switch
-                checked={wantTailscale && canEnableTailscale}
-                disabled={!canEnableTailscale}
-                onCheckedChange={(v) => setWantTailscale(v)}
-                id="detail-ts"
-              />
-              <Label htmlFor="detail-ts" className="text-xs font-normal">
-                {wantTailscale ? "Tailscale 组网" : "公网可达"}
-              </Label>
-            </div>
-            {!canEnableTailscale && installBundle ? (
-              <p className="text-[11px] text-muted-foreground">
-                {installBundle.tailscaleError ??
-                  (!installBundle.meshConnected
-                    ? "组网未就绪"
-                    : "暂无 Tailscale 安装包")}
-              </p>
-            ) : null}
-          </div>
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={installBusy}
-            onClick={() => void loadInstall()}
-          >
-            {installBusy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-            刷新
-          </Button>
-        </div>
-        {installError ? (
-          <p className="mb-2 text-xs text-destructive whitespace-pre-wrap">{installError}</p>
-        ) : null}
-        {installBusy && !install ? (
-          <PageLoading />
-        ) : install ? (
-          <RunnerInstallPanel install={install} />
-        ) : null}
-      </SettingsSection>
-    ) : null;
+  const installBlock = installError ? (
+    <p className="text-xs text-destructive whitespace-pre-wrap">{installError}</p>
+  ) : install ? (
+    <RunnerInstallPanel install={install} />
+  ) : (
+    <PageLoading />
+  );
 
   return (
     <div className="space-y-5">
       <SettingsHeader
         title={
           <span className="inline-flex items-center gap-2">
-            <Button
-              size="icon"
-              variant="ghost"
-              className="size-8"
-              title="返回"
-              nativeButton={false}
-              render={<Link href="/dashboard/runners" />}
-            >
+            <Button size="icon" variant="ghost" className="size-8" title="返回" nativeButton={false} render={<Link href="/dashboard/runners" />}>
               <ArrowLeft />
             </Button>
             {node.name}
           </span>
         }
         actions={
-          <>
-            <Button size="sm" variant="outline" onClick={() => void load()}>
-              <RefreshCw />
-              刷新
-            </Button>
-            {!isSharedAccess ? (
-              <Button size="sm" disabled={busy} onClick={() => void save()}>
-                {busy ? <Loader2 className="animate-spin" /> : <Save />}
-                保存
-              </Button>
-            ) : null}
-          </>
+          canManage ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger render={<Button size="icon-sm" variant="ghost" aria-label="设备操作" />}>
+                <MoreHorizontal />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-auto min-w-32">
+                <DropdownMenuItem onClick={() => { setDraft(node.name); setRenaming(true); }}>重命名</DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem variant="destructive" onClick={() => void remove()}>删除设备</DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : null
         }
       />
 
-      <div className="flex flex-wrap items-center gap-2">
-        <Badge variant={statusVariant(node.status)}>{statusLabel(node.status)}</Badge>
-        <Badge variant="outline">{kindLabel(node.kind)}</Badge>
-        {isSharedAccess || node.isShared ? (
-          <Badge variant="secondary">共享</Badge>
-        ) : null}
-        {node.agentVersion ? (
-          <Badge variant="secondary">v{node.agentVersion}</Badge>
-        ) : null}
-        <span className="text-xs text-muted-foreground font-mono">{node.id}</span>
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        <NodeStatusDot status={node.status} />
+        <span>{neverConnected ? "等待安装" : statusLabel(node.status)}</span>
+        {!online && node.lastSeenAt ? <span className="text-muted-foreground">· 最近在线 {formatRelative(node.lastSeenAt)}</span> : null}
+        {node.access === "shared" || node.isShared ? <Badge variant="secondary">共享</Badge> : null}
+        {node.needsReinstall ? <Badge variant="destructive">需重装</Badge> : null}
       </div>
 
-      {/* Offline / never-seen: install first */}
-      {needsInstall ? installSection : null}
+      {canManage && (neverConnected || node.needsReinstall) ? (
+        <SettingsSection title="安装" description="在设备上以管理员身份运行下面的命令，设备上线后这里会自动更新。需要已安装 Docker。">
+          {installBlock}
+        </SettingsSection>
+      ) : null}
 
-      <SettingsSection title="配置">
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div className="space-y-1.5">
-            <Label htmlFor="rn-name">显示名称</Label>
-            <Input
-              id="rn-name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              disabled={node.kind === "local" || isSharedAccess}
-            />
+      {!neverConnected ? (
+        <SettingsSection>
+          <div className="divide-y divide-border/60">
+            <SettingsField label="系统">
+              <span className="text-sm text-muted-foreground">{[host.platform, host.arch].filter(Boolean).join(" / ") || "—"}</span>
+            </SettingsField>
+            <SettingsField label="主机">
+              <span className="text-sm text-muted-foreground">{[host.hostname, host.primaryIp].filter(Boolean).join(" · ") || "—"}</span>
+            </SettingsField>
+            <SettingsField label="磁盘">
+              <span className="text-sm text-muted-foreground tabular-nums">
+                {host.disk ? `${formatBytes(host.disk.freeBytes)} 可用 / 共 ${formatBytes(host.disk.totalBytes)}` : "—"}
+              </span>
+            </SettingsField>
+            <SettingsField label="Docker">
+              <span className="text-sm text-muted-foreground">{host.dockerVersion || (node.dockerError ? "不可用" : "—")}</span>
+            </SettingsField>
+            {host.tailscale ? (
+              <SettingsField label="组网">
+                <span className="text-sm text-muted-foreground">{host.tailscale.connected ? host.tailscale.ip || "已连接" : "未连接"}</span>
+              </SettingsField>
+            ) : null}
           </div>
-          <div className="space-y-1.5">
-            <Label>状态</Label>
-            <div className="pt-2">
-              <Badge variant={statusVariant(node.status)}>{statusLabel(node.status)}</Badge>
-            </div>
-          </div>
-        </div>
+          {node.dockerError ? <p className="text-xs text-destructive">{node.dockerError}</p> : null}
+        </SettingsSection>
+      ) : null}
 
-        <div className="mt-4 space-y-0 divide-y divide-border/60">
-          <SettingsField label="节点 ID">
-            <code className="text-[11px] text-muted-foreground">{node.id}</code>
-          </SettingsField>
-          <SettingsField label="Endpoint">
-            <span className="max-w-[240px] truncate text-xs font-mono text-muted-foreground">
-              {node.endpoint || "—"}
-            </span>
-          </SettingsField>
-          <SettingsField label="存储根目录">
-            <code className="text-[11px] text-muted-foreground break-all">
-              {node.storageRoot}
-            </code>
-          </SettingsField>
-          <SettingsField label="最近心跳">
-            <span className="text-xs text-muted-foreground">
-              {node.lastSeenAt
-                ? new Date(node.lastSeenAt).toLocaleString()
-                : "尚未上报"}
-            </span>
-          </SettingsField>
-          <SettingsField label="创建时间">
-            <span className="text-xs text-muted-foreground">
-              {new Date(node.createdAt).toLocaleString()}
-            </span>
-          </SettingsField>
-        </div>
-      </SettingsSection>
-
-      {isRemoteUpdatable ? (
-        <SettingsSection title="版本与镜像">
-          <div className="mb-3 flex flex-wrap items-center justify-end gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={versionBusy}
-              onClick={() => void loadVersion()}
-            >
-              {versionBusy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-              重新探测
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={imageUpdatesBusy}
-              onClick={() => void loadImageUpdates(true)}
-            >
-              {imageUpdatesBusy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-              检查镜像更新
-            </Button>
-          </div>
-          <div className="space-y-0 divide-y divide-border/60">
-            <SettingsField label="Runner 版本">
-              <div className="flex items-center gap-2">
-                {node.agentVersion ? (
-                  <Badge variant="secondary">v{node.agentVersion}</Badge>
-                ) : (
-                  <span className="text-xs text-muted-foreground">未上报</span>
-                )}
-                {versionInfo?.live && versionInfo.version ? (
-                  <span className="text-xs text-muted-foreground">
-                    实时 v{versionInfo.version}
-                  </span>
-                ) : versionInfo ? (
-                  <span className="text-[11px] text-muted-foreground">
-                    {versionInfo.live === false ? "Runner 离线或不可达" : ""}
-                  </span>
-                ) : null}
-              </div>
-            </SettingsField>
-            <SettingsField label="代理二进制">
-              <code className="text-[11px] text-muted-foreground break-all">
-                {versionInfo?.image || "—"}
-              </code>
-            </SettingsField>
-            <SettingsField label="容器 ID">
-              <code className="text-[11px] text-muted-foreground">
-                {versionInfo?.containerId?.slice(0, 12) || "—"}
-              </code>
-            </SettingsField>
-          </div>
-          {imageUpdates && imageUpdates.length > 0 ? (
-            <div className="mt-3 space-y-2">
-              {imageUpdates.some((e) => e.updateAvailable) ? (
-                <div className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2">
-                  <AlertCircle className="mt-0.5 size-4 shrink-0 text-warning-foreground" />
-                  <div className="text-xs text-warning-foreground">
-                    检测到更新。一键更新代理会替换 zakura-agent 并短暂重连；
-                    刷新容器会拉取镜像并重建本机上带 zakura 标签的工作区 / MCP / ACP 容器。
-                  </div>
-                </div>
-              ) : imageUpdates.some((entry) => entry.error) ? (
-                <p className="text-xs text-muted-foreground">部分更新状态未知，请查看下方错误。</p>
-              ) : (
-                <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/5 px-3 py-2">
-                  <CheckCircle2 className="size-4 shrink-0 text-success" />
-                  <span className="text-xs text-success">
-                    已检查的项目均为最新版本
-                  </span>
-                </div>
-              )}
-              <div className="space-y-1">
-                {imageUpdates.map((entry) => (
-                  <div
-                    key={entry.image}
-                    className="flex items-center justify-between gap-2 rounded border border-border/50 px-3 py-1.5"
-                  >
-                    <code className="text-[11px] text-muted-foreground break-all">
-                      {entry.image}
-                    </code>
-                    {entry.runningStale ? (
-                      <Badge variant="danger" className="shrink-0 text-[10px]">
-                        运行容器落后
-                      </Badge>
-                    ) : entry.updateAvailable ? (
-                      <Badge variant="warn" className="shrink-0 text-[10px]">
-                        有更新
-                      </Badge>
-                    ) : entry.error ? (
-                      <span className="shrink-0 text-[10px] text-muted-foreground">
-                        {entry.error}
-                      </span>
-                    ) : (
-                      <CheckCircle2 className="size-3.5 shrink-0 text-emerald-500" />
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : null}
-          <div className="mt-4 grid gap-4 sm:grid-cols-2">
-            <div className="space-y-1.5">
-              <Label>更新代理</Label>
-              <Button
-                size="sm"
-                className="w-full"
-                disabled={versionBusy || updateBusy}
-                onClick={() => void handleUpdateRunner()}
-              >
-                {updateBusy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-                一键更新 zakura-agent
+      {canManage && !neverConnected ? (
+        <SettingsSection
+          title="版本"
+          description={node.agentVersion ? `zakura-agent v${node.agentVersion}` : "代理尚未上报版本"}
+          action={
+            pendingUpdates.length ? (
+              <Button size="sm" disabled={updating || !online} onClick={() => void updateAll()}>
+                {updating ? <Loader2 className="animate-spin" /> : null}
+                更新
               </Button>
-            </div>
-            <div className="space-y-1.5">
-              <Label>刷新容器</Label>
-              <Button
-                size="sm"
-                variant="outline"
-                className="w-full"
-                disabled={versionBusy || updateBusy}
-                onClick={() => void handleRefreshWorkspaceImage()}
-              >
-                {versionBusy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-                一键拉取并重建容器
+            ) : (
+              <Button size="sm" variant="outline" disabled={checking || !online} onClick={() => void checkUpdates(true)}>
+                {checking ? <Loader2 className="animate-spin" /> : null}
+                检查更新
               </Button>
-            </div>
-          </div>
-          {updateStatus ? (
-            <p role="status" aria-live="polite" className="mt-3 text-xs text-muted-foreground">
-              {runnerUpdateProgressText(updateStatus)}
-            </p>
-          ) : null}
-          <p className="mt-3 text-[11px] text-muted-foreground">
-            更新代理会下载对应系统的二进制，校验后重启，并确认代理重新上线。
-            刷新容器只重建带 zakura 标签的容器，不会动你自己的其它 Docker 应用。
+            )
+          }
+        >
+          <p role="status" aria-live="polite" className="text-sm text-muted-foreground">
+            {progress
+              ? progress
+              : !online
+                ? "设备离线，上线后可检查更新。"
+                : checking
+                  ? "正在检查…"
+                  : pendingUpdates.length
+                    ? `有 ${pendingUpdates.length} 项更新。更新会短暂重启代理并重建本设备上的 zakura 容器，不影响其它 Docker 应用。`
+                    : probeFailed
+                      ? "部分组件无法确认版本，请稍后重新检查。"
+                      : updates
+                        ? "已是最新版本。"
+                        : "尚未检查。"}
           </p>
         </SettingsSection>
       ) : null}
 
-      <SettingsSection
-        title={
-          <span className="inline-flex w-full items-center justify-between gap-2">
-            <span className="inline-flex items-center gap-1.5">
-              <Boxes className="size-3.5" />
-              容器
-            </span>
-            <span className="inline-flex items-center gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={containersBusy}
-                onClick={() => void loadContainers()}
-              >
-                {containersBusy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-                刷新
-              </Button>
-              {isLocal ? (
-                <Button size="sm" onClick={() => setAllocOpen(true)}>
-                  <Plus />
-                  分配
+      <div>
+        <button
+          type="button"
+          className="press flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+          aria-expanded={advanced}
+          onClick={() => setAdvanced((v) => !v)}
+        >
+          <ChevronRight className={cn("size-4 transition-transform duration-200 ease-out-soft", advanced && "rotate-90")} />
+          高级
+        </button>
+        <Disclosure open={advanced} innerClassName="space-y-5 pt-3">
+          <SettingsSection
+            title="容器"
+            description={isLocal ? undefined : "由平台在此设备上创建的容器。"}
+            action={
+              <span className="inline-flex gap-2">
+                <Button size="sm" variant="ghost" onClick={() => void listNodeContainers(id).then(setContainers).catch((err) => toast.error(String(err)))}>
+                  刷新
                 </Button>
-              ) : null}
-            </span>
-          </span>
-        }
-      >
-        {!isLocal ? (
-          <p className="mb-3 text-[11px] text-muted-foreground">
-            远程节点仅展示已绑定容器
-          </p>
-        ) : null}
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>名称</TableHead>
-              <TableHead>镜像</TableHead>
-              <TableHead>用途</TableHead>
-              <TableHead>状态</TableHead>
-              <TableHead>Docker</TableHead>
-              <TableHead className="w-[1%]" />
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {containers.map((r) => (
-              <TableRow key={r.id}>
-                <TableCell className="font-medium">{r.name}</TableCell>
-                <TableCell className="max-w-[160px] truncate text-xs">{r.image}</TableCell>
-                <TableCell>
-                  <Badge variant="outline">{r.purpose}</Badge>
-                </TableCell>
-                <TableCell className="text-xs">{r.status}</TableCell>
-                <TableCell>
-                  <code className="text-[11px]">
-                    {r.dockerId ? r.dockerId.slice(0, 12) : "—"}
-                  </code>
-                </TableCell>
-                <TableCell>
-                  <TableActions>
-                    {r.dockerId && r.status !== "removed" ? (
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        title="停止并移除"
-                        onClick={async () => {
-                          try {
-                            await stopContainer(r.id, true);
-                            toast.success("已停止");
-                            await loadContainers();
-                          } catch (err) {
-                            toast.error(
-                              err instanceof Error ? err.message : String(err),
-                            );
-                          }
-                        }}
-                      >
-                        <Square />
-                      </Button>
-                    ) : null}
-                  </TableActions>
-                </TableCell>
-              </TableRow>
-            ))}
-            {!containers.length && (
-              <TableRow>
-                <TableCell colSpan={6} className="py-6 text-center text-muted-foreground">
-                  暂无容器
-                </TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
-      </SettingsSection>
-
-      <SettingsSection
-        title={
-          <span className="inline-flex items-center gap-1.5">
-            <Network className="size-3.5" />
-            主机信息
-          </span>
-        }
-      >
-        {!host.hostname && !interfaces.length ? (
-          <p className="text-xs text-muted-foreground">
-            {node.kind === "local"
-              ? "本机节点不通过 Runner 心跳上报 hostInfo。"
-              : "设备尚未上线，上线后将显示主机名、网卡与磁盘信息。"}
-          </p>
-        ) : (
-          <div className="space-y-4">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <InfoTile label="主机名" value={host.hostname || "—"} />
-              <InfoTile label="主 IP" value={host.primaryIp || "—"} mono />
-              <InfoTile
-                label="平台"
-                value={
-                  [host.platform, host.arch].filter(Boolean).join(" / ") || "—"
-                }
-              />
-              <InfoTile
-                label="磁盘"
-                value={
-                  host.disk
-                    ? `${formatBytes(host.disk.freeBytes)} 可用 / ${formatBytes(host.disk.totalBytes)}`
-                    : "—"
-                }
-              />
-              <InfoTile label="Docker" value={host.dockerVersion || "—"} />
-              <InfoTile label="对外 URL" value={host.publicUrl || "—"} mono />
-              {host.tailscale ? (
-                <InfoTile
-                  label="Tailscale"
-                  value={
-                    host.tailscale.connected
-                      ? [host.tailscale.magicDnsName, host.tailscale.ip]
-                          .filter(Boolean)
-                          .join(" · ") || "已连接"
-                      : "未连接"
-                  }
-                  mono
-                />
-              ) : null}
-            </div>
-
-            {interfaces.length > 0 ? (
-              <div className="space-y-2">
-                <div className="text-xs font-medium text-muted-foreground">
-                  网卡（{externalIfaces.length} 外部 · {internalIfaces.length}{" "}
-                  内部）
-                </div>
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>接口</TableHead>
-                      <TableHead>IPv4</TableHead>
-                      <TableHead>MAC</TableHead>
-                      <TableHead>状态</TableHead>
-                      <TableHead>类型</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {[...externalIfaces, ...internalIfaces].map((iface) => (
-                      <TableRow key={iface.name}>
-                        <TableCell className="font-mono text-xs">{iface.name}</TableCell>
-                        <TableCell className="font-mono text-[11px]">
-                          {iface.ipv4?.length ? iface.ipv4.join(", ") : "—"}
-                        </TableCell>
-                        <TableCell className="font-mono text-[11px] text-muted-foreground">
-                          {iface.mac || "—"}
-                        </TableCell>
-                        <TableCell className="text-xs">{iface.operstate || "—"}</TableCell>
-                        <TableCell>
-                          <Badge variant={iface.internal ? "secondary" : "outline"}>
-                            {iface.internal ? "内部" : "外部"}
-                          </Badge>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-            ) : null}
-          </div>
-        )}
-      </SettingsSection>
-
-      {/* Online: install section after host info */}
-      {!needsInstall ? installSection : null}
-
-      {node.kind !== "local" && !isSharedAccess ? (
-        <div className="flex justify-end pt-2">
-          <Button
-            variant="destructive"
-            size="sm"
-            onClick={async () => {
-              if (!(await confirm({ title: `删除 Runner「${node.name}」？`, description: "撤销节点连接并停止同步待清理任务。远端文件和容器不会被自动删除，保留盘不可再用于重建。请先删除或迁移当前工作区。", confirmLabel: "删除" }))) {
-                return;
-              }
-              try {
-                await deleteRuntimeNode(node.id);
-                toast.success("已删除");
-                router.push("/dashboard/runners");
-              } catch (err) {
-                toast.error(err instanceof Error ? err.message : String(err));
-              }
-            }}
+                {isLocal ? (
+                  <Button size="sm" variant="outline" onClick={() => setAllocOpen(true)}>
+                    <Plus />
+                    分配
+                  </Button>
+                ) : null}
+              </span>
+            }
           >
-            <Trash2 />
-            删除节点
-          </Button>
-        </div>
-      ) : null}
+            {containers.length ? (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>名称</TableHead>
+                    <TableHead>镜像</TableHead>
+                    <TableHead>状态</TableHead>
+                    <TableHead className="w-[1%]" />
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {containers.map((r) => (
+                    <TableRow key={r.id}>
+                      <TableCell>
+                        <div className="font-medium">{r.name}</div>
+                        <div className="text-xs text-muted-foreground">{r.purpose}</div>
+                      </TableCell>
+                      <TableCell className="max-w-[200px] truncate font-mono text-xs text-muted-foreground" title={r.image}>{r.image}</TableCell>
+                      <TableCell className="text-xs">{r.status}</TableCell>
+                      <TableCell>
+                        <TableActions>
+                          {r.dockerId && r.status !== "removed" ? (
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              title="停止并移除"
+                              onClick={async () => {
+                                if (!(await confirm({ title: `停止并移除「${r.name}」？`, confirmLabel: "停止" }))) return;
+                                try {
+                                  await stopContainer(r.id, true);
+                                  setContainers(await listNodeContainers(id));
+                                } catch (err) {
+                                  toast.error(err instanceof Error ? err.message : String(err));
+                                }
+                              }}
+                            >
+                              <Square />
+                            </Button>
+                          ) : null}
+                        </TableActions>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            ) : (
+              <p className="text-sm text-muted-foreground">暂无容器</p>
+            )}
+          </SettingsSection>
 
-      <Dialog open={allocOpen} onOpenChange={setAllocOpen}>
+          {interfaces.length ? (
+            <SettingsSection title="网卡">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>接口</TableHead>
+                    <TableHead>IPv4</TableHead>
+                    <TableHead className="hidden sm:table-cell">MAC</TableHead>
+                    <TableHead>状态</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {[...interfaces].sort((a, b) => Number(a.internal) - Number(b.internal)).map((iface) => (
+                    <TableRow key={iface.name}>
+                      <TableCell className="font-mono text-xs">
+                        {iface.name}
+                        {iface.internal ? <span className="ml-1.5 text-muted-foreground">内部</span> : null}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">{iface.ipv4?.length ? iface.ipv4.join(", ") : "—"}</TableCell>
+                      <TableCell className="hidden font-mono text-xs text-muted-foreground sm:table-cell">{iface.mac || "—"}</TableCell>
+                      <TableCell className="text-xs">{iface.operstate || "—"}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </SettingsSection>
+          ) : null}
+
+          <SettingsSection title="标识">
+            <div className="divide-y divide-border/60">
+              <SettingsField label="设备 ID"><code className="text-xs text-muted-foreground">{node.id}</code></SettingsField>
+              <SettingsField label="存储目录"><code className="text-xs text-muted-foreground break-all">{node.storageRoot}</code></SettingsField>
+              {host.publicUrl ? <SettingsField label="对外地址"><code className="text-xs text-muted-foreground break-all">{host.publicUrl}</code></SettingsField> : null}
+              <SettingsField label="添加时间"><span className="text-xs text-muted-foreground">{formatAbsolute(node.createdAt)}</span></SettingsField>
+            </div>
+          </SettingsSection>
+
+          {canManage && !neverConnected && !node.needsReinstall ? (
+            <SettingsSection title="重新安装" description="设备重装系统或代理损坏时，在设备上重新运行此命令。">
+              {installBlock}
+            </SettingsSection>
+          ) : null}
+        </Disclosure>
+      </div>
+
+      <Dialog open={renaming} onOpenChange={setRenaming}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>分配容器</DialogTitle>
+            <DialogTitle>重命名设备</DialogTitle>
           </DialogHeader>
-          <form
-            className="space-y-3"
-            onSubmit={async (e) => {
-              e.preventDefault();
-              try {
-                await allocateNodeContainer(node.id, {
-                  image: allocForm.image,
-                  name: allocForm.name || undefined,
-                  purpose: allocForm.purpose,
-                  allocatedTo: allocForm.allocatedTo || undefined,
-                });
-                toast.success("已创建");
-                setAllocOpen(false);
-                await loadContainers();
-              } catch (err) {
-                toast.error(err instanceof Error ? err.message : String(err));
-              }
-            }}
-          >
-            <div className="space-y-1.5">
-              <Label>镜像</Label>
-              <Input
-                required
-                value={allocForm.image}
-                onChange={(e) =>
-                  setAllocForm((f) => ({ ...f, image: e.target.value }))
-                }
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <div className="space-y-1.5">
-                <Label>名称</Label>
-                <Input
-                  value={allocForm.name}
-                  onChange={(e) =>
-                    setAllocForm((f) => ({ ...f, name: e.target.value }))
-                  }
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label>用途</Label>
-                <Input
-                  value={allocForm.purpose}
-                  onChange={(e) =>
-                    setAllocForm((f) => ({ ...f, purpose: e.target.value }))
-                  }
-                />
-              </div>
-            </div>
-            <div className="space-y-1.5">
-              <Label>Allocated To</Label>
-              <Input
-                value={allocForm.allocatedTo}
-                onChange={(e) =>
-                  setAllocForm((f) => ({ ...f, allocatedTo: e.target.value }))
-                }
-              />
-            </div>
-            <Button type="submit" className="w-full">
-              创建
-            </Button>
+          <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); void rename(); }}>
+            <Input aria-label="名称" value={draft} onChange={(e) => setDraft(e.target.value)} maxLength={100} autoFocus />
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setRenaming(false)}>取消</Button>
+              <Button type="submit" disabled={!draft.trim()}>保存</Button>
+            </DialogFooter>
           </form>
         </DialogContent>
       </Dialog>
+
+      {isLocal ? <AllocateDialog open={allocOpen} onOpenChange={setAllocOpen} nodeId={node.id} onDone={() => void listNodeContainers(id).then(setContainers)} /> : null}
     </div>
   );
 }
 
-function InfoTile({
-  label,
-  value,
-  mono,
-}: {
-  label: string;
-  value: string;
-  mono?: boolean;
-}) {
+function AllocateDialog({ open, onOpenChange, nodeId, onDone }: { open: boolean; onOpenChange: (v: boolean) => void; nodeId: string; onDone: () => void }) {
+  const [form, setForm] = useState({ image: "python:3.12-slim", name: "", purpose: "ephemeral", allocatedTo: "" });
+  const set = (key: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) => setForm((f) => ({ ...f, [key]: e.target.value }));
   return (
-    <div className="rounded-lg border border-border/60 bg-background/50 px-3 py-2">
-      <div className="text-[11px] text-muted-foreground">{label}</div>
-      <div
-        className={`mt-0.5 text-sm truncate ${mono ? "font-mono text-xs" : "font-medium"}`}
-        title={value}
-      >
-        {value}
-      </div>
-    </div>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>分配容器</DialogTitle>
+        </DialogHeader>
+        <form
+          className="space-y-3"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            try {
+              await allocateNodeContainer(nodeId, { image: form.image, name: form.name || undefined, purpose: form.purpose, allocatedTo: form.allocatedTo || undefined });
+              onOpenChange(false);
+              onDone();
+            } catch (err) {
+              toast.error(err instanceof Error ? err.message : String(err));
+            }
+          }}
+        >
+          <div className="space-y-1.5"><Label htmlFor="alloc-image">镜像</Label><Input id="alloc-image" required value={form.image} onChange={set("image")} /></div>
+          <div className="grid grid-cols-2 gap-2">
+            <div className="space-y-1.5"><Label htmlFor="alloc-name">名称</Label><Input id="alloc-name" value={form.name} onChange={set("name")} /></div>
+            <div className="space-y-1.5"><Label htmlFor="alloc-purpose">用途</Label><Input id="alloc-purpose" value={form.purpose} onChange={set("purpose")} /></div>
+          </div>
+          <div className="space-y-1.5"><Label htmlFor="alloc-to">分配给</Label><Input id="alloc-to" value={form.allocatedTo} onChange={set("allocatedTo")} /></div>
+          <DialogFooter><Button type="submit">创建</Button></DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }

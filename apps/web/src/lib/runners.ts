@@ -413,6 +413,8 @@ export async function upgradeNodeImage(
   };
 }
 
+export const deleteNodeDescription = "撤销节点连接并停止同步待清理任务。远端文件和容器不会被自动删除，保留盘不可再用于重建。请先删除或迁移当前工作区。";
+
 export async function deleteRuntimeNode(id: string): Promise<void> {
   await api(`/api/runtime-nodes/${id}`, { method: "DELETE" });
 }

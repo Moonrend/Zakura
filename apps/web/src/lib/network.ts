@@ -168,6 +168,7 @@ export const NETWORK_SUBNAV = [
   { href: "mesh", label: "Runner 组网" },
   { href: "exposure", label: "端口暴露" },
   { href: "active", label: "活跃暴露" },
+  { href: "egress", label: "出口策略" },
   { href: "security", label: "安全策略" },
 ] as const;
 
