@@ -113,7 +113,7 @@ func TestSpaceServerComputerLifecycleWithoutAgent(t *testing.T) {
 		if action == "stop" {
 			want = "stopped"
 		}
-		if !strings.Contains(w.Body.String(), `"workspaceStatus":"`+want+`"`) {
+		if !strings.Contains(w.Body.String(), `"workspace":{"state":"`+want+`"`) {
 			t.Fatalf("%s state: %s", action, w.Body)
 		}
 	}

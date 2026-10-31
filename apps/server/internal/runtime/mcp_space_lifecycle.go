@@ -171,7 +171,7 @@ func (h *handler) stopMCPInstance(ctx context.Context, tenant, id string) error 
 			if err != nil {
 				return err
 			}
-			disk, err := h.workspaceStore().Disk(ctx, tenant, row.Space, instance.DiskID)
+			disk, err := h.workspaceStore().Disk(ctx, tenant, instance.DiskID)
 			if err != nil {
 				return err
 			}

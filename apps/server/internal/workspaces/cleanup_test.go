@@ -26,7 +26,7 @@ func TestOfflineRetireTransfersUnknownCreateAndAllowsNewInstance(t *testing.T) {
 	if _, err := s.Current(ctx, "tenant", "space"); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("old instance still current: %v", err)
 	}
-	d, err := s.Disk(ctx, "tenant", "space", "old-disk")
+	d, err := s.Disk(ctx, "tenant", "old-disk")
 	if err != nil || d.State != "release_pending" || d.AttachedInstanceID == nil || *d.AttachedInstanceID != old.InstanceID {
 		t.Fatalf("offline disk released prematurely: %+v %v", d, err)
 	}
@@ -37,7 +37,7 @@ func TestOfflineRetireTransfersUnknownCreateAndAllowsNewInstance(t *testing.T) {
 	if _, _, err := s.Resolve(ctx, old.Target); !errors.Is(err, ErrTargetRevoked) {
 		t.Fatalf("retired target usable: %v", err)
 	}
-	newDisk, err := s.RegisterDisk(ctx, "tenant", "space", "new-disk", "New disk", "node", old.NodeIncarnation, now)
+	newDisk, err := s.RegisterDisk(ctx, "tenant", "new-disk", "New disk", "node", old.NodeIncarnation, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestOfflineRetireTransfersUnknownCreateAndAllowsNewInstance(t *testing.T) {
 	if err != nil || current.Target != newInstance.Target {
 		t.Fatalf("old cleanup changed current instance: %+v %v", current, err)
 	}
-	d, err = s.Disk(ctx, "tenant", "space", old.DiskID)
+	d, err = s.Disk(ctx, "tenant", old.DiskID)
 	if err != nil || d.AttachedInstanceID != nil || d.State != "available" {
 		t.Fatalf("retained disk not released: %+v %v", d, err)
 	}
@@ -165,7 +165,7 @@ func TestCleanupWorkerFencingAndDeleteDiskPhase(t *testing.T) {
 	if err := s.CompleteRelease(ctx, second, i.Target, later); err != nil {
 		t.Fatal(err)
 	}
-	d, err := s.Disk(ctx, "tenant", "space", "disk")
+	d, err := s.Disk(ctx, "tenant", "disk")
 	if err != nil || d.State != "delete_pending" || d.AttachedInstanceID != nil {
 		t.Fatalf("release erased deletion authority: %+v %v", d, err)
 	}

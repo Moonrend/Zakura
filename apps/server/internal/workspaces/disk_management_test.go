@@ -15,34 +15,34 @@ func TestDiskDeletionIndependentOfCurrentWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d, err := s.RegisterDisk(ctx, "tenant", "space", "spare-disk", "Spare", "node", i.NodeIncarnation, now)
+	d, err := s.RegisterDisk(ctx, "tenant", "spare-disk", "Spare", "node", i.NodeIncarnation, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := s.VerifyDisk(ctx, d, 123, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RenameDisk(ctx, "other", "space", d.ID, "Unauthorized", now); !errors.Is(err, ErrConflict) {
+	if err := s.RenameDisk(ctx, "other", d.ID, "Unauthorized", now); !errors.Is(err, ErrConflict) {
 		t.Fatalf("foreign disk renamed: %v", err)
 	}
-	if err := s.RenameDisk(ctx, "tenant", "space", d.ID, "Retained", now); err != nil {
+	if err := s.RenameDisk(ctx, "tenant", d.ID, "Retained", now); err != nil {
 		t.Fatal(err)
 	}
-	c, err := s.DeleteDisk(ctx, "tenant", "space", d.ID, "request", "cleanup", now)
+	c, err := s.DeleteDisk(ctx, "tenant", d.ID, "request", "cleanup", now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if c.InstanceID != nil || c.Phase != "deleting_disk" || !c.DeleteDisk || !c.Pending {
 		t.Fatalf("invalid disk cleanup: %+v", c)
 	}
-	repeated, err := s.DeleteDisk(ctx, "tenant", "space", d.ID, "request", "ignored", now)
+	repeated, err := s.DeleteDisk(ctx, "tenant", d.ID, "request", "ignored", now)
 	if err != nil || repeated.ID != c.ID {
 		t.Fatalf("delete retry: %+v %v", repeated, err)
 	}
 	if err := s.SampleUsage(ctx, d, 999, now.Add(time.Second)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("late sample changed deletion: %v", err)
 	}
-	claimed, err := s.ClaimCleanup(ctx, "tenant", "space", c.ID, "worker", now)
+	claimed, err := s.ClaimCleanup(ctx, c.TenantID, c.SpaceID, c.ID, "worker", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,11 +61,11 @@ func TestDiskDeletionIndependentOfCurrentWorkspace(t *testing.T) {
 	if err != nil || current.Target != i.Target {
 		t.Fatalf("disk deletion changed workspace: %+v %v", current, err)
 	}
-	d, err = s.Disk(ctx, "tenant", "space", d.ID)
+	d, err = s.Disk(ctx, "tenant", d.ID)
 	if err != nil || d.State != "deleted" || d.UsedBytes == nil || *d.UsedBytes != 0 {
 		t.Fatalf("disk not deleted: %+v %v", d, err)
 	}
-	if _, err := s.DeleteDisk(ctx, "tenant", "space", i.DiskID, "attached", "attached-cleanup", now); !errors.Is(err, ErrConflict) {
+	if _, err := s.DeleteDisk(ctx, "tenant", i.DiskID, "attached", "attached-cleanup", now); !errors.Is(err, ErrConflict) {
 		t.Fatalf("attached disk deleted: %v", err)
 	}
 }

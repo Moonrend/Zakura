@@ -57,7 +57,7 @@ func TestAdoptLegacyPreservesEffectsAndRequiresVerification(t *testing.T) {
 	if i.State != "unknown" || i.Generation != 1 || i.IdentityVersion != 1 || i.DockerID == nil || *i.DockerID != "docker-id" || i.CreateOperationID == nil || *i.CreateOperationID != "op" {
 		t.Fatalf("adoption changed identity: %+v", i)
 	}
-	d, err := s.Disk(ctx, "tenant", "space", "disk")
+	d, err := s.Disk(ctx, "tenant", "disk")
 	if err != nil {
 		t.Fatal(err)
 	}

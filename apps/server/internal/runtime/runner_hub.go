@@ -177,6 +177,9 @@ func (h *handler) runnerHubHTTP(w http.ResponseWriter, r *http.Request) {
 			err = errInstallationRevoked
 		}
 	}
+	if err == nil && installationIncarnation == "" && supportsWorkspaceProtocol(string(info.Capabilities)) {
+		err = h.enrollWorkspaceIncarnation(ctx, s, sum)
+	}
 	if err == nil {
 		err = h.syncWorkspaceRevocations(ctx, s)
 	}
@@ -197,6 +200,7 @@ func (h *handler) runnerHubHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if err == nil {
 		s.ready.Store(true)
+		go h.hub.publishNodeChanged(nodeID)
 	}
 	h.hub.mu.Unlock()
 	if err != nil {
@@ -243,6 +247,23 @@ func (h *runnerHub) remove(session *runnerSession) {
 	// must never mark its replacement offline, including during handshake.
 	if h.deps != nil && h.deps.Gorm != nil {
 		_ = h.deps.Gorm.WithContext(h.deps.RunContext()).Exec(`UPDATE runtime_nodes SET status=CASE WHEN status='draining' THEN status ELSE 'offline' END,updated_at=? WHERE id=?`, runtimeTimeString(time.Now().UTC()), session.nodeID).Error
+		go h.publishNodeChanged(session.nodeID)
+	}
+}
+
+// publishNodeChanged signals pages showing this node (or a workspace on it) to
+// re-observe. Shared nodes notify every tenant using them.
+func (h *runnerHub) publishNodeChanged(node string) {
+	if h.deps == nil || h.deps.Gorm == nil {
+		return
+	}
+	var tenants []string
+	if err := h.deps.Gorm.WithContext(h.deps.RunContext()).Raw(`SELECT tenant_id FROM runtime_nodes WHERE id=? UNION SELECT tenant_id FROM spaces WHERE runtime_node_id=?`, node, node).Scan(&tenants).Error; err != nil {
+		return
+	}
+	payload := map[string]any{"type": "runner_node", "ts": time.Now().UnixMilli(), "nodeId": node}
+	for _, tenant := range tenants {
+		broadcastTenant(tenant, "platform", payload, "")
 	}
 }
 

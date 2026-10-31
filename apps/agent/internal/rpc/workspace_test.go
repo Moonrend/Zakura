@@ -23,7 +23,7 @@ func workspaceRPCFixture(t *testing.T) (*Handler, protocol.Binding) {
 	}
 	b := protocol.Binding{
 		Target: protocol.Target{TenantID: "tenant", SpaceID: "space", InstanceID: "instance", Generation: 1, NodeID: "node", NodeIncarnation: identity.Incarnation, DiskID: "disk", LocatorVersion: 1},
-		Disk:   protocol.Disk{TenantID: "tenant", SpaceID: "space", DiskID: "disk", NodeIncarnation: identity.Incarnation, LocatorVersion: 1, Locator: protocol.Locator{Kind: "directory", RelativePath: "disks/disk/workspace"}},
+		Disk:   protocol.Disk{TenantID: "tenant", DiskID: "disk", NodeIncarnation: identity.Incarnation, LocatorVersion: 1, Locator: protocol.Locator{Kind: "directory", RelativePath: "disks/disk/workspace"}},
 	}
 	for method, params := range map[string]any{"workspace.disk.allocate": b.Disk} {
 		if response := createReceiptRPCCall(t, h, method, params); response.Error != "" {

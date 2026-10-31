@@ -30,18 +30,19 @@ func (h *handler) serverComputerState(ctx context.Context, tenant, spaceID strin
 	if err := h.deps.Gorm.WithContext(ctx).Table("computer_workspace_leases").Select("token,operation,expires_at").Where("space_id=? AND tenant_id=?", space.ID, tenant).Find(&lease).Error; err != nil {
 		return nil, err
 	}
-	state := map[string]any{"computer": computer, "space": map[string]any{"id": space.ID, "runtimeNodeId": space.RuntimeNodeID, "workspaceKind": space.WorkspaceKind, "workspaceImage": space.WorkspaceImage, "enableComputer": space.EnableComputer, "workspaceStatus": space.WorkspaceStatus, "lastError": space.LastError, "currentWorkspaceInstanceId": space.CurrentWorkspaceInstanceID, "workspaceGeneration": space.WorkspaceGeneration}, "workspaceInstance": nil, "workspaceDisk": nil}
+	state := map[string]any{"computer": computer, "space": map[string]any{"id": space.ID, "runtimeNodeId": space.RuntimeNodeID, "workspaceKind": space.WorkspaceKind, "workspaceImage": space.WorkspaceImage, "enableComputer": space.EnableComputer, "lastError": space.LastError, "currentWorkspaceInstanceId": space.CurrentWorkspaceInstanceID, "workspaceGeneration": space.WorkspaceGeneration}, "workspaceInstance": nil, "workspaceDisk": nil}
 	if space.CurrentWorkspaceInstanceID != nil {
 		instance, err := h.workspaceStore().Instance(ctx, tenant, spaceID, *space.CurrentWorkspaceInstanceID)
 		if err != nil {
 			return nil, err
 		}
-		disk, err := h.workspaceStore().Disk(ctx, tenant, spaceID, instance.DiskID)
+		disk, err := h.workspaceStore().Disk(ctx, tenant, instance.DiskID)
 		if err != nil {
 			return nil, err
 		}
 		state["workspaceInstance"], state["workspaceDisk"] = instance, disk
 	}
+	state["workspace"] = h.observeLiveWorkspace(ctx, space)
 	cleanups, err := h.workspaceStore().Cleanups(ctx, tenant, spaceID)
 	if err != nil {
 		return nil, err

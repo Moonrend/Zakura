@@ -31,6 +31,7 @@ import {
   UserRound,
   Wrench,
   HardDrive,
+  Database,
   Building2,
   ShieldCheck,
   Route,
@@ -162,6 +163,7 @@ function defaultActive(pathname: string, href: string) {
 function serverSectionActive(pathname: string) {
   return (
     pathname.startsWith("/dashboard/runners") ||
+    pathname.startsWith("/dashboard/disks") ||
     pathname.startsWith("/dashboard/network") ||
     pathname.startsWith("/dashboard/platform-services")
   );
@@ -184,6 +186,12 @@ function buildServerChildren(showPlatformServices: boolean): SubNavItem[] {
         path === "/dashboard/runners" ||
         (path.startsWith("/dashboard/runners/") &&
           !path.startsWith("/dashboard/runners/upgrades")),
+    },
+    {
+      href: "/dashboard/disks",
+      label: "数据盘",
+      icon: Database,
+      isActive: (path) => defaultActive(path, "/dashboard/disks"),
     },
     {
       href: "/dashboard/runners/upgrades",

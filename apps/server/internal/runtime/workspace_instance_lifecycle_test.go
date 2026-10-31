@@ -120,7 +120,11 @@ func TestWorkspaceInstanceHTTPConfigureStartRetireRebuild(t *testing.T) {
 	base := "/spaces/" + space.ID
 	call := func(method, path, body string) *httptest.ResponseRecorder {
 		t.Helper()
-		r := httptest.NewRequest(method, base+path, strings.NewReader(body))
+		target := base + path
+		if strings.HasPrefix(path, "/disks") {
+			target = path
+		}
+		r := httptest.NewRequest(method, target, strings.NewReader(body))
 		r = r.WithContext(httpx.WithPrincipal(r.Context(), httpx.Principal{TenantID: "tenant", Role: "owner"}))
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, r)

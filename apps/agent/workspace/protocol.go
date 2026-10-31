@@ -59,9 +59,12 @@ func (t Target) Validate() error {
 	return nil
 }
 
+// Disk is tenant-scoped storage. SpaceID is set only for legacy-bind disks,
+// whose directory is still named after the Space that created it; managed
+// directory disks can be attached by any Space of the tenant.
 type Disk struct {
 	TenantID        string  `json:"tenantId"`
-	SpaceID         string  `json:"spaceId"`
+	SpaceID         string  `json:"spaceId,omitempty"`
 	DiskID          string  `json:"diskId"`
 	NodeIncarnation string  `json:"nodeIncarnation"`
 	LocatorVersion  int64   `json:"locatorVersion"`
@@ -69,10 +72,13 @@ type Disk struct {
 }
 
 func (d Disk) Validate() error {
-	for _, value := range []string{d.TenantID, d.SpaceID, d.DiskID, d.NodeIncarnation} {
+	for _, value := range []string{d.TenantID, d.DiskID, d.NodeIncarnation} {
 		if !ValidIdentity(value) {
 			return errors.New("workspace disk identity is incomplete")
 		}
+	}
+	if d.Locator.Kind == "legacy-bind" && !ValidIdentity(d.SpaceID) || d.Locator.Kind != "legacy-bind" && d.SpaceID != "" {
+		return errors.New("workspace disk owner does not match its locator")
 	}
 	if d.LocatorVersion < 1 {
 		return errors.New("workspace disk version is invalid")
@@ -91,7 +97,7 @@ func (d Disk) Validate() error {
 }
 
 func (d Disk) Matches(t Target) bool {
-	return d.TenantID == t.TenantID && d.SpaceID == t.SpaceID && d.DiskID == t.DiskID && d.NodeIncarnation == t.NodeIncarnation && d.LocatorVersion == t.LocatorVersion
+	return d.TenantID == t.TenantID && (d.SpaceID == "" || d.SpaceID == t.SpaceID) && d.DiskID == t.DiskID && d.NodeIncarnation == t.NodeIncarnation && d.LocatorVersion == t.LocatorVersion
 }
 
 type Binding struct {

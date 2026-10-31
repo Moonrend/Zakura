@@ -54,6 +54,8 @@ export type PlatformEvent =
       snapshot: PlatformServiceProgressSnapshot;
     }
   | { type: "runner_node"; ts: number; nodeId: string }
+  /** 工作区状态变化信号；不携带状态，订阅方应重新请求实时状态 */
+  | { type: "workspace_changed"; ts: number; spaceId: string }
   | { type: "agent_fs_changed"; ts: number; agentId: string; path: string }
   | { type: "agent_config_changed"; ts: number; agentId: string }
   | {

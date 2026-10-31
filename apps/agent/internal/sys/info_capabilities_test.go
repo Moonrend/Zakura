@@ -11,7 +11,7 @@ func TestFilesystemNoFollowStatCapability(t *testing.T) {
 	// Capability advertisement must not depend on a functioning Docker daemon.
 	t.Setenv("ZAKURA_DOCKER", filepath.Join(root, "missing-docker"))
 	info := Collect("computer", root)
-	for _, name := range []string{"host", "privateAtomicFS", "boundedExecOutput", "filesystemNoFollowStat"} {
+	for _, name := range []string{"host", "privateAtomicFS", "boundedExecOutput", "filesystemNoFollowStat", "workspaceProtocolV2"} {
 		if info.Capabilities[name] != true {
 			t.Fatalf("capability %q=%v", name, info.Capabilities[name])
 		}

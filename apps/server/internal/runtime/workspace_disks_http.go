@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -18,13 +19,26 @@ func (h *handler) workspaceStore() workspaces.Store {
 	return workspaces.Store{DB: h.deps.DB, Rebind: h.deps.Rebind}
 }
 
+// Disks are tenant storage, not Space settings. A Space only selects a released
+// disk when (re)creating its workspace.
 func (h *handler) registerWorkspaceDisks(r chi.Router) {
-	r.Get("/spaces/{id}/disks", h.listWorkspaceDisks)
-	r.Post("/spaces/{id}/disks", h.createWorkspaceDisk)
-	r.Patch("/spaces/{id}/disks/{diskId}", h.renameWorkspaceDisk)
-	r.Post("/spaces/{id}/disks/{diskId}/refresh", h.refreshWorkspaceDisk)
-	r.Delete("/spaces/{id}/disks/{diskId}", h.deleteWorkspaceDisk)
+	r.Get("/disks", h.listWorkspaceDisks)
+	r.Post("/disks", h.createWorkspaceDisk)
+	r.Patch("/disks/{diskId}", h.renameWorkspaceDisk)
+	r.Post("/disks/{diskId}/refresh", h.refreshWorkspaceDisk)
+	r.Delete("/disks/{diskId}", h.deleteWorkspaceDisk)
 	r.Get("/spaces/{id}/workspace-cleanups/{operationId}", h.getWorkspaceCleanup)
+}
+
+// Managing tenant storage needs a tenant-wide principal; Space or Agent scoped
+// keys must not create or delete disks other Spaces may use.
+func (h *handler) manageDiskScope(w http.ResponseWriter, r *http.Request) bool {
+	p := principal(r)
+	if p.TenantID == "" || p.SpaceID != "" || p.AgentID != "" || (p.Role != "owner" && p.Role != "admin" && !p.IsPlatformAdmin) || (p.APIKey && !APIKeyScopeAllows(p, "computers:manage")) {
+		httpx.Error(w, 403, "computer management permission required")
+		return false
+	}
+	return true
 }
 
 func workspaceStatusError(w http.ResponseWriter, err error) {
@@ -39,26 +53,47 @@ func workspaceStatusError(w http.ResponseWriter, err error) {
 }
 
 func (h *handler) listWorkspaceDisks(w http.ResponseWriter, r *http.Request) {
-	p, space := principal(r), chi.URLParam(r, "id")
-	if !computerScopeAllowed(p, space, "") {
+	p := principal(r)
+	if p.TenantID == "" || p.SpaceID != "" || p.AgentID != "" {
 		httpx.Error(w, 403, "workspace scope denied")
 		return
 	}
-	if _, err := h.store.GetSpace(r.Context(), p.TenantID, space); err != nil {
+	disks, err := h.workspaceStore().Disks(r.Context(), p.TenantID)
+	if err != nil {
+		workspaceStatusError(w, err)
+		return
+	}
+	cleanups, err := h.workspaceStore().DiskCleanups(r.Context(), p.TenantID)
+	if err != nil {
+		workspaceStatusError(w, err)
+		return
+	}
+	// Name the Space currently using each disk; an instance id alone is opaque.
+	var rows []struct {
+		Instance string `gorm:"column:instance_id"`
+		Space    string `gorm:"column:space_id"`
+		Name     string `gorm:"column:name"`
+	}
+	if err := h.deps.Gorm.WithContext(r.Context()).Table("workspace_instances i").Select("i.id AS instance_id,s.id AS space_id,s.name").Joins("JOIN spaces s ON s.id=i.space_id AND s.tenant_id=i.tenant_id").Where("i.tenant_id=? AND i.state<>'released'", p.TenantID).Scan(&rows).Error; err != nil {
 		statusErr(w, err)
 		return
 	}
-	disks, err := h.workspaceStore().Disks(r.Context(), p.TenantID, space)
-	if err != nil {
-		workspaceStatusError(w, err)
-		return
+	spaces := make(map[string]map[string]string, len(rows))
+	for _, row := range rows {
+		spaces[row.Instance] = map[string]string{"id": row.Space, "name": row.Name}
 	}
-	cleanups, err := h.workspaceStore().Cleanups(r.Context(), p.TenantID, space)
-	if err != nil {
-		workspaceStatusError(w, err)
-		return
+	out := make([]map[string]any, 0, len(disks))
+	for _, d := range disks {
+		item := object(d)
+		item["attachedSpace"] = nil
+		if d.AttachedInstanceID != nil {
+			if space, ok := spaces[*d.AttachedInstanceID]; ok {
+				item["attachedSpace"] = space
+			}
+		}
+		out = append(out, item)
 	}
-	httpx.JSON(w, 200, map[string]any{"disks": disks, "cleanups": cleanups})
+	httpx.JSON(w, 200, map[string]any{"disks": out, "cleanups": cleanups})
 }
 
 func (h *handler) workspaceDiskNode(ctx context.Context, tenant, node string) (*runnerSession, string, error) {
@@ -108,7 +143,7 @@ func verifyWorkspaceNode(ctx context.Context, runner *runnerSession, incarnation
 }
 
 func (h *handler) createWorkspaceDisk(w http.ResponseWriter, r *http.Request) {
-	if !h.manageComputerScope(w, r) {
+	if !h.manageDiskScope(w, r) {
 		return
 	}
 	var in struct {
@@ -119,13 +154,13 @@ func (h *handler) createWorkspaceDisk(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "disk name and nodeId required")
 		return
 	}
-	p, space := principal(r), chi.URLParam(r, "id")
+	p := principal(r)
 	runner, incarnation, err := h.workspaceDiskNode(r.Context(), p.TenantID, in.NodeID)
 	if err != nil {
 		workspaceStatusError(w, err)
 		return
 	}
-	disk, err := h.workspaceStore().RegisterDisk(r.Context(), p.TenantID, space, h.store.id(), in.Name, in.NodeID, incarnation, h.store.now())
+	disk, err := h.workspaceStore().RegisterDisk(r.Context(), p.TenantID, h.store.id(), in.Name, in.NodeID, incarnation, h.store.now())
 	if err != nil {
 		workspaceStatusError(w, err)
 		return
@@ -134,7 +169,7 @@ func (h *handler) createWorkspaceDisk(w http.ResponseWriter, r *http.Request) {
 		// Allocation intent survives a lost reply. Refresh retries this exact disk.
 		_ = h.workspaceStore().DiskError(r.Context(), disk, err, h.store.now())
 	}
-	disk, err = h.workspaceStore().Disk(r.Context(), p.TenantID, space, disk.ID)
+	disk, err = h.workspaceStore().Disk(r.Context(), p.TenantID, disk.ID)
 	if err != nil {
 		workspaceStatusError(w, err)
 		return
@@ -164,11 +199,11 @@ func (h *handler) observeWorkspaceDisk(ctx context.Context, runner *runnerSessio
 }
 
 func (h *handler) refreshWorkspaceDisk(w http.ResponseWriter, r *http.Request) {
-	if !h.manageComputerScope(w, r) {
+	if !h.manageDiskScope(w, r) {
 		return
 	}
-	p, space, id := principal(r), chi.URLParam(r, "id"), chi.URLParam(r, "diskId")
-	disk, err := h.workspaceStore().Disk(r.Context(), p.TenantID, space, id)
+	p, id := principal(r), chi.URLParam(r, "diskId")
+	disk, err := h.workspaceStore().Disk(r.Context(), p.TenantID, id)
 	if err != nil {
 		workspaceStatusError(w, err)
 		return
@@ -188,7 +223,7 @@ func (h *handler) refreshWorkspaceDisk(w http.ResponseWriter, r *http.Request) {
 		workspaceStatusError(w, err)
 		return
 	}
-	disk, err = h.workspaceStore().Disk(r.Context(), p.TenantID, space, id)
+	disk, err = h.workspaceStore().Disk(r.Context(), p.TenantID, id)
 	if err != nil {
 		workspaceStatusError(w, err)
 		return
@@ -197,7 +232,7 @@ func (h *handler) refreshWorkspaceDisk(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) renameWorkspaceDisk(w http.ResponseWriter, r *http.Request) {
-	if !h.manageComputerScope(w, r) {
+	if !h.manageDiskScope(w, r) {
 		return
 	}
 	var in struct {
@@ -207,12 +242,12 @@ func (h *handler) renameWorkspaceDisk(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "disk name required (maximum 200 bytes)")
 		return
 	}
-	p, space, id := principal(r), chi.URLParam(r, "id"), chi.URLParam(r, "diskId")
-	if err := h.workspaceStore().RenameDisk(r.Context(), p.TenantID, space, id, in.Name, h.store.now()); err != nil {
+	p, id := principal(r), chi.URLParam(r, "diskId")
+	if err := h.workspaceStore().RenameDisk(r.Context(), p.TenantID, id, in.Name, h.store.now()); err != nil {
 		workspaceStatusError(w, err)
 		return
 	}
-	disk, err := h.workspaceStore().Disk(r.Context(), p.TenantID, space, id)
+	disk, err := h.workspaceStore().Disk(r.Context(), p.TenantID, id)
 	if err != nil {
 		workspaceStatusError(w, err)
 		return
@@ -221,7 +256,7 @@ func (h *handler) renameWorkspaceDisk(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) deleteWorkspaceDisk(w http.ResponseWriter, r *http.Request) {
-	if !h.manageComputerScope(w, r) {
+	if !h.manageDiskScope(w, r) {
 		return
 	}
 	var in struct {
@@ -231,8 +266,8 @@ func (h *handler) deleteWorkspaceDisk(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "requestId required")
 		return
 	}
-	p, space, id := principal(r), chi.URLParam(r, "id"), chi.URLParam(r, "diskId")
-	operation, err := h.workspaceStore().DeleteDisk(r.Context(), p.TenantID, space, id, in.RequestID, h.store.id(), h.store.now())
+	p, id := principal(r), chi.URLParam(r, "diskId")
+	operation, err := h.workspaceStore().DeleteDisk(r.Context(), p.TenantID, id, in.RequestID, h.store.id(), h.store.now())
 	if err != nil {
 		workspaceStatusError(w, err)
 		return
@@ -256,6 +291,26 @@ func (h *handler) getWorkspaceCleanup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, 200, map[string]any{"operation": operation})
+}
+
+// Token-registered nodes predate installation bootstrap and have no recorded
+// storage identity, which disks require. Record the node's own identity once.
+// Only an empty value is filled: an existing one (including an adopted
+// "legacy:" placeholder) is never replaced, so a swapped storage pool still
+// fails verification instead of silently taking over the old disks.
+func (h *handler) enrollWorkspaceIncarnation(ctx context.Context, runner *runnerSession, tokenHash [32]byte) error {
+	var identity struct {
+		Version     int    `json:"version"`
+		Incarnation string `json:"incarnation"`
+	}
+	if err := runner.call(ctx, "workspace.identity", map[string]any{}, &identity); err != nil {
+		return err
+	}
+	if identity.Version != 1 || !protocol.ValidIdentity(identity.Incarnation) || strings.HasPrefix(identity.Incarnation, "legacy:") {
+		return workspaces.ErrUnverified
+	}
+	_, err := h.deps.DB.ExecContext(ctx, h.deps.Rebind(`UPDATE runtime_nodes SET incarnation=? WHERE id=? AND token_hash=? AND incarnation='' AND kind IN ('server','computer','runner')`), identity.Incarnation, runner.nodeID, hex.EncodeToString(tokenHash[:]))
+	return err
 }
 
 func supportsWorkspaceProtocol(raw string) bool {

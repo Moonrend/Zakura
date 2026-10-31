@@ -56,14 +56,14 @@ func scanInstance(row scanner) (Instance, error) {
 	return i, i.Target.Validate()
 }
 
-func (s Store) disk(ctx context.Context, q querier, tenant, space, id string) (Disk, error) {
-	return scanDisk(q.QueryRowContext(ctx, s.query(`SELECT `+diskColumns+` FROM workspace_disks WHERE tenant_id=? AND space_id=? AND id=?`), tenant, space, id))
+func (s Store) disk(ctx context.Context, q querier, tenant, id string) (Disk, error) {
+	return scanDisk(q.QueryRowContext(ctx, s.query(`SELECT `+diskColumns+` FROM workspace_disks WHERE tenant_id=? AND id=?`), tenant, id))
 }
 func (s Store) instance(ctx context.Context, q querier, tenant, space, id string) (Instance, error) {
 	return scanInstance(q.QueryRowContext(ctx, s.query(`SELECT `+instanceColumns+` FROM workspace_instances WHERE tenant_id=? AND space_id=? AND id=?`), tenant, space, id))
 }
-func (s Store) Disk(ctx context.Context, tenant, space, id string) (Disk, error) {
-	return s.disk(ctx, s.DB, tenant, space, id)
+func (s Store) Disk(ctx context.Context, tenant, id string) (Disk, error) {
+	return s.disk(ctx, s.DB, tenant, id)
 }
 func (s Store) Instance(ctx context.Context, tenant, space, id string) (Instance, error) {
 	return s.instance(ctx, s.DB, tenant, space, id)
@@ -79,8 +79,11 @@ func (s Store) Current(ctx context.Context, tenant, space string) (Instance, err
 	return s.Instance(ctx, tenant, space, id.String)
 }
 
-func (s Store) Disks(ctx context.Context, tenant, space string) ([]Disk, error) {
-	rows, err := s.DB.QueryContext(ctx, s.query(`SELECT `+diskColumns+` FROM workspace_disks WHERE tenant_id=? AND space_id=? AND state<>'deleted' ORDER BY created_at,id`), tenant, space)
+// Disks are tenant storage. SpaceID is set only on legacy-bind disks, whose
+// directory is named after the Space that created it; managed disks leave it
+// empty and can be attached by any Space of the tenant.
+func (s Store) Disks(ctx context.Context, tenant string) ([]Disk, error) {
+	rows, err := s.DB.QueryContext(ctx, s.query(`SELECT `+diskColumns+` FROM workspace_disks WHERE tenant_id=? AND state<>'deleted' ORDER BY created_at,id`), tenant)
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +112,7 @@ func (s Store) Resolve(ctx context.Context, target Target) (Instance, Disk, erro
 	if i.Target != target || !i.Usable() {
 		return i, Disk{}, ErrTargetRevoked
 	}
-	d, err := s.Disk(ctx, target.TenantID, target.SpaceID, target.DiskID)
+	d, err := s.Disk(ctx, target.TenantID, target.DiskID)
 	if err != nil {
 		return i, d, err
 	}

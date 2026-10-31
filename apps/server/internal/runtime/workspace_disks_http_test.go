@@ -18,10 +18,7 @@ import (
 func TestWorkspaceDiskHTTPAndOfflineCleanup(t *testing.T) {
 	d := testDeps(t)
 	seedTenant(t, d, "tenant")
-	space, err := NewStore(d).CreateSpace(context.Background(), "tenant", Space{Name: "Disks"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Disks are tenant storage: creating one needs no Space.
 	var deletes atomic.Int64
 	var loseAllocate, wrongAck atomic.Bool
 	loseAllocate.Store(true)
@@ -62,7 +59,7 @@ func TestWorkspaceDiskHTTPAndOfflineCleanup(t *testing.T) {
 		router.ServeHTTP(w, r)
 		return w
 	}
-	base := "/spaces/" + space.ID + "/disks"
+	base := "/disks"
 	for _, p := range []httpx.Principal{{TenantID: "tenant"}, {TenantID: "tenant", Role: "owner", AgentID: "agent"}, {TenantID: "tenant", Role: "owner", SpaceID: "other"}, {TenantID: "tenant", Role: "owner", APIKey: true, APIKeyScopes: `["api"]`}} {
 		if w := call(http.MethodPost, base, `{"name":"Disk","nodeId":"node"}`, p); w.Code != 403 {
 			t.Fatalf("unauthorized create: %d", w.Code)
@@ -88,8 +85,11 @@ func TestWorkspaceDiskHTTPAndOfflineCleanup(t *testing.T) {
 	if w := call(http.MethodPatch, base+"/"+id, `{"name":"Retained"}`, owner); w.Code != 200 {
 		t.Fatalf("rename: %d %s", w.Code, w.Body)
 	}
-	if w := call(http.MethodGet, base, ``, httpx.Principal{TenantID: "foreign", Role: "owner"}); w.Code != 404 {
-		t.Fatalf("cross tenant: %d", w.Code)
+	if w := call(http.MethodGet, base, ``, httpx.Principal{TenantID: "foreign", Role: "owner"}); w.Code != 200 || strings.Contains(w.Body.String(), id) {
+		t.Fatalf("cross tenant: %d %s", w.Code, w.Body)
+	}
+	if w := call(http.MethodPatch, base+"/"+id, `{"name":"Foreign"}`, httpx.Principal{TenantID: "foreign", Role: "owner"}); w.Code == 200 {
+		t.Fatalf("cross tenant rename: %d", w.Code)
 	}
 	w = call(http.MethodGet, base, "", owner)
 	if w.Code != 200 || strings.Contains(w.Body.String(), "disks/"+id+"/workspace") || !strings.Contains(w.Body.String(), "Retained") {
@@ -110,7 +110,7 @@ func TestWorkspaceDiskHTTPAndOfflineCleanup(t *testing.T) {
 	if err := h.sweepWorkspaceCleanup(context.Background(), 1); err != nil {
 		t.Fatal(err)
 	}
-	job, err := h.workspaceStore().Cleanup(context.Background(), "tenant", space.ID, deletion.Operation.ID)
+	job, err := h.workspaceStore().Cleanup(context.Background(), "tenant", deletion.Operation.SpaceID, deletion.Operation.ID)
 	if err != nil || job.Attempts != 0 || !job.Pending || deletes.Load() != 0 {
 		t.Fatalf("offline cleanup consumed claim: %+v %v", job, err)
 	}
@@ -123,7 +123,7 @@ func TestWorkspaceDiskHTTPAndOfflineCleanup(t *testing.T) {
 	if err := restarted.sweepWorkspaceCleanup(context.Background(), 1); err != nil {
 		t.Fatal(err)
 	}
-	job, err = restarted.workspaceStore().Cleanup(context.Background(), "tenant", space.ID, job.ID)
+	job, err = restarted.workspaceStore().Cleanup(context.Background(), "tenant", job.SpaceID, job.ID)
 	if err != nil || !job.Pending || job.LastError == nil {
 		t.Fatalf("wrong ack completed cleanup: %+v %v", job, err)
 	}
@@ -134,7 +134,7 @@ func TestWorkspaceDiskHTTPAndOfflineCleanup(t *testing.T) {
 	if err := restarted.sweepWorkspaceCleanup(context.Background(), 1); err != nil {
 		t.Fatal(err)
 	}
-	job, err = restarted.workspaceStore().Cleanup(context.Background(), "tenant", space.ID, job.ID)
+	job, err = restarted.workspaceStore().Cleanup(context.Background(), "tenant", job.SpaceID, job.ID)
 	if err != nil || job.Pending || job.Phase != "completed" || deletes.Load() != 2 {
 		t.Fatalf("cleanup: %+v %v deletes=%d", job, err, deletes.Load())
 	}

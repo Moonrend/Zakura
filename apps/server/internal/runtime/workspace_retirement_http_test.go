@@ -86,14 +86,14 @@ func TestWorkspaceRetirementHTTPWhileOffline(t *testing.T) {
 	if err != nil || current.Target != newInstance.Target {
 		t.Fatalf("replacement changed: %+v %v", current, err)
 	}
-	disk, err := h.workspaceStore().Disk(ctx, "tenant", space.ID, old.DiskID)
+	disk, err := h.workspaceStore().Disk(ctx, "tenant", old.DiskID)
 	if err != nil || disk.State != "release_pending" || disk.AttachedInstanceID == nil || *disk.AttachedInstanceID != old.InstanceID {
 		t.Fatalf("offline disk released: %+v %v", disk, err)
 	}
 	if w := call(http.MethodDelete, `{"expectedInstanceId":"new-instance","requestId":"delete-both","deleteDisk":true}`, owner); w.Code != 202 {
 		t.Fatalf("explicit deletion: %d %s", w.Code, w.Body)
 	}
-	disk, err = h.workspaceStore().Disk(ctx, "tenant", space.ID, newInstance.DiskID)
+	disk, err = h.workspaceStore().Disk(ctx, "tenant", newInstance.DiskID)
 	if err != nil || disk.State != "delete_pending" || disk.AttachedInstanceID == nil {
 		t.Fatalf("disk deletion lost obligation: %+v %v", disk, err)
 	}

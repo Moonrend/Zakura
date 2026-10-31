@@ -7,28 +7,6 @@ import { chatAgentHref } from "@/lib/nav";
 import { cn } from "@/lib/utils";
 import { FluidItem } from "@/components/ui/fluid-hover";
 
-export function workspaceState(agent: AgentListItem): {
-  label: string;
-  tone: "ready" | "busy" | "error" | "idle";
-} {
-  if (agent.lastError) return { label: "有错误", tone: "error" };
-  switch (agent.workspaceStatus) {
-    case "ready":
-    case "running":
-      return { label: "运行中", tone: "ready" };
-    case "starting":
-    case "provisioning":
-      return { label: "启动中", tone: "busy" };
-    case "error":
-    case "failed":
-      return { label: "启动失败", tone: "error" };
-    case "stopped":
-      return { label: "已停止", tone: "idle" };
-    default:
-      return { label: agent.needsContainer ? "未启动" : "就绪", tone: "idle" };
-  }
-}
-
 const ACTION_LINK = cn(
   "inline-flex size-7 items-center justify-center rounded-md text-muted-foreground",
   "transition-[background-color,color,transform] duration-150 ease-fluid",
@@ -44,7 +22,6 @@ export function AgentCard({
   agent: AgentListItem;
   baseHref: string;
 }) {
-  const state = workspaceState(agent);
   const initial = agent.name.trim().slice(0, 1).toUpperCase() || "A";
 
   return (
@@ -61,10 +38,7 @@ export function AgentCard({
         </span>
 
         <div className="min-w-0 flex-1 sm:mt-auto sm:pt-6">
-          <div className="flex items-baseline justify-between gap-2">
-            <h3 className="truncate text-sm font-medium tracking-tight">{agent.name}</h3>
-            <span className="shrink-0 text-xs text-muted-foreground sm:hidden">{state.label}</span>
-          </div>
+          <h3 className="truncate text-sm font-medium tracking-tight">{agent.name}</h3>
           {agent.description ? (
             <p className="mt-0.5 line-clamp-1 text-xs text-muted-foreground sm:mt-1 sm:line-clamp-2 sm:leading-relaxed">
               {agent.description}
@@ -78,10 +52,6 @@ export function AgentCard({
             </p>
           ) : null}
         </div>
-
-        <span className="absolute top-4 right-4 hidden text-xs text-muted-foreground sm:block">
-          {state.label}
-        </span>
 
         <div
           className={cn(

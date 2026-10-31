@@ -74,7 +74,7 @@ func (s Store) Retire(ctx context.Context, target Target, requestID, cleanupID s
 	if i.Target != target || i.RevokedAt != nil {
 		return Cleanup{}, ErrConflict
 	}
-	d, err := s.disk(ctx, tx, target.TenantID, target.SpaceID, target.DiskID)
+	d, err := s.disk(ctx, tx, target.TenantID, target.DiskID)
 	if err != nil {
 		return Cleanup{}, err
 	}
@@ -148,7 +148,7 @@ func (s Store) Retire(ctx context.Context, target Target, requestID, cleanupID s
 	if deleteDisk {
 		diskState = "delete_pending"
 	}
-	if err = changed(tx.ExecContext(ctx, s.query(`UPDATE workspace_disks SET state=?,updated_at=? WHERE id=? AND tenant_id=? AND space_id=? AND attached_instance_id=? AND locator_version=?`), diskState, stamp, target.DiskID, target.TenantID, target.SpaceID, target.InstanceID, target.LocatorVersion)); err != nil {
+	if err = changed(tx.ExecContext(ctx, s.query(`UPDATE workspace_disks SET state=?,updated_at=? WHERE id=? AND tenant_id=? AND attached_instance_id=? AND locator_version=?`), diskState, stamp, target.DiskID, target.TenantID, target.InstanceID, target.LocatorVersion)); err != nil {
 		return Cleanup{}, err
 	}
 	if i.IdentityVersion == 2 {
@@ -250,7 +250,7 @@ func (s Store) CompleteRelease(ctx context.Context, c Cleanup, released Target, 
 	if err = changed(tx.ExecContext(ctx, s.query(`UPDATE workspace_instances SET state='released',released_at=?,updated_at=? WHERE id=? AND tenant_id=? AND space_id=? AND generation=? AND node_id=? AND node_incarnation=? AND disk_id=? AND locator_version=? AND revoked_at IS NOT NULL AND state IN ('revoked','releasing')`), stamp, stamp, released.InstanceID, released.TenantID, released.SpaceID, released.Generation, released.NodeID, released.NodeIncarnation, released.DiskID, released.LocatorVersion)); err != nil {
 		return err
 	}
-	if err = changed(tx.ExecContext(ctx, s.query(`UPDATE workspace_disks SET state=?,attached_instance_id=NULL,updated_at=? WHERE id=? AND tenant_id=? AND space_id=? AND node_id=? AND node_incarnation=? AND locator_version=? AND attached_instance_id=? AND state IN ('release_pending','delete_pending')`), diskState, stamp, released.DiskID, released.TenantID, released.SpaceID, released.NodeID, released.NodeIncarnation, released.LocatorVersion, released.InstanceID)); err != nil {
+	if err = changed(tx.ExecContext(ctx, s.query(`UPDATE workspace_disks SET state=?,attached_instance_id=NULL,updated_at=? WHERE id=? AND tenant_id=? AND node_id=? AND node_incarnation=? AND locator_version=? AND attached_instance_id=? AND state IN ('release_pending','delete_pending')`), diskState, stamp, released.DiskID, released.TenantID, released.NodeID, released.NodeIncarnation, released.LocatorVersion, released.InstanceID)); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, s.query(`DELETE FROM workspace_connections WHERE tenant_id=? AND space_id=? AND node_id=? AND workspace_instance_id=?`), released.TenantID, released.SpaceID, released.NodeID, released.InstanceID); err != nil {

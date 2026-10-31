@@ -89,6 +89,7 @@ func (h *handler) acquireSpaceWorkspace(ctx context.Context, tenant, id, operati
 		return nil, err
 	}
 	l.Space.WorkspaceStatus = operation
+	publishWorkspaceChanged(tenant, id)
 	return l, nil
 }
 
@@ -152,7 +153,7 @@ func (l *workspaceLease) check(ctx context.Context) error {
 	return l.fenced(ctx, func(*gorm.DB) error { return nil })
 }
 func (l *workspaceLease) finish(ctx context.Context, status string, patch map[string]any) error {
-	return l.fenced(ctx, func(tx *gorm.DB) error {
+	err := l.fenced(ctx, func(tx *gorm.DB) error {
 		if patch == nil {
 			patch = map[string]any{}
 		}
@@ -163,6 +164,8 @@ func (l *workspaceLease) finish(ctx context.Context, status string, patch map[st
 		}
 		return tx.Table("computer_workspace_leases").Where("space_id=? AND tenant_id=? AND token=?", l.Space.ID, l.Space.TenantID, l.Token).Delete(map[string]any{}).Error
 	})
+	publishWorkspaceChanged(l.Space.TenantID, l.Space.ID)
+	return err
 }
 func (l *workspaceLease) release() {
 	l.once.Do(func() {
@@ -192,6 +195,7 @@ func (l *workspaceLease) uncertain(cause error) error {
 		}
 		return tx.Table("spaces").Where("tenant_id=? AND id=?", l.Space.TenantID, l.Space.ID).Updates(map[string]any{"workspace_status": "error", "last_error": cause.Error(), "updated_at": runtimeTimeString(l.h.store.now())}).Error
 	})
+	publishWorkspaceChanged(l.Space.TenantID, l.Space.ID)
 	return workspaceRunnerError{cause}
 }
 func (l *workspaceLease) applyConfig(ctx context.Context, c workspaceConfig) error {

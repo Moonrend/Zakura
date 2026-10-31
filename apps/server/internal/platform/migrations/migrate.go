@@ -99,6 +99,9 @@ var workspaceAuthTargetsSQL string
 //go:embed sql/0029_workspace_node_removal.sql
 var workspaceNodeRemovalSQL string
 
+//go:embed sql/0030_global_workspace_disks.sql
+var globalWorkspaceDisksSQL string
+
 // postgres replaces sql on PostgreSQL when the dialects need different
 // statements rather than the textual type substitutions of postgresSchema.
 type migration struct {
@@ -136,6 +139,7 @@ var ordered = []migration{
 	{27, "node_installations", nodeInstallationsSQL, ""},
 	{28, "workspace_auth_targets", workspaceAuthTargetsSQL, ""},
 	{29, "workspace_node_removal", workspaceNodeRemovalSQL, ""},
+	{30, "global_workspace_disks", globalWorkspaceDisksSQL, ""},
 }
 
 func Apply(ctx context.Context, db *sql.DB, dialect string, rebind func(string) string) error {

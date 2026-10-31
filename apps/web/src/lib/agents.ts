@@ -1,10 +1,8 @@
 import { api } from "@/lib/api";
 
+/** 工作区配置。运行状态不在列表里给出，见 GET /api/spaces/:id/computer 的实时 workspace 字段。 */
 export type WorkspaceInfo = {
-  status: string;
-  dockerId: string | null;
   image?: string | null;
-  running?: boolean;
   /** "lite" (shell-only) or "full" (display/browser) */
   profile?: "lite" | "full";
 };
@@ -22,7 +20,6 @@ export type AgentListItem = {
   memoryProviderId?: string | null;
   runtimeNodeId?: string | null;
   workspaceKind?: "host" | "container";
-  workspaceStatus?: string;
   lastError?: string | null;
   needsContainer?: boolean;
   /** "shell" (lite image) | "display" (full image) */
@@ -138,17 +135,6 @@ export function statusVariant(s: string) {
   return "secondary" as const;
 }
 
-export function workspaceStatusLabel(s: string | undefined | null) {
-  if (!s || s === "none") return "无容器";
-  if (s === "idle") return "未启动";
-  if (s === "running") return "运行中";
-  if (s === "starting") return "启动中";
-  if (s === "stopping") return "停止中";
-  if (s === "stopped" || s === "exited" || s === "removed") return "已停止";
-  if (s === "error") return "错误";
-  return s;
-}
-
 export function levelColor(level: string) {
   if (level === "error") return "text-destructive";
   if (level === "ok") return "text-success";
@@ -158,10 +144,6 @@ export function levelColor(level: string) {
 
 export function needsContainer(a: { enableComputer?: boolean; needsContainer?: boolean }) {
   return a.needsContainer ?? Boolean(a.enableComputer);
-}
-
-export function getWorkspaceStatus(a: AgentListItem): string {
-  return a.workspace?.status ?? (needsContainer(a) ? "idle" : "none");
 }
 
 export async function fetchAgents() {
@@ -218,14 +200,6 @@ export async function saveSpaceWebProviders(
   body: Pick<Parameters<typeof saveAgentProviders>[1], "webSearch" | "webFetch">,
 ) {
   return api<SpaceWebProviderOptions>(`/api/spaces/${encodeURIComponent(id)}/providers`, { method: "PUT", json: body });
-}
-
-export async function fetchAgentProgress(id: string) {
-  return api<{
-    agent: { lastError: string | null };
-    workspace: WorkspaceInfo;
-    progress: ProgressSnapshot;
-  }>(`/api/agents/${id}/progress`, { cacheTtlMs: false });
 }
 
 export const AGENT_SUBNAV = [

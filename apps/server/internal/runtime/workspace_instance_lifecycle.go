@@ -90,7 +90,7 @@ func (h *handler) configureWorkspaceInstance(w http.ResponseWriter, r *http.Requ
 		httpx.Error(w, http.StatusBadRequest, "choose a verified data disk before creating a workspace")
 		return
 	}
-	disk, err := h.workspaceStore().Disk(ctx, space.TenantID, space.ID, in.DiskID)
+	disk, err := h.workspaceStore().Disk(ctx, space.TenantID, in.DiskID)
 	if err != nil {
 		workspaceStatusError(w, err)
 		return

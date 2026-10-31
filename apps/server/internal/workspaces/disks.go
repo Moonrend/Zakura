@@ -17,8 +17,8 @@ type Config struct {
 
 // RegisterDisk persists an allocation intent. It is not available until the
 // node has created/verified the directory with its matching ownership marker.
-func (s Store) RegisterDisk(ctx context.Context, tenant, space, id, name, node, incarnation string, now time.Time) (Disk, error) {
-	for _, value := range []string{tenant, space, id, node, incarnation} {
+func (s Store) RegisterDisk(ctx context.Context, tenant, id, name, node, incarnation string, now time.Time) (Disk, error) {
+	for _, value := range []string{tenant, id, node, incarnation} {
 		if !identityPattern.MatchString(value) {
 			return Disk{}, errors.New("invalid disk identity")
 		}
@@ -38,21 +38,17 @@ func (s Store) RegisterDisk(ctx context.Context, tenant, space, id, name, node, 
 		return Disk{}, err
 	}
 	defer tx.Rollback()
-	// Lock the Space then node, matching node removal and attachment.
-	if err = changed(tx.ExecContext(ctx, s.query(`UPDATE spaces SET workspace_generation=workspace_generation WHERE tenant_id=? AND id=? AND deletion_pending=FALSE`), tenant, space)); err != nil {
-		return Disk{}, err
-	}
+	// Lock the node, matching node removal and attachment.
 	if err = changed(tx.ExecContext(ctx, s.query(`UPDATE runtime_nodes SET incarnation=incarnation WHERE id=? AND (tenant_id=? OR is_shared=TRUE) AND incarnation=? AND kind IN ('server','computer')`), node, tenant, incarnation)); err != nil {
 		return Disk{}, err
 	}
 	err = changed(tx.ExecContext(ctx, s.query(`INSERT INTO workspace_disks(id,tenant_id,space_id,name,node_id,node_incarnation,locator_json,locator_key,state,created_at,updated_at)
- SELECT ?,s.tenant_id,s.id,?,n.id,n.incarnation,?,?,'pending',?,?
- FROM spaces s JOIN runtime_nodes n ON n.id=? AND (n.tenant_id=s.tenant_id OR n.is_shared=TRUE)
- WHERE s.tenant_id=? AND s.id=? AND s.deletion_pending=FALSE AND n.incarnation=? AND n.kind IN ('server','computer')`), id, name, string(raw), l.RelativePath, stamp, stamp, node, tenant, space, incarnation))
+ SELECT ?,?,'',?,n.id,n.incarnation,?,?,'pending',?,?
+ FROM runtime_nodes n WHERE n.id=? AND (n.tenant_id=? OR n.is_shared=TRUE) AND n.incarnation=? AND n.kind IN ('server','computer')`), id, tenant, name, string(raw), l.RelativePath, stamp, stamp, node, tenant, incarnation))
 	if err != nil {
 		return Disk{}, err
 	}
-	d, err := s.disk(ctx, tx, tenant, space, id)
+	d, err := s.disk(ctx, tx, tenant, id)
 	if err != nil {
 		return Disk{}, err
 	}
@@ -87,11 +83,12 @@ func (s Store) Attach(ctx context.Context, tenant, space, id, diskID, leaseToken
 	if err = changed(tx.ExecContext(ctx, s.query(`UPDATE computer_workspace_leases SET updated_at=? WHERE tenant_id=? AND space_id=? AND token=? AND expires_at>? AND operation='configuring'`), now.UnixMilli(), tenant, space, leaseToken, now.UnixMilli())); err != nil {
 		return Instance{}, err
 	}
-	d, err := s.disk(ctx, tx, tenant, space, diskID)
+	d, err := s.disk(ctx, tx, tenant, diskID)
 	if err != nil {
 		return Instance{}, err
 	}
-	if d.State != "available" || d.VerifiedAt == nil || d.AttachedInstanceID != nil || d.NodeRemovedAt != nil {
+	// A legacy-bind directory is named after its Space and cannot move.
+	if d.SpaceID != "" && d.SpaceID != space || d.State != "available" || d.VerifiedAt == nil || d.AttachedInstanceID != nil || d.NodeRemovedAt != nil {
 		return Instance{}, ErrConflict
 	}
 	var incarnation, computer string
@@ -114,7 +111,7 @@ func (s Store) Attach(ctx context.Context, tenant, space, id, diskID, leaseToken
 	generation++
 	stamp := now.UTC().Format(time.RFC3339Nano)
 	raw, _ := json.Marshal(config)
-	if err = changed(tx.ExecContext(ctx, s.query(`UPDATE workspace_disks SET attached_instance_id=?,state='attached',updated_at=? WHERE id=? AND tenant_id=? AND space_id=? AND state='available' AND attached_instance_id IS NULL AND locator_version=?`), id, stamp, diskID, tenant, space, d.LocatorVersion)); err != nil {
+	if err = changed(tx.ExecContext(ctx, s.query(`UPDATE workspace_disks SET attached_instance_id=?,state='attached',updated_at=? WHERE id=? AND tenant_id=? AND state='available' AND attached_instance_id IS NULL AND locator_version=?`), id, stamp, diskID, tenant, d.LocatorVersion)); err != nil {
 		return Instance{}, err
 	}
 	if _, err = tx.ExecContext(ctx, s.query(`INSERT INTO workspace_instances(id,tenant_id,space_id,computer_id,generation,node_id,node_incarnation,disk_id,locator_version,config_json,identity_version,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,2,'pending',?,?)`), id, tenant, space, computer, generation, d.NodeID, d.NodeIncarnation, diskID, d.LocatorVersion, string(raw), stamp, stamp); err != nil {

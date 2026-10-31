@@ -18,7 +18,8 @@ type Space struct {
 	WorkspaceImage             *string         `json:"workspaceImage"`
 	RuntimeNodeID              *string         `json:"runtimeNodeId"`
 	WorkspaceKind              string          `json:"workspaceKind"`
-	WorkspaceStatus            string          `json:"workspaceStatus"`
+	// Lifecycle serialization only; never shown as state. See observeLiveWorkspace.
+	WorkspaceStatus            string          `json:"-"`
 	CurrentWorkspaceInstanceID *string         `json:"currentWorkspaceInstanceId"`
 	WorkspaceGeneration        int64           `json:"workspaceGeneration"`
 	Config                     json.RawMessage `json:"config"`

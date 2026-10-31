@@ -37,7 +37,7 @@ func TestRuntimeNodeDeletionStopsWorkspaceSynchronization(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			pending, err := h.workspaceStore().RegisterDisk(ctx, "tenant", rig.space.ID, "pending-disk", "Pending", old.NodeID, old.NodeIncarnation, h.store.now())
+			pending, err := h.workspaceStore().RegisterDisk(ctx, "tenant", "pending-disk", "Pending", old.NodeID, old.NodeIncarnation, h.store.now())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -81,7 +81,7 @@ func TestRuntimeNodeDeletionStopsWorkspaceSynchronization(t *testing.T) {
 			if bindings, err := h.workspaceStore().NodeRevocations(ctx, old.NodeID); err != nil || len(bindings) != 0 {
 				t.Fatalf("deleted node still has synchronization work: %v", err)
 			}
-			disk, err := h.workspaceStore().Disk(ctx, "tenant", rig.space.ID, old.DiskID)
+			disk, err := h.workspaceStore().Disk(ctx, "tenant", old.DiskID)
 			if err != nil || disk.NodeRemovedAt == nil || disk.AttachedInstanceID == nil || disk.VerifiedAt == nil {
 				t.Fatalf("node deletion lost disk evidence: %+v %v", disk, err)
 			}
@@ -93,7 +93,7 @@ func TestRuntimeNodeDeletionStopsWorkspaceSynchronization(t *testing.T) {
 				t.Fatalf("node deletion changed requested retention: %s", disk.State)
 			}
 			if !deleteDisk {
-				removed, err := h.workspaceStore().DeleteDisk(ctx, "tenant", rig.space.ID, disk.ID, "forget-disk", "forget-cleanup", h.store.now())
+				removed, err := h.workspaceStore().DeleteDisk(ctx, "tenant", disk.ID, "forget-disk", "forget-cleanup", h.store.now())
 				if err != nil || removed.Pending || removed.Phase != "node_removed" {
 					t.Fatalf("forgotten disk enqueued remote work: %v", err)
 				}
@@ -107,14 +107,14 @@ func TestRuntimeNodeDeletionStopsWorkspaceSynchronization(t *testing.T) {
 					t.Fatalf("deleted node accepted allocation callback: %v", err)
 				}
 			}
-			if _, err := h.workspaceStore().RegisterDisk(ctx, "tenant", rig.space.ID, "late-disk", "Late", old.NodeID, old.NodeIncarnation, h.store.now()); !errors.Is(err, workspaces.ErrConflict) {
+			if _, err := h.workspaceStore().RegisterDisk(ctx, "tenant", "late-disk", "Late", old.NodeID, old.NodeIncarnation, h.store.now()); !errors.Is(err, workspaces.ErrConflict) {
 				t.Fatalf("deleted node accepted a new disk: %v", err)
 			}
-			forgotten, err := h.workspaceStore().DeleteDisk(ctx, "tenant", rig.space.ID, pending.ID, "forget-pending", "forget-pending-cleanup", h.store.now())
+			forgotten, err := h.workspaceStore().DeleteDisk(ctx, "tenant", pending.ID, "forget-pending", "forget-pending-cleanup", h.store.now())
 			if err != nil || forgotten.Pending || forgotten.Phase != "node_removed" {
 				t.Fatalf("pending disk cannot be forgotten after node removal: %v", err)
 			}
-			if disks, err := h.workspaceStore().Disks(ctx, "tenant", rig.space.ID); err != nil || len(disks) != 0 {
+			if disks, err := h.workspaceStore().Disks(ctx, "tenant"); err != nil || len(disks) != 0 {
 				t.Fatalf("removed disk remains in management: %v", err)
 			}
 		})

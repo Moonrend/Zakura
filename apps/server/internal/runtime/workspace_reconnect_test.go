@@ -94,7 +94,7 @@ func TestWorkspaceReconnectFencesRetiredInstanceBeforeReady(t *testing.T) {
 	if err != nil || saved.Target != current.Target {
 		t.Fatalf("reconnect changed current instance: %+v %v", saved, err)
 	}
-	disk, err := rig.h.workspaceStore().Disk(ctx, "tenant", rig.space.ID, old.DiskID)
+	disk, err := rig.h.workspaceStore().Disk(ctx, "tenant", old.DiskID)
 	if err != nil || disk.State != "release_pending" || disk.AttachedInstanceID == nil {
 		t.Fatalf("revocation falsely released disk: %+v %v", disk, err)
 	}

@@ -18,7 +18,6 @@ export type SpaceItem = {
   workspaceImage: string | null;
   runtimeNodeId: string | null;
   workspaceKind: string;
-  workspaceStatus: string;
   workspaceRevision: string | null;
   workspaceHostPath: string;
   isDefault: boolean;

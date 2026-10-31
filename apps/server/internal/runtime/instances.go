@@ -1016,6 +1016,7 @@ func (h *handler) startAgent(w http.ResponseWriter, r *http.Request) {
 	agent, _ = h.store.GetAgent(r.Context(), p.TenantID, agent.ID)
 	result := h.agentDTO(r.Context(), p.TenantID, agent)
 	result["starting"] = true
+	result["workspace"] = h.liveAgentWorkspace(r.Context(), p.TenantID, agent.SpaceID, result["workspace"])
 	httpx.JSON(w, http.StatusOK, result)
 }
 
@@ -1041,7 +1042,26 @@ func (h *handler) stopAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	// Stopping an Agent is not a Space MCP lifecycle operation.
 	agent, _ = h.store.GetAgent(r.Context(), p.TenantID, agent.ID)
-	httpx.JSON(w, http.StatusOK, h.agentDTO(r.Context(), p.TenantID, agent))
+	result := h.agentDTO(r.Context(), p.TenantID, agent)
+	result["workspace"] = h.liveAgentWorkspace(r.Context(), p.TenantID, agent.SpaceID, result["workspace"])
+	httpx.JSON(w, http.StatusOK, result)
+}
+
+// Lifecycle responses carry the observed state so callers need no extra request.
+func (h *handler) liveAgentWorkspace(ctx context.Context, tenant, spaceID string, config any) any {
+	space, err := h.store.GetSpace(ctx, tenant, spaceID)
+	if err != nil {
+		return config
+	}
+	out := map[string]any{}
+	if base, ok := config.(map[string]any); ok {
+		for k, v := range base {
+			out[k] = v
+		}
+	}
+	live := h.observeLiveWorkspace(ctx, space)
+	out["state"], out["operation"], out["error"] = live.State, live.Operation, live.Error
+	return out
 }
 
 func (h *handler) agentProgress(w http.ResponseWriter, r *http.Request) {
@@ -1056,53 +1076,24 @@ func (h *handler) agentProgress(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, err)
 		return
 	}
-	workspaceStatus := space.WorkspaceStatus
-	if workspaceStatus == "" {
-		if space.EnableComputer {
-			workspaceStatus = "idle"
-		} else {
-			workspaceStatus = "none"
-		}
-	}
-	var containerRow struct {
-		DockerID *string `gorm:"column:docker_id"`
-		Image    *string `gorm:"column:image"`
-		Status   *string `gorm:"column:status"`
-	}
-	err = h.deps.Gorm.WithContext(r.Context()).Table("managed_containers").Select("docker_id,image,status").Where("tenant_id = ? AND space_id = ?", p.TenantID, space.ID).Order("created_at DESC").Limit(1).Take(&containerRow).Error
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		statusErr(w, err)
-		return
-	}
-	if containerRow.Status != nil {
-		workspaceStatus = *containerRow.Status
-	}
-	workspaceImage := any(nil)
-	if containerRow.Image != nil {
-		workspaceImage = *containerRow.Image
-	} else if space.WorkspaceImage != nil {
-		workspaceImage = *space.WorkspaceImage
-	}
+	// Progress reflects the live workspace, never the cached container row.
+	live := h.observeLiveWorkspace(r.Context(), space)
 	phase := "idle"
-	running := workspaceStatus == "starting"
-	done := workspaceStatus == "running"
-	if running {
+	if live.Operation != nil && *live.Operation == "starting" {
 		phase = "starting"
-	} else if done {
+	} else if live.State == workspaceLiveRunning {
 		phase = "ready"
-	} else if workspaceStatus == "error" {
+	} else if live.Error != nil {
 		phase = "error"
 	}
+	running, done := phase == "starting", phase == "ready"
 	percent := 0
 	if done {
 		percent = 100
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"agent": map[string]any{"id": agent.ID, "lastError": agent.LastError},
-		"workspace": map[string]any{
-			"status": workspaceStatus, "dockerId": containerRow.DockerID, "image": workspaceImage,
-			"running": workspaceStatus == "running",
-		},
+		"workspace": live,
 		"progress": map[string]any{
 			"agentId": agent.ID, "phase": phase, "percent": percent, "running": running,
 			"done": done, "error": agent.LastError, "events": []any{}, "updatedAt": h.store.now().UnixMilli(),

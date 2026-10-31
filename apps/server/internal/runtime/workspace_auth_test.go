@@ -86,7 +86,7 @@ func TestWorkspaceAuthRetirementTransfersWriters(t *testing.T) {
 					t.Fatalf("retirement did not cancel and clear device attempt: %v", err)
 				}
 			}
-			disk, err := h.workspaceStore().Disk(ctx, "tenant", rig.space.ID, old.DiskID)
+			disk, err := h.workspaceStore().Disk(ctx, "tenant", old.DiskID)
 			if err != nil || disk.State != "release_pending" || disk.AttachedInstanceID == nil || *disk.AttachedInstanceID != old.InstanceID {
 				t.Fatalf("logical retirement released disk: %v", err)
 			}
@@ -137,7 +137,7 @@ func TestWorkspaceAuthRetirementTransfersWriters(t *testing.T) {
 			if err := h.workspaceStore().CompleteRelease(ctx, claimed, old.Target, h.store.now()); err != nil {
 				t.Fatal(err)
 			}
-			disk, err = h.workspaceStore().Disk(ctx, "tenant", rig.space.ID, old.DiskID)
+			disk, err = h.workspaceStore().Disk(ctx, "tenant", old.DiskID)
 			if err != nil || disk.State != "available" || disk.AttachedInstanceID != nil {
 				t.Fatalf("acknowledged disk did not become available: %v", err)
 			}

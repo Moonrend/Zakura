@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -278,27 +277,11 @@ func (h *handler) agentDTO(ctx context.Context, tenant string, a Agent) map[stri
 			root = filepath.Join("data", "workspaces")
 		}
 		needs := space.EnableComputer && space.WorkspaceKind == "container"
-		status := space.WorkspaceStatus
-		if status == "" {
-			status = "none"
-			if needs {
-				status = "idle"
-			}
-		}
-		var container struct {
-			DockerID sql.NullString `gorm:"column:docker_id"`
-			Image    sql.NullString `gorm:"column:image"`
-			Status   sql.NullString `gorm:"column:status"`
-		}
-		if err := h.deps.Gorm.WithContext(ctx).Table("managed_containers").Select("docker_id,image,status").Where("tenant_id=? AND space_id=? AND purpose='workspace'", tenant, space.ID).Order("created_at DESC").Take(&container).Error; err == nil {
-			status = container.Status.String
-		}
 		out["spaceName"] = space.Name
 		out["enableComputer"] = space.EnableComputer
 		out["workspaceImage"] = space.WorkspaceImage
 		out["runtimeNodeId"] = space.RuntimeNodeID
 		out["workspaceKind"] = space.WorkspaceKind
-		out["workspaceStatus"] = space.WorkspaceStatus
 		out["workspaceRevision"] = nil
 		out["lastMigrationId"] = nil
 		out["workspaceHostPath"] = filepath.Join(root, tenant, space.ID)
@@ -312,11 +295,9 @@ func (h *handler) agentDTO(ctx context.Context, tenant string, a Agent) map[stri
 		if space.EnableComputer {
 			profile = "full"
 		}
-		workspaceImage := any(space.WorkspaceImage)
-		if container.Image.Valid {
-			workspaceImage = container.Image.String
-		}
-		out["workspace"] = map[string]any{"status": status, "dockerId": nullableString(container.DockerID), "image": workspaceImage, "running": status == "running", "profile": profile}
+		// Lists must not report a cached container state as fact. The live
+		// status comes from GET /spaces/{id}/computer, which asks the node.
+		out["workspace"] = map[string]any{"image": space.WorkspaceImage, "profile": profile}
 	}
 	return out
 }

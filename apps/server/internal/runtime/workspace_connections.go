@@ -198,7 +198,7 @@ func (h *handler) recoverInstanceConnections(ctx context.Context, tenant, space,
 			if err != nil {
 				return err
 			}
-			disk, err := h.workspaceStore().Disk(ctx, row.TenantID, row.SpaceID, original.DiskID)
+			disk, err := h.workspaceStore().Disk(ctx, row.TenantID, original.DiskID)
 			if err != nil {
 				return err
 			}

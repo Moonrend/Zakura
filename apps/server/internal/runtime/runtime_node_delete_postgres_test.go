@@ -23,13 +23,9 @@ func TestPostgresNodeRemovalSerializesDiskOperations(t *testing.T) {
 				if _, err := d.DB.Exec(d.Rebind(`INSERT INTO runtime_nodes(id,tenant_id,name,slug,kind,status,storage_root,incarnation,created_at,updated_at) VALUES(?,'tenant',?,?,'server','offline','/workspace-data','incarnation','before','before')`), node, node, node); err != nil {
 					t.Fatal(err)
 				}
-				space, err := h.store.CreateSpace(ctx, "tenant", Space{Name: node})
-				if err != nil {
-					t.Fatal(err)
-				}
 				diskID := "disk-" + node
 				if operation == "delete" {
-					disk, err := h.workspaceStore().RegisterDisk(ctx, "tenant", space.ID, diskID, "Data", node, "incarnation", h.store.now())
+					disk, err := h.workspaceStore().RegisterDisk(ctx, "tenant", diskID, "Data", node, "incarnation", h.store.now())
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -43,9 +39,9 @@ func TestPostgresNodeRemovalSerializesDiskOperations(t *testing.T) {
 					<-start
 					var err error
 					if operation == "allocate" {
-						_, err = h.workspaceStore().RegisterDisk(ctx, "tenant", space.ID, diskID, "Data", node, "incarnation", h.store.now())
+						_, err = h.workspaceStore().RegisterDisk(ctx, "tenant", diskID, "Data", node, "incarnation", h.store.now())
 					} else {
-						_, err = h.workspaceStore().DeleteDisk(ctx, "tenant", space.ID, diskID, "request-"+node, "cleanup-"+node, h.store.now())
+						_, err = h.workspaceStore().DeleteDisk(ctx, "tenant", diskID, "request-"+node, "cleanup-"+node, h.store.now())
 					}
 					result <- err
 				}()
@@ -66,7 +62,7 @@ func TestPostgresNodeRemovalSerializesDiskOperations(t *testing.T) {
 					t.Fatalf("cleanup still awaits removed node: count=%d err=%v", pendingJobs, err)
 				}
 				if operation == "allocate" && operationErr == nil {
-					disk, err := h.workspaceStore().Disk(ctx, "tenant", space.ID, diskID)
+					disk, err := h.workspaceStore().Disk(ctx, "tenant", diskID)
 					if err != nil || disk.NodeRemovedAt == nil || disk.State != "pending" {
 						t.Fatalf("accepted allocation lost its removal marker: %+v %v", disk, err)
 					}

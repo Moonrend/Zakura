@@ -76,6 +76,10 @@ func Collect(kind, storageRoot string) InfoResult {
 			"filesystemNoFollowStat":       true,
 			"filesystemWorkspaceMigration": true,
 			"dockerCreateReceipts":         true,
+			// Unpinned requests are fenced out of managed disk storage
+			// (rpc.rejectUnpinnedDiskAccess), so pinned writers are the only
+			// path into a disk and revocation is authoritative.
+			"workspaceProtocolV2": true,
 		},
 		HostInfo:    hi,
 		StorageRoot: storageRoot,

@@ -12,8 +12,9 @@ import (
 	protocol "github.com/Moonrend/Zakura/apps/agent/workspace"
 )
 
-// Partial implementations must not claim workspaceProtocolV2. That capability
-// is enabled only when every writer and lifecycle path participates in fencing.
+// workspaceProtocolV2 relies on every writer participating in fencing: pinned
+// requests go through here, unpinned ones are kept out of disk storage by
+// rejectUnpinnedDiskAccess.
 func (h *Handler) dispatchWorkspace(ctx context.Context, msg Msg, send func(Msg)) bool {
 	var fields map[string]json.RawMessage
 	if strings.HasPrefix(msg.Method, "workspace.") {

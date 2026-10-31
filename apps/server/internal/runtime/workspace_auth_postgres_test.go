@@ -66,7 +66,7 @@ func TestPostgresWorkspaceAuthRetirementSerializesNewWriters(t *testing.T) {
 			if err := h.acpDeviceFinish(ctx, &a, "succeeded", ""); !errors.Is(err, errACPDeviceConflict) {
 				t.Fatalf("in-flight credential callback committed after retirement: %v", err)
 			}
-			disk, err := h.workspaceStore().Disk(ctx, "tenant", space.ID, old.DiskID)
+			disk, err := h.workspaceStore().Disk(ctx, "tenant", old.DiskID)
 			if err != nil || disk.State != "release_pending" || disk.AttachedInstanceID == nil {
 				t.Fatalf("retirement prematurely released disk: %v", err)
 			}

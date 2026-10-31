@@ -15,12 +15,12 @@ func (d Disk) Wire() protocol.Disk {
 	return protocol.Disk{TenantID: d.TenantID, SpaceID: d.SpaceID, DiskID: d.ID, NodeIncarnation: d.NodeIncarnation, LocatorVersion: d.LocatorVersion, Locator: d.Locator}
 }
 
-func (s Store) RenameDisk(ctx context.Context, tenant, space, id, name string, now time.Time) error {
+func (s Store) RenameDisk(ctx context.Context, tenant, id, name string, now time.Time) error {
 	name = strings.TrimSpace(name)
 	if name == "" || len(name) > 200 {
 		return errors.New("disk name is required and must not exceed 200 bytes")
 	}
-	return changed(s.DB.ExecContext(ctx, s.query(`UPDATE workspace_disks SET name=?,updated_at=? WHERE tenant_id=? AND space_id=? AND id=? AND state NOT IN ('deleted','delete_pending') AND EXISTS(SELECT 1 FROM spaces WHERE spaces.id=workspace_disks.space_id AND spaces.tenant_id=workspace_disks.tenant_id AND deletion_pending=FALSE)`), name, now.UTC().Format(time.RFC3339Nano), tenant, space, id))
+	return changed(s.DB.ExecContext(ctx, s.query(`UPDATE workspace_disks SET name=?,updated_at=? WHERE tenant_id=? AND id=? AND state NOT IN ('deleted','delete_pending')`), name, now.UTC().Format(time.RFC3339Nano), tenant, id))
 }
 
 func (s Store) DiskError(ctx context.Context, d Disk, cause error, now time.Time) error {
@@ -40,7 +40,7 @@ func (s Store) SampleUsage(ctx context.Context, d Disk, bytes int64, now time.Ti
 
 // DeleteDisk creates an independent deletion authorization for a released disk.
 // An attached/releasing disk must be retired and released before this operation.
-func (s Store) DeleteDisk(ctx context.Context, tenant, space, diskID, requestID, cleanupID string, now time.Time) (Cleanup, error) {
+func (s Store) DeleteDisk(ctx context.Context, tenant, diskID, requestID, cleanupID string, now time.Time) (Cleanup, error) {
 	if !identityPattern.MatchString(requestID) || !identityPattern.MatchString(cleanupID) {
 		return Cleanup{}, ErrConflict
 	}
@@ -49,9 +49,12 @@ func (s Store) DeleteDisk(ctx context.Context, tenant, space, diskID, requestID,
 		return Cleanup{}, err
 	}
 	defer tx.Rollback()
-	if err := changed(tx.ExecContext(ctx, s.query(`UPDATE spaces SET workspace_generation=workspace_generation WHERE tenant_id=? AND id=? AND deletion_pending=FALSE`), tenant, space)); err != nil {
+	d, err := s.disk(ctx, tx, tenant, diskID)
+	if err != nil {
 		return Cleanup{}, err
 	}
+	// Tombstones are keyed by the disk's owner slot: '' for managed disks.
+	space := d.SpaceID
 	prior, err := scanCleanup(tx.QueryRowContext(ctx, s.query(`SELECT `+cleanupColumns+` FROM workspace_cleanup_tombstones WHERE tenant_id=? AND space_id=? AND request_id=?`), tenant, space, requestID))
 	if err == nil {
 		if prior.DiskID != diskID || prior.InstanceID != nil || !prior.DeleteDisk {
@@ -60,10 +63,6 @@ func (s Store) DeleteDisk(ctx context.Context, tenant, space, diskID, requestID,
 		return prior, tx.Commit()
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return Cleanup{}, err
-	}
-	d, err := s.disk(ctx, tx, tenant, space, diskID)
-	if err != nil {
 		return Cleanup{}, err
 	}
 	if d.NodeRemovedAt == nil {
@@ -87,10 +86,10 @@ func (s Store) DeleteDisk(ctx context.Context, tenant, space, diskID, requestID,
 		// Forgetting a removed node's disk is a control-plane operation only.
 		// Keep its frozen snapshot and never enqueue a remote deletion.
 		phase, pending = "node_removed", false
-		if err := changed(tx.ExecContext(ctx, s.query(`UPDATE workspace_disks SET state='deleted',updated_at=? WHERE tenant_id=? AND space_id=? AND id=? AND node_removed_at IS NOT NULL AND state<>'deleted' AND locator_version=?`), stamp, tenant, space, diskID, d.LocatorVersion)); err != nil {
+		if err := changed(tx.ExecContext(ctx, s.query(`UPDATE workspace_disks SET state='deleted',updated_at=? WHERE tenant_id=? AND id=? AND node_removed_at IS NOT NULL AND state<>'deleted' AND locator_version=?`), stamp, tenant, diskID, d.LocatorVersion)); err != nil {
 			return Cleanup{}, err
 		}
-	} else if err := changed(tx.ExecContext(ctx, s.query(`UPDATE workspace_disks SET state='delete_pending',updated_at=? WHERE tenant_id=? AND space_id=? AND id=? AND state='available' AND attached_instance_id IS NULL AND locator_version=?`), stamp, tenant, space, diskID, d.LocatorVersion)); err != nil {
+	} else if err := changed(tx.ExecContext(ctx, s.query(`UPDATE workspace_disks SET state='delete_pending',updated_at=? WHERE tenant_id=? AND id=? AND state='available' AND attached_instance_id IS NULL AND locator_version=?`), stamp, tenant, diskID, d.LocatorVersion)); err != nil {
 		return Cleanup{}, err
 	}
 	if _, err := tx.ExecContext(ctx, s.query(`INSERT INTO workspace_cleanup_tombstones(id,tenant_id,space_id,request_id,disk_id,node_id,node_incarnation,snapshot_json,delete_disk,phase,pending,next_attempt,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,TRUE,?,?,?,?,?)`), cleanupID, tenant, space, requestID, diskID, d.NodeID, d.NodeIncarnation, string(raw), phase, pending, now.UnixMilli(), stamp, now.UnixMilli()); err != nil {
@@ -125,6 +124,24 @@ func (s Store) CompleteDiskDeletion(ctx context.Context, c Cleanup, deleted prot
 
 func (s Store) Cleanups(ctx context.Context, tenant, space string) ([]Cleanup, error) {
 	rows, err := s.DB.QueryContext(ctx, s.query(`SELECT `+cleanupColumns+` FROM workspace_cleanup_tombstones WHERE tenant_id=? AND space_id=? AND pending=TRUE ORDER BY created_at,id`), tenant, space)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []Cleanup{}
+	for rows.Next() {
+		c, err := scanCleanup(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, c)
+	}
+	return result, rows.Err()
+}
+
+// DiskCleanups lists pending obligations across all of the tenant's disks.
+func (s Store) DiskCleanups(ctx context.Context, tenant string) ([]Cleanup, error) {
+	rows, err := s.DB.QueryContext(ctx, s.query(`SELECT `+cleanupColumns+` FROM workspace_cleanup_tombstones WHERE tenant_id=? AND pending=TRUE ORDER BY created_at,id`), tenant)
 	if err != nil {
 		return nil, err
 	}

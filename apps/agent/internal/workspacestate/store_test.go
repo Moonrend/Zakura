@@ -20,7 +20,7 @@ func fixture(t *testing.T) (Store, protocol.Binding) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := protocol.Disk{TenantID: "tenant", SpaceID: "space", DiskID: "disk", NodeIncarnation: identity.Incarnation, LocatorVersion: 1,
+	d := protocol.Disk{TenantID: "tenant", DiskID: "disk", NodeIncarnation: identity.Incarnation, LocatorVersion: 1,
 		Locator: protocol.Locator{Kind: "directory", RelativePath: "disks/disk/workspace"}}
 	binding := protocol.Binding{Disk: d, Target: protocol.Target{TenantID: "tenant", SpaceID: "space", DiskID: "disk", NodeID: "node", NodeIncarnation: identity.Incarnation, LocatorVersion: 1, InstanceID: "instance", Generation: 1}}
 	return s, binding
@@ -100,7 +100,7 @@ func TestMissingOrReplacedStorageNeverBecomesEmptyDisk(t *testing.T) {
 func TestLegacyAdoptionDoesNotCreateOrReplaceContents(t *testing.T) {
 	s, b := fixture(t)
 	ctx := context.Background()
-	b.Disk.Locator = protocol.Locator{Kind: "legacy-bind", RelativePath: "spaces/space/workspace"}
+	b.Disk.SpaceID, b.Disk.Locator = "space", protocol.Locator{Kind: "legacy-bind", RelativePath: "spaces/space/workspace"}
 	if err := s.Allocate(ctx, b.Disk); !os.IsNotExist(err) {
 		t.Fatalf("missing legacy data: %v", err)
 	}

@@ -115,11 +115,13 @@ func TestACPDispatchesThroughSelectedRuntimeNode(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	code, out := doJSON(t, server.Client(), "POST", server.URL+"/api/agents/"+agent.ID+"/start", token, map[string]any{})
-	if code != 200 || out["starting"] != true || out["workspaceStatus"] != "running" {
+	if workspace, _ := out["workspace"].(map[string]any); code != 200 || out["starting"] != true || workspace["state"] != "running" {
 		t.Fatalf("runner workspace start: %d %#v", code, out)
 	}
 	code, out = doJSON(t, server.Client(), "POST", server.URL+"/api/agents/"+agent.ID+"/stop", token, map[string]any{})
-	if code != 200 || out["workspaceStatus"] != "stopped" {
+	// A host workspace is a directory: nothing stops, and the node is still
+	// online, so the observed state stays running. Only a cache said "stopped".
+	if workspace, _ := out["workspace"].(map[string]any); code != 200 || workspace["state"] != "running" || out["workspaceStatus"] != nil {
 		t.Fatalf("runner workspace stop: %d %#v", code, out)
 	}
 	code, out = doJSON(t, server.Client(), "PUT", server.URL+"/api/agents/"+agent.ID+"/acp/agents/codex", token, map[string]any{"command": "codex"})

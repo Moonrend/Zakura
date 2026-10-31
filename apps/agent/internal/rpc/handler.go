@@ -102,6 +102,10 @@ func (h *Handler) Dispatch(ctx context.Context, msg Msg, send func(Msg)) {
 			return
 		}
 	}
+	if err := h.rejectUnpinnedDiskAccess(msg.Method, msg.Params); err != nil {
+		send(Err(msg.ID, err.Error()))
+		return
+	}
 	if err := h.rejectUnpinnedContainer(ctx, msg.Method, msg.Params); err != nil {
 		send(Err(msg.ID, err.Error()))
 		return

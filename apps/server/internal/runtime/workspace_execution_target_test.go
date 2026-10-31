@@ -19,7 +19,7 @@ func attachTestWorkspace(t *testing.T, h *handler, space, diskID, instanceID str
 	if _, err := h.deps.DB.Exec(`UPDATE runtime_nodes SET incarnation='incarnation' WHERE id='node'`); err != nil {
 		t.Fatal(err)
 	}
-	disk, err := h.workspaceStore().RegisterDisk(ctx, "tenant", space, diskID, diskID, "node", "incarnation", h.store.now())
+	disk, err := h.workspaceStore().RegisterDisk(ctx, "tenant", diskID, diskID, "node", "incarnation", h.store.now())
 	if err != nil {
 		t.Fatal(err)
 	}
