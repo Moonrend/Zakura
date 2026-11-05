@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zakura-sdk"
+version = "0.1.0"
+description = "Zakura REST SDK with explicit path parameters and bounded transport"
+requires-python = ">=3.10"
+license = "AGPL-3.0-only"
+
+[tool.setuptools.packages.find]
+include = ["zakura_sdk*"]

@@ -187,6 +187,18 @@ importers:
         specifier: ^5.8.3
         version: 5.9.3
 
+  sdks/typescript:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.15.30
+        version: 22.20.1
+      tsx:
+        specifier: ^4.19.4
+        version: 4.23.0
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+
 packages:
 
   '@alloc/quick-lru@5.2.0':
