@@ -335,6 +335,23 @@ func runnerShellInstaller(server, token, kind, prelude string) string {
 }
 
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
+
+var errRuntimeNodeUpdateForbidden = errors.New("platform admin required")
+
+func (h *handler) authorizeRuntimeNodeUpdate(ctx context.Context, actor httpx.Principal, nodeID string) error {
+	if !actor.IsPlatformAdmin {
+		return errRuntimeNodeUpdateForbidden
+	}
+	var count int64
+	if err := h.deps.Gorm.WithContext(ctx).Table("runtime_nodes").Where("tenant_id=? AND id=?", actor.TenantID, nodeID).Count(&count).Error; err != nil {
+		return err
+	}
+	if count != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (h *handler) getRuntimeNodeMap(r *http.Request) (map[string]any, error) {
 	node, err := scanRuntimeNode(h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT id,name,slug,kind,status,endpoint,capabilities_json,host_info_json,storage_root,agent_version,last_seen_at,labels_json,is_shared,created_at,updated_at FROM runtime_nodes WHERE (tenant_id=? OR is_shared=true) AND id=?`, principal(r).TenantID, chi.URLParam(r, "id")).Row())
 	if err == nil {
@@ -426,6 +443,14 @@ func (h *handler) runtimeNodeVersion(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, result)
 }
 func (h *handler) runtimeUpdateInfo(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeRuntimeNodeUpdate(r.Context(), principal(r), chi.URLParam(r, "id")); err != nil {
+		if errors.Is(err, errRuntimeNodeUpdateForbidden) {
+			httpx.Error(w, http.StatusForbidden, err.Error())
+		} else {
+			statusErr(w, err)
+		}
+		return
+	}
 	id := r.URL.Query().Get("id")
 	if id == "" {
 		httpx.Error(w, http.StatusBadRequest, "id required")
@@ -441,8 +466,12 @@ func (h *handler) runtimeUpdateInfo(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{"update": job})
 }
 func (h *handler) runtimeUpdateRunner(w http.ResponseWriter, r *http.Request) {
-	if _, err := h.getRuntimeNodeMap(r); err != nil {
-		statusErr(w, err)
+	if err := h.authorizeRuntimeNodeUpdate(r.Context(), principal(r), chi.URLParam(r, "id")); err != nil {
+		if errors.Is(err, errRuntimeNodeUpdateForbidden) {
+			httpx.Error(w, http.StatusForbidden, err.Error())
+		} else {
+			statusErr(w, err)
+		}
 		return
 	}
 	session, err := h.hub.get(chi.URLParam(r, "id"))
