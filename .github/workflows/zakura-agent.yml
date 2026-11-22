@@ -61,13 +61,13 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: zakura-agent-binaries
-          path: go/agent/dist
+          path: apps/agent/dist
       - name: attach raw binaries
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload "${GITHUB_REF_NAME}" \
-            go/agent/dist/zakura-agent_* \
-            go/agent/dist/VERSION \
-            go/agent/dist/checksums.txt \
+            apps/agent/dist/zakura-agent_* \
+            apps/agent/dist/VERSION \
+            apps/agent/dist/checksums.txt \
             --clobber
