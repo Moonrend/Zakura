@@ -881,6 +881,10 @@ func TestOIDCSSOWithDeterministicFakeIdP(t *testing.T) {
 	}
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	var nonce atomic.Value
+	var claimedEmail atomic.Value
+	var claimedSubject atomic.Value
+	claimedEmail.Store("member@corp.example")
+	claimedSubject.Store("subject-1")
 	var idp *httptest.Server
 	idp = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		switch req.URL.Path {
@@ -890,7 +894,7 @@ func TestOIDCSSOWithDeterministicFakeIdP(t *testing.T) {
 			kid := sha256.Sum256(pub)
 			json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]any{{"kty": "OKP", "crv": "Ed25519", "kid": fmt.Sprintf("%x", kid[:8]), "x": base64.RawURLEncoding.EncodeToString(pub)}}})
 		case "/token":
-			claims := jwt.MapClaims{"iss": idp.URL, "aud": "sso-client", "sub": "subject-1", "email": "member@corp.example", "name": "Member", "nonce": nonce.Load().(string), "iat": time.Now().Add(-time.Minute).Unix(), "exp": time.Now().Add(time.Hour).Unix()}
+			claims := jwt.MapClaims{"iss": idp.URL, "aud": "sso-client", "sub": claimedSubject.Load().(string), "email": claimedEmail.Load().(string), "name": "Member", "nonce": nonce.Load().(string), "iat": time.Now().Add(-time.Minute).Unix(), "exp": time.Now().Add(time.Hour).Unix()}
 			tok := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
 			kid := sha256.Sum256(pub)
 			tok.Header["kid"] = fmt.Sprintf("%x", kid[:8])
@@ -996,18 +1000,33 @@ func TestOIDCSSOWithDeterministicFakeIdP(t *testing.T) {
 	if blockedRegistration.Code != http.StatusForbidden || !strings.Contains(blockedRegistration.Body.String(), `"code":"sso_required"`) {
 		t.Fatalf("SSO registration barrier: %d %s", blockedRegistration.Code, blockedRegistration.Body.String())
 	}
-	start := call(t, r, http.MethodPost, "/api/auth/sso/oidc/start", map[string]any{"email": "member@corp.example"}, "")
-	if start.Code != 200 {
-		t.Fatalf("start: %d %s", start.Code, start.Body.String())
+	loginWithClaims := func(email, subject string) *httptest.ResponseRecorder {
+		claimedEmail.Store(email)
+		claimedSubject.Store(subject)
+		start := call(t, r, http.MethodPost, "/api/auth/sso/oidc/start", map[string]any{"email": "member@corp.example"}, "")
+		if start.Code != http.StatusOK {
+			t.Fatalf("start: %d %s", start.Code, start.Body.String())
+		}
+		var begin struct {
+			URL   string `json:"url"`
+			State string `json:"state"`
+		}
+		decode(t, start, &begin)
+		authURL, _ := url.Parse(begin.URL)
+		nonce.Store(authURL.Query().Get("nonce"))
+		return call(t, r, http.MethodPost, "/api/auth/sso/oidc/callback", map[string]any{"code": "fake-code", "state": begin.State}, "")
 	}
-	var begin struct {
-		URL   string `json:"url"`
-		State string `json:"state"`
+
+	impersonation := loginWithClaims("owner@example.com", "attacker-subject")
+	if impersonation.Code != http.StatusForbidden || !strings.Contains(impersonation.Body.String(), "not linked") {
+		t.Fatalf("existing account impersonation was accepted: %d %s", impersonation.Code, impersonation.Body.String())
 	}
-	decode(t, start, &begin)
-	authURL, _ := url.Parse(begin.URL)
-	nonce.Store(authURL.Query().Get("nonce"))
-	callback := call(t, r, http.MethodPost, "/api/auth/sso/oidc/callback", map[string]any{"code": "fake-code", "state": begin.State}, "")
+	var attackerBindings int
+	if err := deps.DB.QueryRow(`SELECT COUNT(*) FROM oauth_identities WHERE provider_user_id='attacker-subject'`).Scan(&attackerBindings); err != nil || attackerBindings != 0 {
+		t.Fatalf("attacker identity was persisted: bindings=%d err=%v", attackerBindings, err)
+	}
+
+	callback := loginWithClaims("member@corp.example", "subject-1")
 	if callback.Code != 200 {
 		t.Fatalf("callback: %d %s", callback.Code, callback.Body.String())
 	}
@@ -1017,6 +1036,29 @@ func TestOIDCSSOWithDeterministicFakeIdP(t *testing.T) {
 	decode(t, callback, &result)
 	if result.Session == "" {
 		t.Fatal("missing SSO session")
+	}
+	var bindingCount int
+	if err := deps.DB.QueryRow(`SELECT COUNT(*) FROM oauth_identities WHERE provider LIKE 'enterprise-sso:%' AND provider_user_id='subject-1'`).Scan(&bindingCount); err != nil || bindingCount != 1 {
+		t.Fatalf("enterprise identity binding missing: count=%d err=%v", bindingCount, err)
+	}
+
+	renamed := loginWithClaims("renamed@corp.example", "subject-1")
+	if renamed.Code != http.StatusOK {
+		t.Fatalf("bound identity with changed email: %d %s", renamed.Code, renamed.Body.String())
+	}
+	var boundEmail string
+	if err := deps.DB.QueryRow(`SELECT u.email FROM oauth_identities i JOIN users u ON u.id=i.user_id WHERE i.provider_user_id='subject-1'`).Scan(&boundEmail); err != nil || boundEmail != "member@corp.example" {
+		t.Fatalf("bound identity selected asserted email: email=%q err=%v", boundEmail, err)
+	}
+
+	differentSubject := loginWithClaims("member@corp.example", "subject-2")
+	if differentSubject.Code != http.StatusForbidden || !strings.Contains(differentSubject.Body.String(), "not linked") {
+		t.Fatalf("unbound subject reused existing email: %d %s", differentSubject.Code, differentSubject.Body.String())
+	}
+
+	unverifiedDomain := loginWithClaims("new@outside.example", "outside-subject")
+	if unverifiedDomain.Code != http.StatusForbidden || !strings.Contains(unverifiedDomain.Body.String(), "not verified") {
+		t.Fatalf("unverified-domain JIT account was accepted: %d %s", unverifiedDomain.Code, unverifiedDomain.Body.String())
 	}
 }
 
