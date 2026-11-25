@@ -71,7 +71,7 @@ func (g *Gateway) evaluateApproval(ctx context.Context, tenant, selected string,
 	if cfg.APIKey == "" {
 		return nil, errors.New("Jev credential is not configured")
 	}
-	target, err := safeProviderURL(firstNonEmpty(cfg.BaseURL, jevDefaultBaseURL), "/v1/systemone")
+	target, err := g.providerURL(firstNonEmpty(cfg.BaseURL, jevDefaultBaseURL), "/v1/systemone")
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +114,7 @@ func (g *Gateway) evaluateApproval(ctx context.Context, tenant, selected string,
 		timeout = 30000
 	}
 	started := time.Now()
-	resp, err := clientWithTimeout(g.client, timeout).Do(req)
+	resp, err := clientWithTimeout(g.providerHTTPClient(), timeout).Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()

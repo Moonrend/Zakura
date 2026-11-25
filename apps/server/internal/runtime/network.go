@@ -283,7 +283,7 @@ func (h *handler) testExposureProvider(w http.ResponseWriter, r *http.Request) {
 	var ok bool
 	var message string
 	if endpoint != "" {
-		u, e := safeProviderURL(endpoint, "")
+		u, e := serviceURL(endpoint, "")
 		if e != nil {
 			statusErr(w, e)
 			return
@@ -475,7 +475,7 @@ func (h *handler) createExposure(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "provider controlUrl required")
 		return
 	}
-	u, e := safeProviderURL(control, "")
+	u, e := serviceURL(control, "")
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -751,7 +751,7 @@ func (h *handler) putPlatformHeadscale(w http.ResponseWriter, r *http.Request) {
 		stored.URL = strings.TrimRight(strings.TrimSpace(*b.URL), "/")
 	}
 	if b.URL != nil && stored.URL != "" {
-		if _, e := safeProviderURL(stored.URL, ""); e != nil {
+		if _, e := serviceURL(stored.URL, ""); e != nil {
 			statusErr(w, e)
 			return
 		}
@@ -1208,7 +1208,7 @@ func (h *handler) ensureMeshACL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	raw, _ := json.Marshal(policy)
-	u, e := safeProviderURL(strings.TrimRight(base, "/")+"/api/v1/policy", "")
+	u, e := serviceURL(strings.TrimRight(base, "/")+"/api/v1/policy", "")
 	if e != nil {
 		statusErr(w, e)
 		return

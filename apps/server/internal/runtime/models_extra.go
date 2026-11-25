@@ -24,6 +24,9 @@ func validModelCapability(capability string) bool {
 }
 
 func (h *handler) patchUpstream(w http.ResponseWriter, r *http.Request) {
+	if !requireProviderAdmin(w, r) {
+		return
+	}
 	m, e := decodeMap(r)
 	if e != nil {
 		httpx.Error(w, 400, "invalid JSON")

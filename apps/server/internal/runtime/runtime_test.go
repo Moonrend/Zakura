@@ -22,6 +22,7 @@ import (
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/migrations"
 	"github.com/go-chi/chi/v5"
+	"github.com/golang-jwt/jwt/v5"
 	_ "github.com/mattn/go-sqlite3"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -51,7 +52,7 @@ func testDepsTB(t testing.TB) *appdeps.Dependencies {
 	if gerr != nil {
 		t.Fatal(gerr)
 	}
-	return &appdeps.Dependencies{Context: ctx, DB: db, Gorm: gdb, Dialect: "sqlite", Rebind: appdeps.IdentityRebind, Clock: func() time.Time { return time.Now().UTC() }, NewID: func() string { return fmt.Sprintf("id-%06d", n.Add(1)) }, Secret: bytes.Repeat([]byte("s"), 32), PublicURL: "http://example.test"}
+	return &appdeps.Dependencies{Context: ctx, DB: db, Gorm: gdb, Dialect: "sqlite", Rebind: appdeps.IdentityRebind, Clock: func() time.Time { return time.Now().UTC() }, NewID: func() string { return fmt.Sprintf("id-%06d", n.Add(1)) }, Secret: bytes.Repeat([]byte("s"), 32), PublicURL: "http://example.test", ProviderTestPrivate: true}
 }
 func seedTenant(t testing.TB, d *appdeps.Dependencies, id string) string {
 	t.Helper()
@@ -63,6 +64,31 @@ func seedTenant(t testing.TB, d *appdeps.Dependencies, id string) string {
 	sum := sha256.Sum256([]byte(token))
 	if _, e := d.DB.Exec(d.Rebind(`INSERT INTO api_keys(id,tenant_id,name,key_prefix,key_hash,created_at) VALUES(?,?,?,?,?,?)`), "key-"+id, id, "test", token[:5], hex.EncodeToString(sum[:]), now); e != nil {
 		t.Fatal(e)
+	}
+	return token
+}
+
+func seedProviderAdmin(t testing.TB, d *appdeps.Dependencies, tenant string) string {
+	t.Helper()
+	seedTenant(t, d, tenant)
+	now := d.Clock().UTC()
+	expires := now.Add(time.Hour)
+	userID := "provider-admin-" + tenant
+	sessionID := "provider-session-" + tenant
+	email := "provider-admin-" + tenant + "@example.test"
+	if _, err := d.DB.Exec(d.Rebind(`INSERT INTO users(id,email,password_hash,name,status,is_platform_admin,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`), userID, email, "unused", "Provider Admin", "active", false, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.DB.Exec(d.Rebind(`INSERT INTO tenant_memberships(id,tenant_id,user_id,role,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`), "provider-membership-"+tenant, tenant, userID, "owner", "active", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"sub": userID, "tenantId": tenant, "email": email, "role": "owner", "sid": sessionID, "isPlatformAdmin": false, "iat": now.Unix(), "exp": expires.Unix()}).SignedString(d.Secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(token))
+	if _, err = d.DB.Exec(d.Rebind(`INSERT INTO user_sessions(id,user_id,tenant_id,email,role,is_platform_admin,token_hash,expires_at,last_seen_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`), sessionID, userID, tenant, email, "owner", false, hex.EncodeToString(sum[:]), expires.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
 	}
 	return token
 }
@@ -100,7 +126,7 @@ func doArray(t *testing.T, c *http.Client, method, url, token string) (int, []an
 
 func TestHTTPDurabilityTenantIsolationAndQueue(t *testing.T) {
 	d := testDeps(t)
-	tok1, tok2 := seedTenant(t, d, "tenant-a"), seedTenant(t, d, "tenant-b")
+	tok1, tok2 := seedProviderAdmin(t, d, "tenant-a"), seedTenant(t, d, "tenant-b")
 	entered := make(chan struct{}, 2)
 	release := make(chan struct{})
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -258,6 +284,53 @@ func TestRunCancellationAndPathJail(t *testing.T) {
 	}
 }
 
+func TestFileShareResponsePolicy(t *testing.T) {
+	tests := []struct {
+		name            string
+		mimeType        string
+		disposition     string
+		wantMIME        string
+		wantDisposition string
+	}{
+		{name: "raster image remains inline", mimeType: "image/png", disposition: "inline", wantMIME: "image/png", wantDisposition: "inline"},
+		{name: "plain text remains inline", mimeType: "text/plain; charset=utf-8", disposition: "inline", wantMIME: "text/plain; charset=utf-8", wantDisposition: "inline"},
+		{name: "html becomes attachment", mimeType: "text/html; charset=utf-8", disposition: "inline", wantMIME: "text/html; charset=utf-8", wantDisposition: "attachment"},
+		{name: "svg becomes attachment", mimeType: "image/svg+xml", disposition: "inline", wantMIME: "image/svg+xml", wantDisposition: "attachment"},
+		{name: "pdf becomes attachment", mimeType: "application/pdf", disposition: "inline", wantMIME: "application/pdf", wantDisposition: "attachment"},
+		{name: "malformed mime becomes download", mimeType: "text/plain\r\nContent-Type: text/html", disposition: "inline", wantMIME: "application/octet-stream", wantDisposition: "attachment"},
+		{name: "missing mime becomes download", disposition: "inline", wantMIME: "application/octet-stream", wantDisposition: "attachment"},
+		{name: "requested attachment remains download", mimeType: "image/png", disposition: "attachment", wantMIME: "image/png", wantDisposition: "attachment"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			gotMIME, gotDisposition := fileShareResponsePolicy(test.mimeType, test.disposition)
+			if gotMIME != test.wantMIME || gotDisposition != test.wantDisposition {
+				t.Fatalf("policy(%q, %q) = (%q, %q), want (%q, %q)", test.mimeType, test.disposition, gotMIME, gotDisposition, test.wantMIME, test.wantDisposition)
+			}
+		})
+	}
+}
+
+func TestFileShareResponseHeadersRevalidateStoredPolicy(t *testing.T) {
+	response := httptest.NewRecorder()
+	name := setFileShareResponseHeaders(response, "text/html", "inline", "attack.html", 42)
+	if name != "attack.html" {
+		t.Fatalf("response filename: %q", name)
+	}
+	if got := response.Header().Get("Content-Disposition"); got != `attachment; filename="attack.html"` {
+		t.Fatalf("stored active content disposition: %q", got)
+	}
+	if got := response.Header().Get("Content-Type"); got != "text/html" {
+		t.Fatalf("response content type: %q", got)
+	}
+	if got := response.Header().Get("Content-Security-Policy"); got != "default-src 'none'; sandbox" {
+		t.Fatalf("response CSP: %q", got)
+	}
+	if got := response.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("response content type protection: %q", got)
+	}
+}
+
 func TestRunnerEnrollmentAndFileShare(t *testing.T) {
 	d := testDeps(t)
 	token := seedTenant(t, d, "tenant")
@@ -343,11 +416,15 @@ func TestRunnerEnrollmentAndFileShare(t *testing.T) {
 	if code != 409 {
 		t.Fatalf("expected revision conflict, got %d", code)
 	}
-	code, out = doJSON(t, client, "POST", server.URL+"/api/agents/"+agent+"/fs/share", token, map[string]any{"path": "report.txt", "ttlMinutes": 5})
+	code, out = doJSON(t, client, "POST", server.URL+"/api/agents/"+agent+"/fs/share", token, map[string]any{"path": "report.txt", "mimeType": "text/html", "disposition": "inline", "ttlMinutes": 5})
 	if code != 201 {
 		t.Fatalf("share: %d %#v", code, out)
 	}
-	shareURL := out["share"].(map[string]any)["url"].(string)
+	share := out["share"].(map[string]any)
+	if share["disposition"] != "attachment" {
+		t.Fatalf("active content disposition: %#v", share)
+	}
+	shareURL := share["url"].(string)
 	shareURL = strings.Replace(shareURL, d.PublicURL, server.URL, 1)
 	resp, e := client.Get(shareURL)
 	if e != nil {
@@ -357,5 +434,14 @@ func TestRunnerEnrollmentAndFileShare(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 || string(body) != "durable report" {
 		t.Fatalf("download: %d %q", resp.StatusCode, body)
+	}
+	if got := resp.Header.Get("Content-Disposition"); !strings.HasPrefix(got, "attachment;") {
+		t.Fatalf("active content served inline: %q", got)
+	}
+	if got := resp.Header.Get("Content-Security-Policy"); got != "default-src 'none'; sandbox" {
+		t.Fatalf("share CSP: %q", got)
+	}
+	if got := resp.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("share content type protection: %q", got)
 	}
 }

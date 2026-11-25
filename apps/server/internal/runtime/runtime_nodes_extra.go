@@ -27,6 +27,7 @@ import (
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
 )
 
 var runnerTokenCache sync.Map
@@ -106,6 +107,7 @@ func (h *handler) registerRuntimeNode(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
+	runnerTokenCache.Delete(nodeID)
 	node, e := scanRuntimeNode(h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT id,name,slug,kind,status,endpoint,capabilities_json,host_info_json,storage_root,agent_version,last_seen_at,labels_json,is_shared,created_at,updated_at FROM runtime_nodes WHERE id=?`, nodeID).Row())
 	if e != nil {
 		statusErr(w, e)
@@ -164,26 +166,36 @@ func (h *handler) runtimeAgentBinary(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, file)
 }
 func (h *handler) runtimeInstallInfo(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeRuntimeNodeInstall(r.Context(), principal(r), chi.URLParam(r, "id")); err != nil {
+		if errors.Is(err, errRuntimeNodeInstallForbidden) {
+			httpx.Error(w, http.StatusForbidden, err.Error())
+		} else {
+			statusErr(w, err)
+		}
+		return
+	}
 	node, e := h.getRuntimeNodeMap(r)
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
-	token, _ := runnerTokenCache.Load(chi.URLParam(r, "id"))
-	if token == nil {
+	cached, ok := runnerTokenCache.Load(chi.URLParam(r, "id"))
+	token, ok := cached.(string)
+	if !ok {
 		httpx.Error(w, http.StatusBadRequest, "registration token is no longer available; recreate the node")
 		return
 	}
 	loginServer, tsAvailable := h.runnerTailscaleMeta(r.Context(), principal(r).TenantID)
-	install := h.runnerInstallPackage(node, token.(string), "")
+	install := h.runnerInstallPackage(node, token, "")
 	installTailscale := any(nil)
 	if tsAvailable {
-		installTailscale = h.runnerInstallPackage(node, token.(string), loginServer)
+		installTailscale = h.runnerInstallPackage(node, token, loginServer)
 	}
 	var meshProvider any
 	if tsAvailable {
 		meshProvider = "headscale-platform"
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	httpx.JSON(w, http.StatusOK, map[string]any{"node": node, "install": install, "installTailscale": installTailscale, "meshConnected": tsAvailable, "hostJoinsTailscale": tsAvailable, "meshProvider": meshProvider, "tokenHint": "rnr_…"})
 }
 
@@ -200,16 +212,22 @@ func (h *handler) runtimeNodeDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	loginServer, tsAvailable := h.runnerTailscaleMeta(r.Context(), principal(r).TenantID)
 	var install, installTailscale any
-	if token, ok := runnerTokenCache.Load(chi.URLParam(r, "id")); ok {
-		install = h.runnerInstallPackage(node, token.(string), "")
-		if tsAvailable {
-			installTailscale = h.runnerInstallPackage(node, token.(string), loginServer)
+	shared, _ := node["isShared"].(bool)
+	if !shared && h.authorizeRuntimeNodeInstall(r.Context(), principal(r), chi.URLParam(r, "id")) == nil {
+		if cached, ok := runnerTokenCache.Load(chi.URLParam(r, "id")); ok {
+			if token, ok := cached.(string); ok {
+				install = h.runnerInstallPackage(node, token, "")
+				if tsAvailable {
+					installTailscale = h.runnerInstallPackage(node, token, loginServer)
+				}
+			}
 		}
 	}
 	var meshProvider any
 	if tsAvailable {
 		meshProvider = "headscale-platform"
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	httpx.JSON(w, http.StatusOK, map[string]any{"node": node, "containers": containers, "install": install, "installTailscale": installTailscale, "meshConnected": tsAvailable, "hostJoinsTailscale": tsAvailable, "meshProvider": meshProvider, "tailscaleError": nil, "tokenHint": nil})
 }
 
@@ -337,6 +355,27 @@ func runnerShellInstaller(server, token, kind, prelude string) string {
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 
 var errRuntimeNodeUpdateForbidden = errors.New("platform admin required")
+var errRuntimeNodeInstallForbidden = errors.New("node installation permission required")
+
+func (h *handler) authorizeRuntimeNodeInstall(ctx context.Context, actor httpx.Principal, nodeID string) error {
+	if actor.APIKey || actor.SpaceID != "" || actor.AgentID != "" || !actor.IsPlatformAdmin && actor.Role != "owner" && actor.Role != "admin" {
+		return errRuntimeNodeInstallForbidden
+	}
+	var node struct {
+		IsShared bool `gorm:"column:is_shared"`
+	}
+	err := h.deps.Gorm.WithContext(ctx).Table("runtime_nodes").Select("is_shared").Where("tenant_id=? AND id=? AND kind<>'local'", actor.TenantID, nodeID).Take(&node).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if node.IsShared && !actor.IsPlatformAdmin {
+		return errRuntimeNodeInstallForbidden
+	}
+	return nil
+}
 
 func (h *handler) authorizeRuntimeNodeUpdate(ctx context.Context, actor httpx.Principal, nodeID string) error {
 	if !actor.IsPlatformAdmin {
@@ -355,6 +394,11 @@ func (h *handler) authorizeRuntimeNodeUpdate(ctx context.Context, actor httpx.Pr
 func (h *handler) getRuntimeNodeMap(r *http.Request) (map[string]any, error) {
 	node, err := scanRuntimeNode(h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT id,name,slug,kind,status,endpoint,capabilities_json,host_info_json,storage_root,agent_version,last_seen_at,labels_json,is_shared,created_at,updated_at FROM runtime_nodes WHERE (tenant_id=? OR is_shared=true) AND id=?`, principal(r).TenantID, chi.URLParam(r, "id")).Row())
 	if err == nil {
+		if shared, _ := node["isShared"].(bool); shared {
+			node["access"] = "shared"
+		} else {
+			node["access"] = "owned"
+		}
 		h.projectRuntimeNode(node)
 	}
 	return node, err
@@ -376,6 +420,7 @@ func (h *handler) runtimeInstallSh(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("tailscale") == "1" {
 		tailscalePrelude = h.runnerTailscalePrelude(r.Context(), chi.URLParam(r, "id"))
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
 	_, _ = io.WriteString(w, runnerShellInstaller(strings.TrimRight(h.deps.PublicURL, "/"), token, kind, tailscalePrelude))
 }
@@ -392,6 +437,7 @@ func (h *handler) runtimeInstallPS(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("kind") == "server" {
 		kind = "server"
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	fmt.Fprintf(w, "$env:ZAKURA_AGENT_SERVER = '%s'\n$env:ZAKURA_AGENT_TOKEN = '%s'\n$env:ZAKURA_AGENT_KIND = '%s'\n", strings.ReplaceAll(strings.TrimRight(h.deps.PublicURL, "/"), "'", "''"), strings.ReplaceAll(token, "'", "''"), kind)
@@ -404,6 +450,7 @@ func (h *handler) runtimeBootstrapSh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	target := "/api/runtime-nodes/" + url.PathEscape(chi.URLParam(r, "id")) + "/install.sh?" + r.URL.Query().Encode()
+	w.Header().Set("Cache-Control", "no-store")
 	http.Redirect(w, r, target, http.StatusFound)
 }
 
@@ -560,6 +607,14 @@ func (h *handler) runRunnerUpdate(ctx context.Context, session *runnerSession, j
 	})
 }
 func (h *handler) refreshWorkspaceImage(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeRuntimeNodeUpdate(r.Context(), principal(r), chi.URLParam(r, "id")); err != nil {
+		if errors.Is(err, errRuntimeNodeUpdateForbidden) {
+			httpx.Error(w, http.StatusForbidden, err.Error())
+		} else {
+			statusErr(w, err)
+		}
+		return
+	}
 	var body struct {
 		Image           string `json:"image"`
 		RecreateRunning *bool  `json:"recreateRunning"`

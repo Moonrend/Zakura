@@ -335,7 +335,7 @@ func (h *handler) patchPlatformService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if b.EndpointURL != "" {
-		if _, e := safeProviderURL(b.EndpointURL, ""); e != nil {
+		if _, e := serviceURL(b.EndpointURL, ""); e != nil {
 			statusErr(w, e)
 			return
 		}
@@ -641,7 +641,7 @@ func (h *handler) connectPlatformService(w http.ResponseWriter, r *http.Request)
 		httpx.Error(w, 400, "endpointUrl required")
 		return
 	}
-	u, e := safeProviderURL(b.EndpointURL, "")
+	u, e := serviceURL(b.EndpointURL, "")
 	if e != nil {
 		statusErr(w, e)
 		return

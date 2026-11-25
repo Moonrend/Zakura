@@ -10,11 +10,11 @@ description: 把工作区里的成果交到用户手上：生成文件下载链�
 ## 文件：临时下载链接
 
 ```
-re_get_file_url  path=/outputs/report.pdf  ttl_minutes=1440  disposition=inline
+re_get_file_url  path=/outputs/chart.png  ttl_minutes=1440  disposition=inline
     → https://…  （持链接者可下载，到期或撤销后失效）
 ```
 
-- `disposition=inline`——图片、PDF 在浏览器里直接预览
+- `disposition=inline`——纯文本和 PNG、JPEG、GIF、WebP 等光栅图片可在浏览器里直接预览；HTML、SVG、PDF 等其他格式会强制下载
 - `disposition=attachment`（默认）——触发下载
 - `ttl_minutes`——默认 60 分钟，最长 7 天。按用户实际需要给，别一律给最长
 - 上限 32MB；更大的文件先压缩，或改用端口暴露提供服务

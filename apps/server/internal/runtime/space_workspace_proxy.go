@@ -27,6 +27,8 @@ type spaceWorkspaceTarget struct {
 	remote    *remoteWorkspace
 }
 
+var errLegacyHostWorkspace = errors.New("legacy host workspace requires migration to container mode")
+
 // Resolve the canonical workspace, never a selected execution computer or the
 // first container matching a label. A server computer has no provider runtime.
 func (h *handler) resolveSpaceWorkspaceTarget(ctx context.Context, tenant, space, kind string) (*spaceWorkspaceTarget, error) {
@@ -78,6 +80,17 @@ func (h *handler) resolveSpaceWorkspaceTarget(ctx context.Context, tenant, space
 	}
 	raw := rawJSON([]any{s.ID, exec.computer.ID, exec.nodeID, s.WorkspaceKind, s.WorkspaceImage, s.EnableComputer, container, exec.workspace})
 	return &spaceWorkspaceTarget{space: s, runner: runner, container: container, remote: remote, ticket: acpLoginTicket{Tenant: tenant, Space: space, Profile: "workspace-" + kind, Node: exec.nodeID, Computer: exec.computer.ID, ConfigHash: acpLoginDigest(raw)}}, nil
+}
+
+func (h *handler) resolveSpaceWorkspaceConnectionTarget(ctx context.Context, tenant, space, kind string) (*spaceWorkspaceTarget, error) {
+	target, err := h.resolveSpaceWorkspaceTarget(ctx, tenant, space, kind)
+	if err != nil {
+		return nil, err
+	}
+	if target.space.WorkspaceKind == "host" {
+		return nil, errLegacyHostWorkspace
+	}
+	return target, nil
 }
 
 func (h *handler) workspaceTicketPrincipal(ctx context.Context, identity, tenant, space string) (httpx.Principal, error) {
@@ -173,7 +186,7 @@ func (h *handler) issueSpaceWorkspaceTicket(w http.ResponseWriter, r *http.Reque
 	}
 	defer lease.release()
 	ctx = context.WithValue(ctx, workspaceRequestTargetKey{}, lease.Space)
-	target, err := h.resolveSpaceWorkspaceTarget(ctx, p.TenantID, space, kind)
+	target, err := h.resolveSpaceWorkspaceConnectionTarget(ctx, p.TenantID, space, kind)
 	if err != nil {
 		h.serverComputerLifecycleError(w, err)
 		return
@@ -238,7 +251,7 @@ func (h *handler) consumeSpaceWorkspaceTicket(ctx context.Context, token, space,
 		return nil, nil, ctx, invalid
 	}
 	ctx = context.WithValue(ctx, workspaceRequestTargetKey{}, lease.Space)
-	target, err := h.resolveSpaceWorkspaceTarget(ctx, ticket.Tenant, space, kind)
+	target, err := h.resolveSpaceWorkspaceConnectionTarget(ctx, ticket.Tenant, space, kind)
 	if err != nil || target.ticket.Node != ticket.Node || target.ticket.Computer != ticket.Computer || target.ticket.ConfigHash != ticket.ConfigHash {
 		return fail()
 	}
@@ -270,7 +283,7 @@ func (h *handler) recheckSpaceWorkspaceConnection(ctx context.Context, target *s
 	if err := h.requireSpaceInfrastructureAvailable(ctx, target.ticket.Tenant, target.ticket.Space); err != nil {
 		return err
 	}
-	current, err := h.resolveSpaceWorkspaceTarget(ctx, target.ticket.Tenant, target.ticket.Space, kind)
+	current, err := h.resolveSpaceWorkspaceConnectionTarget(ctx, target.ticket.Tenant, target.ticket.Space, kind)
 	if err != nil {
 		return err
 	}

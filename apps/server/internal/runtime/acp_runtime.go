@@ -441,6 +441,10 @@ func (m *acpRuntimeManager) start(ctx context.Context, tenantID, agentID, sid, p
 			}
 			startMethod, writeMethod, closeMethod = "docker.exec.start", "docker.exec.write", "docker.exec.close"
 			params = map[string]any{"id": workspaceID, "command": argv, "workingDir": workingDir, "env": env}
+		} else {
+			// Legacy ACP startup is a trusted control-plane path. Interactive
+			// workspace terminals never receive this host-execution opt-in.
+			params["allowHostWorkspace"] = true
 		}
 	}
 	var started struct {

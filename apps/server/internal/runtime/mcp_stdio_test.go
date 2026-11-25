@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -20,8 +21,94 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
+	"github.com/golang-jwt/jwt/v5"
 )
+
+func stdioPlatformAdminSession(t *testing.T, d *appdeps.Dependencies, tenant string) string {
+	t.Helper()
+	nowTime := d.Clock()
+	now := nowTime.Format(time.RFC3339Nano)
+	userID, email, sessionID := "stdio-admin", "stdio-admin@example.test", "stdio-admin-session"
+	if _, err := d.DB.Exec(`INSERT INTO users(id,email,name,password_hash,is_platform_admin,status,created_at,updated_at) VALUES(?,?,?,'unused',TRUE,'active',?,?)`, userID, email, "Stdio Admin", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.DB.Exec(`INSERT INTO tenant_memberships(id,tenant_id,user_id,role,status,created_at,updated_at) VALUES('stdio-admin-membership',?,?,'owner','active',?,?)`, tenant, userID, now, now); err != nil {
+		t.Fatal(err)
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"sub": userID, "tenantId": tenant, "email": email, "role": "owner", "sid": sessionID, "isPlatformAdmin": true, "iat": nowTime.Unix(), "exp": nowTime.Add(time.Hour).Unix()})
+	raw, err := token.SignedString(d.Secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(raw))
+	if _, err = d.DB.Exec(`INSERT INTO user_sessions(id,user_id,tenant_id,email,role,is_platform_admin,token_hash,expires_at,last_seen_at,created_at) VALUES(?,?,?,?,'owner',TRUE,?,?,?,?)`, sessionID, userID, tenant, email, hex.EncodeToString(sum[:]), nowTime.Add(time.Hour).Format(time.RFC3339Nano), now, now); err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func TestStdioOCIAuthorizationRequiresPlatformAdmin(t *testing.T) {
+	for _, tc := range []struct {
+		name, role, command, packageManager string
+		platformAdmin                       bool
+		wantApproved, wantDenied            bool
+	}{
+		{name: "member explicit OCI", role: "member", command: "npx", packageManager: "oci", wantDenied: true},
+		{name: "tenant owner explicit OCI", role: "owner", command: "npx", packageManager: " OCI ", wantDenied: true},
+		{name: "member inferred Docker", command: "docker", wantDenied: true},
+		{name: "member inferred Podman", command: "podman", wantDenied: true},
+		{name: "platform admin explicit OCI", command: "npx", packageManager: "oci", platformAdmin: true, wantApproved: true},
+		{name: "platform admin inferred Docker", command: "docker", platformAdmin: true, wantApproved: true},
+		{name: "ordinary npm", command: "npx"},
+		{name: "ordinary binary", command: "server", packageManager: "binary"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			approved, err := authorizeStdioOCI(httpx.Principal{Role: tc.role, IsPlatformAdmin: tc.platformAdmin}, tc.command, tc.packageManager)
+			if approved != tc.wantApproved || errors.Is(err, errStdioOCIPlatformAdminRequired) != tc.wantDenied {
+				t.Fatalf("approved=%v err=%v", approved, err)
+			}
+		})
+	}
+}
+
+func TestStdioOCIStoredApprovalRequired(t *testing.T) {
+	for _, tc := range []struct {
+		name, config string
+		wantDenied   bool
+	}{
+		{name: "legacy explicit OCI", config: `{"command":"npx","packageManager":"oci"}`, wantDenied: true},
+		{name: "legacy inferred Docker", config: `{"command":"docker"}`, wantDenied: true},
+		{name: "legacy inferred Podman", config: `{"command":"podman"}`, wantDenied: true},
+		{name: "approved OCI", config: `{"command":"docker","ociPlatformApproved":true}`},
+		{name: "ordinary npm", config: `{"command":"npx"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, ok := stdioBodyFromConfig(json.RawMessage(tc.config))
+			if !ok {
+				t.Fatal("stdio config was not recognized")
+			}
+			if err := requireStdioOCIApproval(body); errors.Is(err, errStdioOCIPlatformAdminRequired) != tc.wantDenied {
+				t.Fatalf("approval error=%v", err)
+			}
+		})
+	}
+}
+
+func TestStdioOCIControlAliasesAreRejected(t *testing.T) {
+	for _, config := range []string{
+		`{"command":"npx","PackageManager":"oci","OCIPlatformApproved":true}`,
+		`{"Command":"docker","ociPlatformApproved":true}`,
+		`{"command":"npx","packageManager":["oci"]}`,
+		`{"command":"docker","ociPlatformApproved":"true"}`,
+	} {
+		if err := requireStdioOCIConfigApproval(json.RawMessage(config)); err == nil {
+			t.Fatalf("non-canonical OCI control accepted: %s", config)
+		}
+	}
+}
 
 func readRunnerServerText(r *bufio.Reader) (string, error) {
 	var head [2]byte
@@ -127,7 +214,8 @@ func TestImportStdioProvisionsNativeBridgeOnRunner(t *testing.T) {
 	bridgeURL, _ := url.Parse(bridgeServer.URL)
 	bridgePort, _ := strconv.Atoi(bridgeURL.Port())
 	d := testDeps(t)
-	token := seedTenant(t, d, "tenant")
+	memberToken := seedTenant(t, d, "tenant")
+	token := stdioPlatformAdminSession(t, d, "tenant")
 	runnerToken := "rnr_stdio-runner-token"
 	hash := sha256.Sum256([]byte(runnerToken))
 	now := d.Clock()
@@ -265,8 +353,13 @@ func TestImportStdioProvisionsNativeBridgeOnRunner(t *testing.T) {
 	}
 	var config, status string
 	expectedEndpoint := `"url":"` + bridgeServer.URL + `/mcp"`
-	if err = d.DB.QueryRow(`SELECT config_json,status FROM component_instances WHERE tenant_id='tenant'`).Scan(&config, &status); err != nil || status != "running" || !strings.Contains(config, expectedEndpoint) || !strings.Contains(config, `"runtimeNodeId":"node"`) || !strings.Contains(config, `"packageManager":"oci"`) {
+	if err = d.DB.QueryRow(`SELECT config_json,status FROM component_instances WHERE tenant_id='tenant'`).Scan(&config, &status); err != nil || status != "running" || !strings.Contains(config, expectedEndpoint) || !strings.Contains(config, `"runtimeNodeId":"node"`) || !strings.Contains(config, `"packageManager":"oci"`) || !strings.Contains(config, `"ociPlatformApproved":true`) {
 		t.Fatalf("persisted component config/status: err=%v status=%q config=%s", err, status, config)
+	}
+	instance := out["instance"].(map[string]any)
+	instanceID := instance["id"].(string)
+	if code, denied := doJSON(t, server.Client(), "PATCH", server.URL+"/api/instances/"+instanceID, memberToken, map[string]any{"config": map[string]any{"args": []string{"run", "--privileged", "server"}}}); code != http.StatusForbidden {
+		t.Fatalf("tenant changed approved OCI execution: %d %#v", code, denied)
 	}
 	if bridgeInit.Load() != 1 || bridgeList.Load() != 1 || bridgeDelete.Load() != 1 {
 		t.Fatalf("bridge MCP warmup: initialize=%d list=%d delete=%d", bridgeInit.Load(), bridgeList.Load(), bridgeDelete.Load())
@@ -274,8 +367,6 @@ func TestImportStdioProvisionsNativeBridgeOnRunner(t *testing.T) {
 	if strings.Contains(config, `"env"`) || strings.Contains(config, `"DEMO":"yes"`) {
 		t.Fatalf("stdio environment leaked into config_json: %s", config)
 	}
-	instance := out["instance"].(map[string]any)
-	instanceID := instance["id"].(string)
 	var secretStored string
 	if err = d.DB.QueryRow(`SELECT secret_json FROM component_instances WHERE id=?`, instanceID).Scan(&secretStored); err != nil || strings.Contains(secretStored, "yes") {
 		t.Fatalf("stdio secret storage leak: %s err=%v", secretStored, err)

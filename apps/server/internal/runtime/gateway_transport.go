@@ -100,7 +100,7 @@ func copyProviderStream(w http.ResponseWriter, body io.Reader) error {
 func readGatewayErrorBody(ctx context.Context, body io.ReadCloser) []byte {
 	done := make(chan []byte, 1)
 	go func() {
-		data, _ := io.ReadAll(io.LimitReader(body, 1<<20))
+		data, _ := io.ReadAll(io.LimitReader(body, maxProviderErrorResponse))
 		done <- data
 	}()
 	timer := time.NewTimer(100 * time.Millisecond)

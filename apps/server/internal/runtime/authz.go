@@ -51,3 +51,15 @@ func RequireAPIScope(next http.Handler) http.Handler {
 func gatewayPrincipalAllowed(p httpx.Principal) bool {
 	return p.APIKey && p.SpaceID != "" && apiKeyScopeAllows(p, "gateway", "gateway:models", "gateway:chat")
 }
+
+func providerAdminAllowed(p httpx.Principal) bool {
+	return !p.APIKey && (p.IsPlatformAdmin || p.Role == "owner" || p.Role == "admin")
+}
+
+func requireProviderAdmin(w http.ResponseWriter, r *http.Request) bool {
+	if providerAdminAllowed(principal(r)) {
+		return true
+	}
+	httpx.Error(w, http.StatusForbidden, "Provider administration requires an owner or administrator")
+	return false
+}

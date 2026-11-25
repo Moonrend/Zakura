@@ -53,11 +53,11 @@ func TestToolApprovalJevExecutionPaths(t *testing.T) {
 				var releaseOnce sync.Once
 				releaseEvaluation := func() { releaseOnce.Do(func() { close(release) }) }
 				defer releaseEvaluation()
-				base := gateway.client.Transport
+				base := gateway.providerHTTPClient().Transport
 				if base == nil {
 					base = http.DefaultTransport
 				}
-				gateway.client = &http.Client{Transport: approvalRoundTripper(func(req *http.Request) (*http.Response, error) {
+				gateway.providerClient = &http.Client{Transport: approvalRoundTripper(func(req *http.Request) (*http.Response, error) {
 					response, err := base.RoundTrip(req)
 					if err != nil {
 						return nil, err

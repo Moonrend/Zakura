@@ -23,6 +23,7 @@ import (
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/emailtmpl"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/emailverify"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/crypto/scrypt"
@@ -377,7 +378,7 @@ func (h *routes) requestVerifyEmail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var user models.User
-	if err := h.d.Gorm.WithContext(r.Context()).Select("email,email_verified_at").Where("id=? AND status='active'", p.UserID).Take(&user).Error; err != nil {
+	if err := h.d.Gorm.WithContext(r.Context()).Select("email,email_version,email_verified_at").Where("id=? AND status='active'", p.UserID).Take(&user).Error; err != nil {
 		httpx.Error(w, 404, "not found")
 		return
 	}
@@ -389,7 +390,8 @@ func (h *routes) requestVerifyEmail(w http.ResponseWriter, r *http.Request) {
 	sum := sha256.Sum256([]byte(raw))
 	id := h.d.NewID()
 	userID := p.UserID
-	err := h.d.Gorm.WithContext(r.Context()).Create(&models.AuthToken{ID: &id, UserID: &userID, Kind: "email_verify", TokenHash: hex.EncodeToString(sum[:]), MetaJSON: "{}", ExpiresAt: h.d.Clock().UTC().Add(24 * time.Hour).Format(time.RFC3339Nano), CreatedAt: h.now()}).Error
+	email := emailverify.Normalize(user.Email)
+	err := h.d.Gorm.WithContext(r.Context()).Create(&models.AuthToken{ID: &id, UserID: &userID, Kind: "email_verify", TokenHash: hex.EncodeToString(sum[:]), MetaJSON: emailverify.Encode(email, user.EmailVersion), ExpiresAt: h.d.Clock().UTC().Add(24 * time.Hour).Format(time.RFC3339Nano), CreatedAt: h.now()}).Error
 	if err != nil {
 		httpx.Error(w, 500, "request failed")
 		return
@@ -399,7 +401,7 @@ func (h *routes) requestVerifyEmail(w http.ResponseWriter, r *http.Request) {
 		verifyURL := h.d.WebURL + "/verify-email?token=" + url.QueryEscape(raw)
 		htmlBody, textBody, renderErr := emailtmpl.Render(emailtmpl.VerifyEmail, emailtmpl.VerifyEmailData{VerifyURL: verifyURL})
 		if renderErr == nil {
-			sent = h.d.SendTransactionalEmail(r.Context(), user.Email, "验证你的 Zakura 邮箱", htmlBody, textBody) == nil
+			sent = h.d.SendTransactionalEmail(r.Context(), email, "验证你的 Zakura 邮箱", htmlBody, textBody) == nil
 		}
 	}
 	httpx.JSON(w, 200, map[string]any{"sent": sent})

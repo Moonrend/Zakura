@@ -171,6 +171,11 @@ func (h *handler) runCodemodeTool(ctx context.Context, tenant, agent, session, t
 	command := []string{"node", ".zakura/codemode/harness.mjs"}
 	startMethod, writeMethod, closeMethod := "host.pty.start", "host.pty.write", "host.pty.close"
 	params := map[string]any{"spaceId": remote.spaceID, "command": command, "workingDir": "/", "env": map[string]string{}, "cols": 120, "rows": 40}
+	if target.space.WorkspaceKind == "host" {
+		// Legacy code mode is a trusted control-plane path. Interactive
+		// workspace terminals never receive this host-execution opt-in.
+		params["allowHostWorkspace"] = true
+	}
 	if target.container != "" {
 		startMethod, writeMethod, closeMethod = "docker.exec.start", "docker.exec.write", "docker.exec.close"
 		params = map[string]any{"id": target.container, "command": command, "workingDir": "/workspace", "env": map[string]string{}}

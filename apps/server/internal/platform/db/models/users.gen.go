@@ -18,6 +18,7 @@ type User struct {
 	AvatarData        *[]byte `gorm:"column:avatar_data;type:BLOB" json:"avatar_data"`
 	AvatarUpdatedAt   *string `gorm:"column:avatar_updated_at;type:TEXT" json:"avatar_updated_at"`
 	EmailVerifiedAt   *string `gorm:"column:email_verified_at;type:TEXT" json:"email_verified_at"`
+	EmailVersion      int64   `gorm:"column:email_version;type:INTEGER;not null;default:1" json:"email_version"`
 	TotpSecret        *string `gorm:"column:totp_secret;type:TEXT" json:"totp_secret"`
 	TotpPendingSecret *string `gorm:"column:totp_pending_secret;type:TEXT" json:"totp_pending_secret"`
 	TotpEnabledAt     *string `gorm:"column:totp_enabled_at;type:TEXT" json:"totp_enabled_at"`

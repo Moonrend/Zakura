@@ -74,6 +74,23 @@ func TestSandboxRPCRejectsUnsupportedTransports(t *testing.T) {
 	}
 }
 
+func TestHostPTYRejectsSpaceScopedExecution(t *testing.T) {
+	t.Setenv("ZAKURA_SANDBOX_ENABLED", "")
+	h := New("computer", t.TempDir())
+	result := sandboxCall(t, h, "host.pty.start", map[string]any{"spaceId": "space-a", "command": []string{os.Args[0]}})
+	if result.Error == "" || !strings.Contains(result.Error, "container mode") {
+		t.Fatalf("space-scoped host terminal was not refused: %+v", result)
+	}
+	if _, err := os.Stat(h.workspace("space-a")); !os.IsNotExist(err) {
+		t.Fatalf("space-scoped host terminal created a workspace: %v", err)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.ptys) != 0 {
+		t.Fatalf("space-scoped host terminal allocated %d streams", len(h.ptys))
+	}
+}
+
 func TestSandboxRPCRequiresWorkspaceAndAvailableBackend(t *testing.T) {
 	t.Setenv("ZAKURA_SANDBOX_ENABLED", "")
 	t.Setenv("ZAKURA_SANDBOX_IMAGE", "")

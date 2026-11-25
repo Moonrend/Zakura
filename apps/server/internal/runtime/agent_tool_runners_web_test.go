@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -310,16 +312,95 @@ func TestRunWebFetchNative(t *testing.T) {
 
 func TestRunWebFetchSSRF(t *testing.T) {
 	h, agentID := newWebHandler(t)
-	for _, target := range []string{"http://127.0.0.1/x", "http://192.168.1.1/x", "http://localhost/x", "http://10.0.0.5/x", "http://169.254.1.1/x", "http://[::1]/x"} {
+	for _, target := range []string{"http://127.0.0.1/x", "http://192.168.1.1/x", "http://localhost/x", "http://10.0.0.5/x", "http://169.254.1.1/x", "http://[::1]/x", "http://[::ffff:127.0.0.1]/x"} {
 		_, err := h.runWebFetch(context.Background(), "tenant", agentID, json.RawMessage(`{"url":"`+target+`"}`))
 		if err == nil || !strings.Contains(err.Error(), "private addresses is not allowed") {
 			t.Fatalf("expected SSRF rejection for %s, got %v", target, err)
 		}
 	}
-	for _, host := range []string{"example.com", "8.8.8.8"} {
-		if err := rejectPrivateHost(host); err != nil {
-			t.Fatalf("public host %s should pass: %v", host, err)
+	for address, wantPublic := range map[string]bool{
+		"8.8.8.8":              true,
+		"2606:4700:4700::1111": true,
+		"10.0.0.5":             false,
+		"100.64.0.1":           false,
+		"192.0.2.1":            false,
+		"198.18.0.1":           false,
+		"224.0.0.1":            false,
+		"fc00::1":              false,
+		"2001:db8::1":          false,
+		"2002:7f00:1::":        false,
+	} {
+		if got := publicWebFetchIP(net.ParseIP(address)); got != wantPublic {
+			t.Fatalf("publicWebFetchIP(%s) = %v, want %v", address, got, wantPublic)
 		}
+	}
+}
+
+func TestPublicWebFetchDialPinsResolvedAddress(t *testing.T) {
+	lookup := func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+	}
+	var dialedAddress string
+	var peer net.Conn
+	dial := newPublicWebFetchDialContext(lookup, func(_ context.Context, _ string, address string) (net.Conn, error) {
+		dialedAddress = address
+		connection, other := net.Pipe()
+		peer = other
+		return connection, nil
+	})
+	connection, err := dial(context.Background(), "tcp", "example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	defer peer.Close()
+	if dialedAddress != "93.184.216.34:443" {
+		t.Fatalf("dialed address = %q", dialedAddress)
+	}
+}
+
+func TestPublicWebFetchDialRejectsMixedDNS(t *testing.T) {
+	lookup := func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}, {IP: net.ParseIP("127.0.0.1")}}, nil
+	}
+	dialed := false
+	dial := newPublicWebFetchDialContext(lookup, func(context.Context, string, string) (net.Conn, error) {
+		dialed = true
+		return nil, errors.New("unexpected dial")
+	})
+	_, err := dial(context.Background(), "tcp", "mixed.example:80")
+	if !errors.Is(err, errWebFetchPrivateAddress) || dialed {
+		t.Fatalf("mixed DNS answer was not rejected before dial: err=%v dialed=%v", err, dialed)
+	}
+}
+
+func TestPublicWebFetchClientRevalidatesRedirects(t *testing.T) {
+	lookup := func(_ context.Context, host string) ([]net.IPAddr, error) {
+		if host == "redirect.example" {
+			return []net.IPAddr{{IP: net.ParseIP("10.0.0.5")}}, nil
+		}
+		return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+	}
+	client := newPublicWebFetchHTTPClient(lookup, func(context.Context, string, string) (net.Conn, error) {
+		return nil, errors.New("not used")
+	})
+	redirect, err := http.NewRequest(http.MethodGet, "https://redirect.example/private", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = client.CheckRedirect(redirect, []*http.Request{{}}); !errors.Is(err, errWebFetchPrivateAddress) {
+		t.Fatalf("private redirect was not rejected: %v", err)
+	}
+	publicRedirect, err := http.NewRequest(http.MethodGet, "https://public.example/page", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = client.CheckRedirect(publicRedirect, []*http.Request{{}}); err != nil {
+		t.Fatalf("public redirect was rejected: %v", err)
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport.Proxy != nil || transport.Dial != nil || transport.DialContext == nil || transport.DialTLS != nil || transport.DialTLSContext != nil {
+		t.Fatalf("public web fetch transport permits proxy bypass: %#v", client.Transport)
 	}
 }
 

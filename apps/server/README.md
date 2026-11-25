@@ -25,7 +25,7 @@ it with SQLite defaults (`PUBLIC_BASE_URL=http://localhost:8787`,
 `WEB_PUBLIC_URL=http://localhost:3001`). Equivalent manual invocation:
 
 ```sh
-export ZAKURA_SECRET='replace-with-at-least-32-random-bytes'
+export ZAKURA_SECRET="$(openssl rand -hex 32)"
 export DATABASE_URL='file:./data/zakura.db'
 export DATA_DIR='./data'
 export PUBLIC_BASE_URL='http://localhost:8787'
@@ -78,7 +78,8 @@ flow, race/vet/build, and all native stdio sidecar image builds.
 - Set the canonical HTTPS `PUBLIC_BASE_URL` and `WEB_PUBLIC_URL`
 - Keep migrations enabled for a single release task, or run them once before
   rolling out application replicas
-- Terminate TLS at a trusted proxy and preserve the original client IP headers
+- Terminate TLS at a trusted proxy, set `TRUSTED_PROXY_CIDRS` to its
+  comma-separated CIDR allowlist, and have it overwrite `X-Real-IP`
 - Use `/api/livez` for liveness and `/api/health` for database readiness
 - Back up the database and any runtime workspace volumes together
 

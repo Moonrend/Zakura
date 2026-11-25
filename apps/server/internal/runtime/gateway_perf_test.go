@@ -29,7 +29,7 @@ func BenchmarkGatewayCandidatePayload(b *testing.B) {
 	}))
 	defer upstream.Close()
 	gateway := NewGateway(NewStore(testDepsTB(b)))
-	defer gateway.client.CloseIdleConnections()
+	defer gateway.providerHTTPClient().CloseIdleConnections()
 	config := Upstream{Protocol: "openai", Config: raw(map[string]any{"baseUrl": upstream.URL})}
 	route := ModelRoute{Model: "actual-model"}
 	payload := []byte(`{"model":"alias","messages":[{"role":"user","content":"` + strings.Repeat("hello ", 10000) + `"}],"metadata":{"id":9007199254740993}}`)

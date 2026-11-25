@@ -202,6 +202,9 @@ func (h *handler) runnerHubHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	// The credential remains node authentication material, but it is no longer
+	// retained as retrievable installation material after successful enrollment.
+	runnerTokenCache.Delete(nodeID)
 	ticker := time.NewTicker(20 * time.Second)
 	defer ticker.Stop()
 	for {

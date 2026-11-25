@@ -61,8 +61,9 @@ func TestPreservedFrontendCoreContracts(t *testing.T) {
 		t.Fatal(err)
 	}
 	var seq atomic.Int64
+	fixtureNow := time.Now().UTC()
 	cfg := config.Config{WebURL: "http://web.test", PublicURL: "http://api.test", Edition: "saas", MultiTenant: true}
-	deps := &appdeps.Dependencies{DB: conn.DB, Gorm: gormDB, Dialect: conn.Dialect, Rebind: conn.Rebind, Clock: func() time.Time { return time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC) }, NewID: func() string { return fmt.Sprintf("%026d", seq.Add(1)) }, Secret: bytes.Repeat([]byte("z"), 32), PublicURL: cfg.PublicURL, WebURL: cfg.WebURL, DataDir: dataDir, Edition: cfg.Edition, MultiTenant: cfg.MultiTenant, VerifyDomain: func(context.Context, string, string) error { return nil }}
+	deps := &appdeps.Dependencies{DB: conn.DB, Gorm: gormDB, Dialect: conn.Dialect, Rebind: conn.Rebind, Clock: func() time.Time { return fixtureNow }, NewID: func() string { return fmt.Sprintf("%026d", seq.Add(1)) }, Secret: bytes.Repeat([]byte("z"), 32), PublicURL: cfg.PublicURL, WebURL: cfg.WebURL, DataDir: dataDir, Edition: cfg.Edition, MultiTenant: cfg.MultiTenant, VerifyDomain: func(context.Context, string, string) error { return nil }}
 	router := platformserver.Router(cfg, deps, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	srv := httptest.NewServer(router)
 	defer srv.Close()

@@ -2,6 +2,7 @@
 package integrations
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -126,6 +127,247 @@ func pendingUserKey(entry any) string {
 		if s, ok := t["userKey"].(string); ok {
 			return strings.TrimSpace(s)
 		}
+	}
+	return ""
+}
+
+type remoteSender struct {
+	UserKey     string
+	Email       string
+	DisplayName string
+}
+
+func webhookObject(raw []byte) (map[string]any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var payload map[string]any
+	if e := decoder.Decode(&payload); e != nil || payload == nil {
+		if e == nil {
+			e = errors.New("JSON object required")
+		}
+		return nil, e
+	}
+	var extra any
+	if e := decoder.Decode(&extra); !errors.Is(e, io.EOF) {
+		if e == nil {
+			e = errors.New("multiple JSON values")
+		}
+		return nil, e
+	}
+	return payload, nil
+}
+
+func objectValue(values map[string]any, key string) map[string]any {
+	value, _ := values[key].(map[string]any)
+	return value
+}
+
+func firstObject(value any) map[string]any {
+	items, _ := value.([]any)
+	if len(items) == 0 {
+		return nil
+	}
+	item, _ := items[0].(map[string]any)
+	return item
+}
+
+func identityValue(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case json.Number:
+		return strings.TrimSpace(typed.String())
+	default:
+		return ""
+	}
+}
+
+func senderFromObject(values map[string]any, idKeys, emailKeys, nameKeys []string) remoteSender {
+	if values == nil {
+		return remoteSender{}
+	}
+	sender := remoteSender{}
+	for _, key := range idKeys {
+		if sender.UserKey = identityValue(values[key]); sender.UserKey != "" {
+			break
+		}
+	}
+	for _, key := range emailKeys {
+		if sender.Email = identityValue(values[key]); sender.Email != "" {
+			break
+		}
+	}
+	for _, key := range nameKeys {
+		if sender.DisplayName = identityValue(values[key]); sender.DisplayName != "" {
+			break
+		}
+	}
+	if sender.UserKey == "" {
+		sender.UserKey = sender.Email
+	}
+	return sender
+}
+
+func remoteWebhookSender(platform string, payload map[string]any) (remoteSender, bool) {
+	var sender remoteSender
+	switch platform {
+	case "zakurabot":
+		sender = senderFromObject(payload, []string{"senderId", "userId"}, []string{"email"}, []string{"senderName", "userName"})
+	case "slack":
+		event := objectValue(payload, "event")
+		sender = senderFromObject(event, []string{"user"}, nil, nil)
+		if sender.UserKey == "" {
+			sender = senderFromObject(objectValue(payload, "user"), []string{"id"}, []string{"email"}, []string{"name", "real_name"})
+		}
+	case "teams":
+		sender = senderFromObject(objectValue(payload, "from"), []string{"id", "aadObjectId"}, []string{"email"}, []string{"name"})
+	case "gchat":
+		sender = senderFromObject(objectValue(objectValue(payload, "message"), "sender"), []string{"name"}, []string{"email"}, []string{"displayName"})
+		if sender.UserKey == "" {
+			sender = senderFromObject(objectValue(payload, "user"), []string{"name"}, []string{"email"}, []string{"displayName"})
+		}
+	case "discord":
+		sender = senderFromObject(objectValue(objectValue(payload, "member"), "user"), []string{"id"}, nil, []string{"global_name", "username"})
+		if sender.UserKey == "" {
+			sender = senderFromObject(objectValue(payload, "author"), []string{"id"}, nil, []string{"global_name", "username"})
+		}
+		if sender.UserKey == "" {
+			sender = senderFromObject(objectValue(payload, "user"), []string{"id"}, nil, []string{"global_name", "username"})
+		}
+	case "telegram":
+		for _, key := range []string{"message", "edited_message", "channel_post", "edited_channel_post"} {
+			sender = senderFromObject(objectValue(objectValue(payload, key), "from"), []string{"id"}, nil, []string{"username", "first_name"})
+			if sender.UserKey != "" {
+				break
+			}
+		}
+		if sender.UserKey == "" {
+			sender = senderFromObject(objectValue(objectValue(payload, "callback_query"), "from"), []string{"id"}, nil, []string{"username", "first_name"})
+		}
+	case "github":
+		sender = senderFromObject(objectValue(payload, "sender"), []string{"id"}, []string{"email"}, []string{"login"})
+	case "linear":
+		sender = senderFromObject(objectValue(payload, "actor"), []string{"id"}, []string{"email"}, []string{"name"})
+	case "whatsapp":
+		entry := firstObject(payload["entry"])
+		change := firstObject(entry["changes"])
+		value := objectValue(change, "value")
+		message := firstObject(value["messages"])
+		sender = senderFromObject(message, []string{"from"}, nil, nil)
+		if contact := firstObject(value["contacts"]); contact != nil {
+			if sender.UserKey == "" {
+				sender.UserKey = identityValue(contact["wa_id"])
+			}
+			sender.DisplayName = identityValue(objectValue(contact, "profile")["name"])
+		}
+	case "twilio":
+		sender = senderFromObject(payload, []string{"From", "from"}, nil, nil)
+	case "messenger":
+		entry := firstObject(payload["entry"])
+		message := firstObject(entry["messaging"])
+		sender = senderFromObject(objectValue(message, "sender"), []string{"id"}, nil, nil)
+	case "resend":
+		data := objectValue(payload, "data")
+		sender = senderFromObject(data, []string{"from"}, []string{"from"}, nil)
+		address := emailAddress(sender.UserKey)
+		sender.UserKey, sender.Email = address, address
+	case "webex":
+		data := objectValue(payload, "data")
+		sender = senderFromObject(data, []string{"personId"}, []string{"personEmail"}, []string{"personDisplayName"})
+	case "mattermost":
+		sender = senderFromObject(payload, []string{"user_id", "userId"}, []string{"user_email"}, []string{"user_name", "userName"})
+	case "weixin":
+		sender = senderFromObject(payload, []string{"from_user_id", "fromUserId", "senderId"}, nil, []string{"from_user_name", "fromUserName"})
+		if sender.UserKey == "" {
+			sender = senderFromObject(objectValue(payload, "from"), []string{"id", "userId"}, nil, []string{"name"})
+		}
+	}
+	sender.UserKey = strings.TrimSpace(sender.UserKey)
+	return sender, sender.UserKey != ""
+}
+
+func remoteChannelAllowsAll(settings map[string]any) (bool, error) {
+	if raw, ok := settings["allowAll"]; ok {
+		allowAll, valid := raw.(bool)
+		if !valid {
+			return false, errors.New("invalid allowAll setting")
+		}
+		return allowAll, nil
+	}
+	return false, nil
+}
+
+func remoteSenderAllowed(settings map[string]any, sender remoteSender) (bool, error) {
+	raw, ok := settings["allowedUsers"]
+	if !ok {
+		return false, nil
+	}
+	allowed, valid := raw.([]any)
+	if !valid {
+		return false, errors.New("invalid allowedUsers setting")
+	}
+	for _, value := range allowed {
+		key, valid := value.(string)
+		if !valid {
+			return false, errors.New("invalid allowedUsers entry")
+		}
+		if strings.EqualFold(strings.TrimSpace(key), sender.UserKey) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func addPendingSender(settings map[string]any, sender remoteSender, requestedAt string) (bool, error) {
+	pending := []any{}
+	if raw, ok := settings["pendingUsers"]; ok {
+		var valid bool
+		pending, valid = raw.([]any)
+		if !valid {
+			return false, errors.New("invalid pendingUsers setting")
+		}
+	}
+	for _, entry := range pending {
+		if strings.EqualFold(pendingUserKey(entry), sender.UserKey) {
+			return false, nil
+		}
+	}
+	entry := map[string]any{"userKey": sender.UserKey, "requestedAt": requestedAt}
+	if sender.Email != "" {
+		entry["email"] = sender.Email
+	}
+	if sender.DisplayName != "" {
+		entry["displayName"] = sender.DisplayName
+	}
+	settings["pendingUsers"] = append(pending, entry)
+	return true, nil
+}
+
+func emailSenderValue(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return emailAddress(typed)
+	case map[string]any:
+		if value, ok := typed["email"]; ok {
+			return emailAddress(identityValue(value))
+		}
+		if value, ok := typed["address"]; ok {
+			return emailAddress(identityValue(value))
+		}
+	}
+	return ""
+}
+
+func emailWebhookSender(payload map[string]any) string {
+	data := objectValue(payload, "data")
+	if value, ok := data["from"]; ok {
+		return emailSenderValue(value)
+	}
+	if value, ok := payload["from"]; ok {
+		return emailSenderValue(value)
+	}
+	if value, ok := payload["sender"]; ok {
+		return emailSenderValue(value)
 	}
 	return ""
 }
@@ -450,26 +692,9 @@ func (h *handler) updateRemoteChannelAccess(w http.ResponseWriter, r *http.Reque
 }
 func (h *handler) remoteWebhook(w http.ResponseWriter, r *http.Request) {
 	tenant, bindingID := chi.URLParam(r, "tenantId"), chi.URLParam(r, "bindingId")
-	var binding models.AgentChannelBinding
-	e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", tenant, bindingID).First(&binding).Error
-	if e != nil || !binding.Enabled || binding.AgentID == "" {
-		httpx.Error(w, 404, "Channel not found")
-		return
-	}
 	raw, e := io.ReadAll(http.MaxBytesReader(w, r.Body, 2<<20))
 	if e != nil {
 		httpx.Error(w, 413, "payload too large")
-		return
-	}
-	configRaw, e := decrypt(h.deps.Secret, tenant+":"+bindingID, binding.ConfigEnc)
-	if e != nil {
-		httpx.Error(w, 401, "invalid channel configuration")
-		return
-	}
-	var cfg map[string]any
-	_ = json.Unmarshal(configRaw, &cfg)
-	if !verifyWebhook(binding.Platform, cfg, r.Header, raw) {
-		httpx.Error(w, 401, "invalid signature")
 		return
 	}
 	external := r.Header.Get("X-Event-Id")
@@ -477,26 +702,111 @@ func (h *handler) remoteWebhook(w http.ResponseWriter, r *http.Request) {
 		sum := sha256.Sum256(raw)
 		external = hex.EncodeToString(sum[:])
 	}
-	res := h.deps.Gorm.WithContext(r.Context()).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "binding_id"}, {Name: "external_event_id"}}, DoNothing: true}).Create(&models.AgentChannelEvent{ID: strPtr(h.id()), TenantID: tenant, BindingID: bindingID, ExternalEventID: external, ReceivedAt: h.now().Format(time.RFC3339Nano)})
-	if res.Error != nil {
-		writeErr(w, res.Error)
+	var duplicate, pending bool
+	var responseErr string
+	e = h.deps.Gorm.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+		var binding models.AgentChannelBinding
+		if e := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id = ? AND id = ?", tenant, bindingID).First(&binding).Error; e != nil || !binding.Enabled || binding.AgentID == "" {
+			responseErr = "not_found"
+			if e != nil && !errors.Is(e, gorm.ErrRecordNotFound) {
+				return e
+			}
+			return errors.New("channel not found")
+		}
+		configRaw, e := decrypt(h.deps.Secret, tenant+":"+bindingID, binding.ConfigEnc)
+		if e != nil {
+			responseErr = "configuration"
+			return e
+		}
+		var cfg map[string]any
+		if json.Unmarshal(configRaw, &cfg) != nil {
+			responseErr = "configuration"
+			return errors.New("invalid channel configuration")
+		}
+		if !verifyWebhook(binding.Platform, cfg, r.Header, raw) {
+			responseErr = "signature"
+			return errors.New("invalid signature")
+		}
+		payload, e := webhookObject(raw)
+		if e != nil {
+			responseErr = "json"
+			return e
+		}
+		settings := map[string]any{}
+		if json.Unmarshal([]byte(binding.SettingsJSON), &settings) != nil || settings == nil {
+			responseErr = "policy"
+			return errors.New("invalid channel access policy")
+		}
+		allowed, e := remoteChannelAllowsAll(settings)
+		if e != nil {
+			responseErr = "policy"
+			return e
+		}
+		if !allowed {
+			sender, ok := remoteWebhookSender(binding.Platform, payload)
+			if !ok {
+				responseErr = "sender"
+				return errors.New("webhook sender missing")
+			}
+			allowed, e = remoteSenderAllowed(settings, sender)
+			if e != nil {
+				responseErr = "policy"
+				return e
+			}
+			if !allowed {
+				changed, e := addPendingSender(settings, sender, h.now().Format(time.RFC3339Nano))
+				if e != nil {
+					responseErr = "policy"
+					return e
+				}
+				if changed {
+					settingsRaw, _ := json.Marshal(settings)
+					if e = tx.Model(&models.AgentChannelBinding{}).Where("tenant_id = ? AND id = ?", tenant, bindingID).Updates(map[string]any{"settings_json": string(settingsRaw), "updated_at": h.now().Format(time.RFC3339Nano)}).Error; e != nil {
+						return e
+					}
+				}
+				pending = true
+				return nil
+			}
+		}
+		res := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "binding_id"}, {Name: "external_event_id"}}, DoNothing: true}).Create(&models.AgentChannelEvent{ID: strPtr(h.id()), TenantID: tenant, BindingID: bindingID, ExternalEventID: external, ReceivedAt: h.now().Format(time.RFC3339Nano)})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			duplicate = true
+			return nil
+		}
+		payload["agentId"] = binding.AgentID
+		payloadRaw, _ := json.Marshal(payload)
+		event := models.ChannelEvent{ID: strPtr(h.id()), TenantID: tenant, Provider: binding.Platform, ExternalID: bindingID + ":" + external, PayloadJSON: string(payloadRaw), DeliveryStatus: "pending", Attempts: 0, CreatedAt: h.now().Format(time.RFC3339Nano)}
+		return tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "provider"}, {Name: "external_id"}}, DoNothing: true}).Create(&event).Error
+	})
+	if e != nil {
+		switch responseErr {
+		case "not_found":
+			httpx.Error(w, 404, "Channel not found")
+		case "configuration":
+			httpx.Error(w, 401, "invalid channel configuration")
+		case "signature":
+			httpx.Error(w, 401, "invalid signature")
+		case "json":
+			httpx.Error(w, 400, "invalid JSON")
+		case "sender":
+			httpx.Error(w, 400, "webhook sender missing")
+		case "policy":
+			httpx.Error(w, 400, "invalid channel access policy")
+		default:
+			writeErr(w, e)
+		}
 		return
 	}
-	if res.RowsAffected == 0 {
+	if duplicate {
 		httpx.JSON(w, 202, map[string]any{"accepted": true, "duplicate": true})
 		return
 	}
-	var payload map[string]any
-	if json.Unmarshal(raw, &payload) != nil {
-		httpx.Error(w, 400, "invalid JSON")
-		return
-	}
-	payload["agentId"] = binding.AgentID
-	payloadRaw, _ := json.Marshal(payload)
-	event := models.ChannelEvent{ID: strPtr(h.id()), TenantID: tenant, Provider: binding.Platform, ExternalID: bindingID + ":" + external, PayloadJSON: string(payloadRaw), DeliveryStatus: "pending", Attempts: 0, CreatedAt: h.now().Format(time.RFC3339Nano)}
-	e = h.deps.Gorm.WithContext(r.Context()).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "provider"}, {Name: "external_id"}}, DoNothing: true}).Create(&event).Error
-	if e != nil {
-		writeErr(w, e)
+	if pending {
+		httpx.JSON(w, 202, map[string]any{"accepted": true, "pending": true})
 		return
 	}
 	httpx.JSON(w, 202, map[string]any{"accepted": true, "externalId": external})
@@ -599,72 +909,112 @@ func emailProductForRef(ref string) (string, bool) {
 }
 func (h *handler) emailInbound(w http.ResponseWriter, r *http.Request) {
 	tenant, id := chi.URLParam(r, "tenantId"), chi.URLParam(r, "connectorId")
-	q := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND enabled = true", tenant)
-	if id != "" {
-		if product, ok := emailProductForRef(id); ok {
-			q = q.Where("product = ?", product)
-		} else {
-			q = q.Where("id = ?", id)
-		}
-	}
-	var connector models.EmailConnectorInstance
-	e := q.Order("created_at").First(&connector).Error
-	if errors.Is(e, gorm.ErrRecordNotFound) {
-		httpx.Error(w, 404, "Email connector not found")
-		return
-	}
-	if e != nil {
-		writeErr(w, e)
-		return
-	}
-	enc := connector.ConfigEnc
 	raw, e := io.ReadAll(http.MaxBytesReader(w, r.Body, 10<<20))
 	if e != nil {
 		httpx.Error(w, 413, "payload too large")
 		return
 	}
-	cfgRaw, e := decrypt(h.deps.Secret, tenant+":email:"+*connector.ID, enc)
-	if e != nil {
-		httpx.Error(w, 401, "invalid connector configuration")
-		return
-	}
-	var cfg map[string]any
-	_ = json.Unmarshal(cfgRaw, &cfg)
-	secret, _ := cfg["inboundSecret"].(string)
-	if secret == "" {
-		secret, _ = cfg["webhookSecret"].(string)
-	}
-	sig := strings.TrimPrefix(r.Header.Get("X-Zakura-Signature"), "sha256=")
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(raw)
-	if secret == "" || !hmac.Equal([]byte(sig), []byte(hex.EncodeToString(mac.Sum(nil)))) {
-		httpx.Error(w, 401, "invalid signature")
-		return
-	}
-	var payload map[string]any
-	if json.Unmarshal(raw, &payload) != nil {
-		httpx.Error(w, 400, "invalid JSON")
-		return
-	}
-	agent, _ := cfg["inboundAgentId"].(string)
-	if agent == "" {
-		agent, _ = cfg["agentId"].(string)
-	}
-	if agent == "" {
-		httpx.Error(w, 400, "email connector has no agentId")
-		return
-	}
-	payload["agentId"] = agent
 	eventID := r.Header.Get("Message-Id")
 	if eventID == "" {
 		sum := sha256.Sum256(raw)
 		eventID = hex.EncodeToString(sum[:])
 	}
-	eventRaw, _ := json.Marshal(payload)
-	event := models.ChannelEvent{ID: strPtr(h.id()), TenantID: tenant, Provider: "email", ExternalID: eventID, PayloadJSON: string(eventRaw), DeliveryStatus: "pending", Attempts: 0, CreatedAt: h.now().Format(time.RFC3339Nano)}
-	e = h.deps.Gorm.WithContext(r.Context()).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "provider"}, {Name: "external_id"}}, DoNothing: true}).Create(&event).Error
+	ignored := false
+	responseErr := ""
+	e = h.deps.Gorm.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+		q := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id = ? AND enabled = true", tenant)
+		if id != "" {
+			if product, ok := emailProductForRef(id); ok {
+				q = q.Where("product = ?", product)
+			} else {
+				q = q.Where("id = ?", id)
+			}
+		}
+		var connector models.EmailConnectorInstance
+		if e := q.Order("created_at").First(&connector).Error; e != nil {
+			if errors.Is(e, gorm.ErrRecordNotFound) {
+				responseErr = "not_found"
+			}
+			return e
+		}
+		if connector.ID == nil {
+			responseErr = "configuration"
+			return errors.New("email connector has no id")
+		}
+		cfgRaw, e := decrypt(h.deps.Secret, tenant+":email:"+*connector.ID, connector.ConfigEnc)
+		if e != nil {
+			responseErr = "configuration"
+			return e
+		}
+		var cfg map[string]any
+		if json.Unmarshal(cfgRaw, &cfg) != nil {
+			responseErr = "configuration"
+			return errors.New("invalid connector configuration")
+		}
+		secret := emailStringValue(cfg, "inboundSecret")
+		if secret == "" {
+			secret = emailStringValue(cfg, "webhookSecret")
+		}
+		sig := strings.TrimPrefix(r.Header.Get("X-Zakura-Signature"), "sha256=")
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write(raw)
+		if secret == "" || !hmac.Equal([]byte(sig), []byte(hex.EncodeToString(mac.Sum(nil)))) {
+			responseErr = "signature"
+			return errors.New("invalid signature")
+		}
+		payload, e := webhookObject(raw)
+		if e != nil {
+			responseErr = "json"
+			return e
+		}
+		if !emailBoolValue(cfg, "inboundEnabled") {
+			ignored = true
+			return nil
+		}
+		sender := emailWebhookSender(payload)
+		if sender == "" {
+			responseErr = "sender"
+			return errors.New("email sender missing")
+		}
+		allowlist := emailListValue(cfg["allowedEmails"])
+		if len(allowlist) == 0 || !allowedSender(sender, allowlist) {
+			ignored = true
+			return nil
+		}
+		agent := emailStringValue(cfg, "inboundAgentId")
+		if agent == "" {
+			agent = emailStringValue(cfg, "agentId")
+		}
+		if agent == "" {
+			responseErr = "agent"
+			return errors.New("email connector has no agentId")
+		}
+		payload["agentId"] = agent
+		eventRaw, _ := json.Marshal(payload)
+		event := models.ChannelEvent{ID: strPtr(h.id()), TenantID: tenant, Provider: "email", ExternalID: eventID, PayloadJSON: string(eventRaw), DeliveryStatus: "pending", Attempts: 0, CreatedAt: h.now().Format(time.RFC3339Nano)}
+		return tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "provider"}, {Name: "external_id"}}, DoNothing: true}).Create(&event).Error
+	})
 	if e != nil {
-		writeErr(w, e)
+		switch responseErr {
+		case "not_found":
+			httpx.Error(w, 404, "Email connector not found")
+		case "configuration":
+			httpx.Error(w, 401, "invalid connector configuration")
+		case "signature":
+			httpx.Error(w, 401, "invalid signature")
+		case "json":
+			httpx.Error(w, 400, "invalid JSON")
+		case "sender":
+			httpx.Error(w, 400, "email sender missing")
+		case "agent":
+			httpx.Error(w, 400, "email connector has no agentId")
+		default:
+			writeErr(w, e)
+		}
+		return
+	}
+	if ignored {
+		httpx.JSON(w, 202, map[string]any{"accepted": true, "ignored": true})
 		return
 	}
 	httpx.JSON(w, 202, map[string]any{"accepted": true, "externalId": eventID})

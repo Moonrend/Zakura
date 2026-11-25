@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS users (
   avatar_data BLOB,
   avatar_updated_at TEXT,
   email_verified_at TEXT,
+  email_version INTEGER NOT NULL DEFAULT 1,
   totp_secret TEXT,
   totp_pending_secret TEXT,
   totp_enabled_at TEXT,

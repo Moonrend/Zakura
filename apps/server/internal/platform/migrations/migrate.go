@@ -99,6 +99,9 @@ var workspaceAuthTargetsSQL string
 //go:embed sql/0029_workspace_node_removal.sql
 var workspaceNodeRemovalSQL string
 
+//go:embed sql/0030_connector_oauth_states.sql
+var connectorOAuthStatesSQL string
+
 // postgres replaces sql on PostgreSQL when the dialects need different
 // statements rather than the textual type substitutions of postgresSchema.
 type migration struct {
@@ -136,6 +139,7 @@ var ordered = []migration{
 	{27, "node_installations", nodeInstallationsSQL, ""},
 	{28, "workspace_auth_targets", workspaceAuthTargetsSQL, ""},
 	{29, "workspace_node_removal", workspaceNodeRemovalSQL, ""},
+	{30, "connector_oauth_states", connectorOAuthStatesSQL, ""},
 }
 
 func Apply(ctx context.Context, db *sql.DB, dialect string, rebind func(string) string) error {
@@ -198,7 +202,7 @@ func ensureAdditiveCompatibility(ctx context.Context, db *sql.DB, dialect string
 	}
 	specs := []columnSpec{
 		{"platform_meta", "singleton", "INTEGER", "INTEGER"}, {"platform_meta", "settings_json", "TEXT NOT NULL DEFAULT '{}'", "TEXT NOT NULL DEFAULT '{}'"},
-		{"users", "status", "TEXT NOT NULL DEFAULT 'active'", "TEXT NOT NULL DEFAULT 'active'"}, {"users", "avatar_mime", "TEXT", "TEXT"}, {"users", "avatar_data", "BLOB", "BYTEA"}, {"users", "totp_secret", "TEXT", "TEXT"}, {"users", "totp_pending_secret", "TEXT", "TEXT"}, {"users", "recovery_codes_json", "TEXT NOT NULL DEFAULT '[]'", "TEXT NOT NULL DEFAULT '[]'"}, {"users", "mfa_enabled", "INTEGER NOT NULL DEFAULT 0", "BOOLEAN NOT NULL DEFAULT FALSE"}, {"users", "email_mfa_enabled_at", "TIMESTAMP", "TIMESTAMPTZ"}, {"users", "suspended_reason", "TEXT", "TEXT"}, {"users", "suspended_by_user_id", "TEXT", "TEXT"},
+		{"users", "status", "TEXT NOT NULL DEFAULT 'active'", "TEXT NOT NULL DEFAULT 'active'"}, {"users", "avatar_mime", "TEXT", "TEXT"}, {"users", "avatar_data", "BLOB", "BYTEA"}, {"users", "email_version", "INTEGER NOT NULL DEFAULT 1", "INTEGER NOT NULL DEFAULT 1"}, {"users", "totp_secret", "TEXT", "TEXT"}, {"users", "totp_pending_secret", "TEXT", "TEXT"}, {"users", "recovery_codes_json", "TEXT NOT NULL DEFAULT '[]'", "TEXT NOT NULL DEFAULT '[]'"}, {"users", "mfa_enabled", "INTEGER NOT NULL DEFAULT 0", "BOOLEAN NOT NULL DEFAULT FALSE"}, {"users", "email_mfa_enabled_at", "TIMESTAMP", "TIMESTAMPTZ"}, {"users", "suspended_reason", "TEXT", "TEXT"}, {"users", "suspended_by_user_id", "TEXT", "TEXT"},
 		{"tenants", "status", "TEXT NOT NULL DEFAULT 'active'", "TEXT NOT NULL DEFAULT 'active'"}, {"tenants", "mfa_policy", "TEXT NOT NULL DEFAULT 'optional'", "TEXT NOT NULL DEFAULT 'optional'"}, {"tenants", "audit_retention_days", "INTEGER NOT NULL DEFAULT 365", "INTEGER NOT NULL DEFAULT 365"}, {"tenants", "settings_json", "TEXT NOT NULL DEFAULT '{}'", "TEXT NOT NULL DEFAULT '{}'"}, {"tenants", "suspended_reason", "TEXT", "TEXT"}, {"tenants", "suspended_by_user_id", "TEXT", "TEXT"},
 		{"user_sessions", "token_hash", "TEXT", "TEXT"}, {"user_sessions", "last_seen_at", "TEXT", "TEXT"},
 		{"agents", "avatar_color", "TEXT", "TEXT"}, {"agents", "avatar_shape", "TEXT", "TEXT"}, {"agents", "avatar_url", "TEXT", "TEXT"},
