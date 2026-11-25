@@ -16,6 +16,9 @@ func TestSpaceWorkspaceTerminalRejectsHostMode(t *testing.T) {
 	seedTenant(t, d, "tenant")
 	hostCalls := make(chan string, 1)
 	h := builtinToolHarness(t, d, "rnr_host_shell", func(method string, params map[string]any) (any, error) {
+		if method == "sys.info" {
+			return map[string]any{"version": "test", "kind": "computer", "storageRoot": "/srv/zakura"}, nil
+		}
 		if strings.HasPrefix(method, "host.pty.") {
 			select {
 			case hostCalls <- method:
