@@ -26,7 +26,7 @@ func workspaceReceiptStatusFixture(c computerContainer) map[string]any {
 }
 
 func TestWorkspaceCreateLostReplyUsesOriginalReceipt(t *testing.T) {
-	for _, scenario := range []string{"committed", "missing-receipt", "missing-container", "wrong-operation"} {
+	for _, scenario := range []string{"committed", "missing-receipt", "missing-container", "wrong-operation", "recreated"} {
 		t.Run(scenario, func(t *testing.T) {
 			d := testDeps(t)
 			seedTenant(t, d, "tenant")
@@ -52,6 +52,12 @@ func TestWorkspaceCreateLostReplyUsesOriginalReceipt(t *testing.T) {
 				case "docker.list":
 					if instance.DockerID == "" || scenario == "missing-container" {
 						return []any{}, nil
+					}
+					if scenario == "recreated" {
+						// docker.recreate keeps name/labels/digest but assigns a new ID.
+						recreated := instance
+						recreated.DockerID = "recreated-workspace"
+						return []computerContainer{recreated}, nil
 					}
 					return []computerContainer{instance}, nil
 				case "docker.images":
@@ -79,6 +85,12 @@ func TestWorkspaceCreateLostReplyUsesOriginalReceipt(t *testing.T) {
 						c.Labels = map[string]string{}
 					}
 					return workspaceReceiptStatusFixture(c), nil
+				case "docker.inspect":
+					// Only a removed container is proof of absence.
+					if scenario == "missing-container" {
+						return nil, errors.New("Error response from daemon: No such object: " + fmt.Sprint(p["id"]))
+					}
+					return nil, errors.New("unexpected docker.inspect")
 				default:
 					return nil, fmt.Errorf("unexpected RPC %s", method)
 				}
@@ -91,7 +103,7 @@ func TestWorkspaceCreateLostReplyUsesOriginalReceipt(t *testing.T) {
 					t.Fatal(err)
 				}
 				err = h.recoverSpaceWorkspaces(ctx, 10)
-				if (err == nil) != (scenario == "committed") {
+				if (err == nil) != (scenario == "committed" || scenario == "recreated" || scenario == "missing-container") {
 					t.Fatalf("recovery %s: %v", scenario, err)
 				}
 			}
@@ -104,8 +116,21 @@ func TestWorkspaceCreateLostReplyUsesOriginalReceipt(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if scenario == "committed" && current.WorkspaceStatus != "running" {
-				t.Fatalf("status=%s", current.WorkspaceStatus)
+			wantStatus := map[string]string{"committed": "running", "recreated": "running", "missing-container": "stopped"}
+			if want, ok := wantStatus[scenario]; ok && current.WorkspaceStatus != want {
+				t.Fatalf("status=%s want=%s", current.WorkspaceStatus, want)
+			}
+			if scenario == "missing-container" {
+				// A confirmed-absent container must clear the durable intent so the
+				// Space is not deadlocked on a receipt that can never be replayed.
+				var remaining int64
+				if err := d.Gorm.Table("workspace_create_operations").Where("space_id=?", space.ID).Count(&remaining).Error; err != nil {
+					t.Fatal(err)
+				}
+				if remaining != 0 {
+					t.Fatalf("stale create operations=%d", remaining)
+				}
+				return
 			}
 			var op workspaceCreateOperation
 			if err := d.Gorm.Table("workspace_create_operations").Where("space_id=?", space.ID).Take(&op).Error; err != nil {
