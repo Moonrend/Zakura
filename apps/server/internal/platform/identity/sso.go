@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"gorm.io/gorm"
 
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
@@ -30,6 +29,69 @@ import (
 type ssoConfig struct {
 	TenantID, TenantSlug, TenantName, Protocol, Issuer, ClientID, ClientSecretEnc, AuthorizeURL, TokenURL, JWKSURL, UserinfoURL, Scopes, IDPEntityID, IDPSSOURL, IDPCertificateEnc, DefaultRole string
 	JIT, Enforce                                                                                                                                                                                bool
+}
+
+type enterpriseSSOIdentity struct {
+	Provider string
+	Subject  string
+}
+
+type enterpriseSSOAccount struct {
+	ID, Email, Name, Status string
+	IsPlatformAdmin         bool
+}
+
+func enterpriseSSOProvider(tenantID, protocol string, trustParts ...string) string {
+	h := sha256.New()
+	_, _ = h.Write([]byte("enterprise-sso-v1\x00" + tenantID + "\x00" + protocol))
+	for _, part := range trustParts {
+		_, _ = h.Write([]byte("\x00" + part))
+	}
+	return "enterprise-sso:" + hex.EncodeToString(h.Sum(nil))
+}
+
+func oidcSSOIdentity(cfg ssoConfig, claims jwt.MapClaims) (enterpriseSSOIdentity, error) {
+	issuer := strings.TrimSpace(cfg.Issuer)
+	clientID := strings.TrimSpace(cfg.ClientID)
+	jwksURL := strings.TrimSpace(cfg.JWKSURL)
+	subject, _ := claims["sub"].(string)
+	if issuer == "" || clientID == "" || jwksURL == "" {
+		return enterpriseSSOIdentity{}, errors.New("OIDC provider identity is incomplete")
+	}
+	if subject == "" {
+		return enterpriseSSOIdentity{}, errors.New("identity token has no subject")
+	}
+	return enterpriseSSOIdentity{Provider: enterpriseSSOProvider(cfg.TenantID, "oidc", issuer, clientID, jwksURL), Subject: subject}, nil
+}
+
+func samlAssertionIdentity(cfg ssoConfig, assertion *xmlNode, certificate []byte) (enterpriseSSOIdentity, string, string, error) {
+	subjectNode := assertion.find("Subject")
+	if subjectNode == nil {
+		return enterpriseSSOIdentity{}, "", "", errors.New("SAML assertion contains no subject")
+	}
+	nameID := subjectNode.find("NameID")
+	if nameID == nil || strings.TrimSpace(nameID.text()) == "" {
+		return enterpriseSSOIdentity{}, "", "", errors.New("SAML assertion contains no NameID")
+	}
+	providerID := strings.TrimSpace(cfg.IDPEntityID)
+	cert, err := parseCertificate(string(certificate))
+	if err != nil || providerID == "" {
+		return enterpriseSSOIdentity{}, "", "", errors.New("SAML provider identity is incomplete")
+	}
+	fingerprint := sha256.Sum256(cert.Raw)
+	identity := enterpriseSSOIdentity{
+		Provider: enterpriseSSOProvider(cfg.TenantID, "saml", providerID, hex.EncodeToString(fingerprint[:])),
+		Subject:  strings.TrimSpace(nameID.text()),
+	}
+	email := samlAttribute(assertion, "email", "mail", "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress")
+	if email == "" && validEmail(identity.Subject) {
+		email = identity.Subject
+	}
+	if !validEmail(email) {
+		return enterpriseSSOIdentity{}, "", "", errors.New("SAML assertion contains no valid email")
+	}
+	name := samlAttribute(assertion, "name", "displayName", "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name")
+	return identity, email, name, nil
 }
 
 func (s *Service) discoverOIDCSSO(ctx context.Context, cfg *ssoConfig) error {
@@ -330,13 +392,18 @@ func (s *Service) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, e.Error())
 		return
 	}
-	email, _ := claims["email"].(string)
-	name, _ := claims["name"].(string)
-	if email == "" {
-		httpx.Error(w, 400, "identity token has no email")
+	identity, e := oidcSSOIdentity(cfg, claims)
+	if e != nil {
+		httpx.Error(w, 400, e.Error())
 		return
 	}
-	s.finishSSOLogin(w, r, cfg, email, name, "oidc")
+	email, _ := claims["email"].(string)
+	name, _ := claims["name"].(string)
+	if !validEmail(strings.ToLower(strings.TrimSpace(email))) {
+		httpx.Error(w, 400, "identity token has no valid email")
+		return
+	}
+	s.finishSSOLogin(w, r, cfg, identity, email, name, "oidc")
 }
 func (s *Service) verifyOIDCToken(ctx context.Context, cfg ssoConfig, raw, nonce string) (jwt.MapClaims, error) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, cfg.JWKSURL, nil)
@@ -406,11 +473,11 @@ func (s *Service) verifyOIDCToken(ctx context.Context, cfg ssoConfig, raw, nonce
 	}
 	return claims, nil
 }
-func (s *Service) finishSSOLogin(w http.ResponseWriter, r *http.Request, cfg ssoConfig, email, name, protocol string) {
-	result, err := s.ssoLoginResult(r.Context(), cfg, email, name, requestIP(r), r.UserAgent(), protocol)
+func (s *Service) finishSSOLogin(w http.ResponseWriter, r *http.Request, cfg ssoConfig, identity enterpriseSSOIdentity, email, name, protocol string) {
+	result, err := s.ssoLoginResult(r.Context(), cfg, identity, email, name, requestIP(r), r.UserAgent(), protocol)
 	if err != nil {
 		status := http.StatusBadRequest
-		if strings.Contains(err.Error(), "suspended") || strings.Contains(err.Error(), "not provisioned") {
+		if strings.Contains(err.Error(), "suspended") || strings.Contains(err.Error(), "not provisioned") || strings.Contains(err.Error(), "not linked") || strings.Contains(err.Error(), "not verified") {
 			status = http.StatusForbidden
 		}
 		httpx.Error(w, status, err.Error())
@@ -420,26 +487,13 @@ func (s *Service) finishSSOLogin(w http.ResponseWriter, r *http.Request, cfg sso
 	httpx.JSON(w, 200, result)
 }
 
-func (s *Service) ssoLoginResult(ctx context.Context, cfg ssoConfig, email, name, ip, userAgent, protocol string) (map[string]any, error) {
+func (s *Service) ssoLoginResult(ctx context.Context, cfg ssoConfig, identity enterpriseSSOIdentity, email, name, ip, userAgent, protocol string) (map[string]any, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
-	var uid, status string
-	var admin bool
-	var account models.User
-	err := s.gdb(ctx).Select("id,status,is_platform_admin").Where("email = ?", email).Take(&account).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		if !cfg.JIT {
-			return nil, errors.New("account is not provisioned")
-		}
-		uid = s.deps.NewID()
-		now := s.now()
-		nameValue := name
-		err = s.gdb(ctx).Create(&models.User{ID: &uid, Email: email, Name: &nameValue, Status: "active", EmailVerifiedAt: &now, CreatedAt: now, UpdatedAt: now}).Error
-	} else if err == nil {
-		uid, status, admin = derefString(account.ID), account.Status, account.IsPlatformAdmin
+	account, err := s.resolveEnterpriseSSOAccount(ctx, cfg, identity, email, name, protocol)
+	if err != nil {
+		return nil, err
 	}
-	if err != nil || status == "suspended" {
-		return nil, errors.New("account suspended")
-	}
+	uid := account.ID
 	role := cfg.DefaultRole
 	if role != "owner" && role != "admin" && role != "member" {
 		role = "member"
@@ -450,7 +504,7 @@ func (s *Service) ssoLoginResult(ctx context.Context, cfg ssoConfig, email, name
 		return nil, errors.New("membership update failed")
 	}
 	t := Tenant{ID: cfg.TenantID, Slug: cfg.TenantSlug, Name: cfg.TenantName}
-	u := User{ID: uid, Email: email, Name: name, IsPlatformAdmin: admin}
+	u := User{ID: uid, Email: account.Email, Name: account.Name, IsPlatformAdmin: account.IsPlatformAdmin}
 	methods, mfaEnabled, required, decisionErr := s.mfaDecision(ctx, uid, role)
 	if decisionErr != nil {
 		return nil, decisionErr
@@ -476,6 +530,64 @@ func (s *Service) ssoLoginResult(ctx context.Context, cfg ssoConfig, email, name
 	_ = s.Audit(ctx, cfg.TenantID, "sso.login", uid, "user", uid, map[string]any{"protocol": protocol})
 	s.recordLoginUsage(ctx, cfg.TenantID, uid, protocol)
 	return map[string]any{"session": token, "tenant": t, "role": role, "_userId": uid}, nil
+}
+
+func (s *Service) resolveEnterpriseSSOAccount(ctx context.Context, cfg ssoConfig, identity enterpriseSSOIdentity, email, name, protocol string) (enterpriseSSOAccount, error) {
+	var account enterpriseSSOAccount
+	if identity.Provider == "" || identity.Subject == "" {
+		return account, errors.New("SSO identity is incomplete")
+	}
+	if !validEmail(email) {
+		return account, errors.New("SSO identity has no valid email")
+	}
+	profile, _ := json.Marshal(map[string]any{"email": email, "name": name, "protocol": protocol, "tenantId": cfg.TenantID})
+	err := appdeps.InTx(ctx, s.deps.DB, func(tx *sql.Tx) error {
+		err := tx.QueryRowContext(ctx, s.q(`SELECT u.id,u.email,COALESCE(u.name,''),u.status,u.is_platform_admin FROM oauth_identities i JOIN users u ON u.id=i.user_id WHERE i.provider=? AND i.provider_user_id=?`), identity.Provider, identity.Subject).
+			Scan(&account.ID, &account.Email, &account.Name, &account.Status, &account.IsPlatformAdmin)
+		if err == nil {
+			_, _ = tx.ExecContext(ctx, s.q(`UPDATE oauth_identities SET profile_json=?,updated_at=? WHERE provider=? AND provider_user_id=?`), string(profile), s.now(), identity.Provider, identity.Subject)
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+
+		var existingUserID string
+		err = tx.QueryRowContext(ctx, s.q(`SELECT id FROM users WHERE email=?`), email).Scan(&existingUserID)
+		if err == nil {
+			return errors.New("SSO identity is not linked to the existing account")
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if !cfg.JIT {
+			return errors.New("account is not provisioned")
+		}
+
+		domain := strings.SplitN(email, "@", 2)[1]
+		var verifiedDomain int
+		if err = tx.QueryRowContext(ctx, s.q(`SELECT COUNT(*) FROM tenant_domains WHERE tenant_id=? AND domain=? AND verified_at IS NOT NULL`), cfg.TenantID, domain).Scan(&verifiedDomain); err != nil {
+			return err
+		}
+		if verifiedDomain != 1 {
+			return errors.New("email domain is not verified for this tenant")
+		}
+
+		now := s.now()
+		account = enterpriseSSOAccount{ID: s.deps.NewID(), Email: email, Name: name, Status: "active"}
+		if _, err = tx.ExecContext(ctx, s.q(`INSERT INTO users(id,email,name,is_platform_admin,status,email_verified_at,created_at,updated_at) VALUES(?,?,?,FALSE,'active',?,?,?)`), account.ID, email, name, now, now, now); err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, s.q(`INSERT INTO oauth_identities(id,provider,provider_user_id,user_id,profile_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`), s.deps.NewID(), identity.Provider, identity.Subject, account.ID, string(profile), now, now)
+		return err
+	})
+	if err != nil {
+		return enterpriseSSOAccount{}, err
+	}
+	if account.Status != "active" {
+		return enterpriseSSOAccount{}, errors.New("account suspended")
+	}
+	return account, nil
 }
 
 func (s *Service) samlMetadata(w http.ResponseWriter, r *http.Request) {
@@ -578,18 +690,12 @@ func (s *Service) samlACS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	email := samlAttribute(assertion, "email", "mail", "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress")
-	if email == "" {
-		if nameID := assertion.find("NameID"); nameID != nil {
-			email = strings.TrimSpace(nameID.text())
-		}
-	}
-	if !validEmail(email) {
-		s.samlFailure(w, r, errors.New("SAML assertion contains no valid email"))
+	identity, email, name, err := samlAssertionIdentity(cfg, assertion, certRaw)
+	if err != nil {
+		s.samlFailure(w, r, err)
 		return
 	}
-	name := samlAttribute(assertion, "name", "displayName", "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name")
-	result, err := s.ssoLoginResult(r.Context(), cfg, email, name, requestIP(r), r.UserAgent(), "saml")
+	result, err := s.ssoLoginResult(r.Context(), cfg, identity, strings.ToLower(strings.TrimSpace(email)), name, requestIP(r), r.UserAgent(), "saml")
 	if err != nil {
 		s.samlFailure(w, r, err)
 		return
