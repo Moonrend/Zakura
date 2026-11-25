@@ -122,15 +122,19 @@ func (h *handler) embedMemoryText(ctx context.Context, tenant string, cfg *memor
 			return nil, "", err
 		}
 		defer resp.Body.Close()
-		raw, err = io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+		limit := int64(8 << 20)
+		if resp.Status < 200 || resp.Status >= 300 {
+			limit = maxProviderErrorResponse
+		}
+		raw, err = io.ReadAll(io.LimitReader(resp.Body, limit))
 		if err != nil {
 			return nil, "", err
 		}
 		if resp.Status < 200 || resp.Status >= 300 {
-			return nil, "", fmt.Errorf("embedding failed HTTP %d: %s", resp.Status, string(raw))
+			return nil, "", fmt.Errorf("embedding failed HTTP %d: %s", resp.Status, gwTruncate(strings.Join(strings.Fields(string(raw)), " "), 1000))
 		}
 	} else {
-		u, err := safeProviderURL(strings.TrimRight(cfg.BaseURL, "/"), "embeddings")
+		u, err := h.providerURL(strings.TrimRight(cfg.BaseURL, "/"), "embeddings")
 		if err != nil {
 			return nil, "", err
 		}
@@ -140,17 +144,21 @@ func (h *handler) embedMemoryText(ctx context.Context, tenant string, cfg *memor
 		if cfg.APIKey != "" {
 			req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
 		}
-		resp, err := h.service.gateway.client.Do(req)
+		resp, err := h.service.gateway.providerHTTPClient().Do(req)
 		if err != nil {
 			return nil, "", err
 		}
 		defer resp.Body.Close()
-		raw, err = io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+		limit := int64(8 << 20)
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			limit = maxProviderErrorResponse
+		}
+		raw, err = io.ReadAll(io.LimitReader(resp.Body, limit))
 		if err != nil {
 			return nil, "", err
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil, "", fmt.Errorf("embedding failed HTTP %d: %s", resp.StatusCode, string(raw))
+			return nil, "", fmt.Errorf("embedding failed HTTP %d: %s", resp.StatusCode, gwTruncate(strings.Join(strings.Fields(string(raw)), " "), 1000))
 		}
 	}
 	var decoded struct {

@@ -74,7 +74,7 @@ func TestGatewayHTTPStreamFlushesBeforeUpstreamFinishes(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := &handler{deps: d, store: store, service: NewService(store)}
-	defer h.service.gateway.client.CloseIdleConnections()
+	defer h.service.gateway.providerHTTPClient().CloseIdleConnections()
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(httpx.WithPrincipal(r.Context(), httpx.Principal{TenantID: "tenant", APIKey: true, SpaceID: space.ID, APIKeyScopes: `["gateway"]`}))
 		h.gateway("chat", "chat")(w, r)
@@ -171,7 +171,7 @@ func TestGatewayTransportRetryCancellation(t *testing.T) {
 	defer cancel()
 	var calls atomic.Int32
 	called := make(chan struct{})
-	gateway := &Gateway{store: NewStore(testDeps(t)), client: &http.Client{Transport: gatewayRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+	gateway := &Gateway{store: NewStore(testDeps(t)), providerClient: &http.Client{Transport: gatewayRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls.Add(1)
 		close(called)
 		return nil, errors.New("dial failed")
@@ -213,7 +213,7 @@ func TestGatewayFailedResponseDoesNotWaitForBody(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	gateway := NewGateway(store)
-	defer gateway.client.CloseIdleConnections()
+	defer gateway.providerHTTPClient().CloseIdleConnections()
 	_, err = gateway.Do(ctx, "tenant", "chat", "chat", "m", []byte(`{}`))
 	if err == nil || ctx.Err() != nil || !strings.Contains(err.Error(), "HTTP 500") {
 		t.Fatalf("blocked reading error body: %v", err)
@@ -302,7 +302,7 @@ func TestGatewayHTTPResponseReadFailures(t *testing.T) {
 			}
 			h := &handler{deps: d, store: store, service: NewService(store)}
 			var calls atomic.Int32
-			h.service.gateway.client = &http.Client{Transport: gatewayRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			h.service.gateway.providerClient = &http.Client{Transport: gatewayRoundTripFunc(func(*http.Request) (*http.Response, error) {
 				calls.Add(1)
 				contentType, prefix := "application/json", `{"partial":`
 				if stream {

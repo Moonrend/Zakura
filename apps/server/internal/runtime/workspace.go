@@ -973,6 +973,7 @@ func (h *handler) createRuntimeNode(w http.ResponseWriter, r *http.Request) {
 	if tsAvailable {
 		meshProvider = "headscale-platform"
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	httpx.JSON(w, http.StatusCreated, map[string]any{"node": node, "token": token, "install": install, "installTailscale": installTailscale, "hostJoinsTailscale": tsAvailable, "meshProvider": meshProvider})
 }
 func (h *handler) patchRuntimeNode(w http.ResponseWriter, r *http.Request) {

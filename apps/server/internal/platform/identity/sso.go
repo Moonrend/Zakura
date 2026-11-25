@@ -474,7 +474,7 @@ func (s *Service) verifyOIDCToken(ctx context.Context, cfg ssoConfig, raw, nonce
 	return claims, nil
 }
 func (s *Service) finishSSOLogin(w http.ResponseWriter, r *http.Request, cfg ssoConfig, identity enterpriseSSOIdentity, email, name, protocol string) {
-	result, err := s.ssoLoginResult(r.Context(), cfg, identity, email, name, requestIP(r), r.UserAgent(), protocol)
+	result, err := s.ssoLoginResult(r.Context(), cfg, identity, email, name, s.requestIP(r), r.UserAgent(), protocol)
 	if err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "suspended") || strings.Contains(err.Error(), "not provisioned") || strings.Contains(err.Error(), "not linked") || strings.Contains(err.Error(), "not verified") {
@@ -695,7 +695,7 @@ func (s *Service) samlACS(w http.ResponseWriter, r *http.Request) {
 		s.samlFailure(w, r, err)
 		return
 	}
-	result, err := s.ssoLoginResult(r.Context(), cfg, identity, strings.ToLower(strings.TrimSpace(email)), name, requestIP(r), r.UserAgent(), "saml")
+	result, err := s.ssoLoginResult(r.Context(), cfg, identity, strings.ToLower(strings.TrimSpace(email)), name, s.requestIP(r), r.UserAgent(), "saml")
 	if err != nil {
 		s.samlFailure(w, r, err)
 		return

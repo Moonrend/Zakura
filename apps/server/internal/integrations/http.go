@@ -42,7 +42,11 @@ type handler struct {
 }
 
 func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies, lifecycle ...MCPInstanceLifecycle) {
-	h := &handler{deps: deps, client: &http.Client{Timeout: 60 * time.Second}}
+	registerRoutesWithClient(r, deps, newConnectorHTTPClient(), lifecycle...)
+}
+
+func registerRoutesWithClient(r chi.Router, deps *appdeps.Dependencies, client *http.Client, lifecycle ...MCPInstanceLifecycle) {
+	h := &handler{deps: deps, client: client}
 	if len(lifecycle) > 0 {
 		h.lifecycle = lifecycle[0]
 	}
@@ -440,21 +444,56 @@ func (h *handler) sharedOAuth(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.JSON(w, 200, map[string]any{"profiles": items})
 }
-func (h *handler) profileConfig(ctx context.Context, tenant, key string) (map[string]any, error) {
+
+type connectorOAuthState struct {
+	ID                   string `gorm:"column:id;primaryKey"`
+	TenantID             string `gorm:"column:tenant_id"`
+	SourceScope          string `gorm:"column:source_scope"`
+	SourceProfileID      string `gorm:"column:source_profile_id"`
+	DestinationScope     string `gorm:"column:destination_scope"`
+	DestinationProfileID string `gorm:"column:destination_profile_id"`
+	ExpiresAt            int64  `gorm:"column:expires_at"`
+	CreatedAt            string `gorm:"column:created_at"`
+}
+
+func (connectorOAuthState) TableName() string { return "connector_oauth_states" }
+
+type connectorOAuthStatePayload struct {
+	StateID              string `json:"stateId"`
+	TenantID             string `json:"tenantId"`
+	UserID               string `json:"userId"`
+	AgentID              string `json:"agentId"`
+	SpaceID              string `json:"spaceId"`
+	Ref                  string `json:"ref"`
+	ProfileKey           string `json:"profileKey"`
+	SourceScope          string `json:"sourceScope"`
+	SourceProfileID      string `json:"sourceProfileId"`
+	DestinationScope     string `json:"destinationScope"`
+	DestinationProfileID string `json:"destinationProfileId"`
+	RedirectURI          string `json:"redirectUri"`
+	Exp                  int64  `json:"exp"`
+}
+
+func (h *handler) profileConfigRow(ctx context.Context, tenant, key string) (models.ConnectorAuthProfile, map[string]any, error) {
 	var row models.ConnectorAuthProfile
 	e := h.deps.Gorm.WithContext(ctx).
 		Where("scope_key IN ? AND profile_key = ? AND enabled = true", []string{tenant, "platform"}, key).
 		Order(clause.OrderBy{Expression: clause.Expr{SQL: "CASE WHEN scope_key = ? THEN 0 ELSE 1 END", Vars: []any{tenant}}}).
 		First(&row).Error
 	if e != nil {
-		return nil, e
+		return row, nil, e
 	}
 	raw, e := decrypt(h.deps.Secret, row.ScopeKey+":"+key, row.ConfigEnc)
 	if e != nil {
-		return nil, e
+		return row, nil, e
 	}
 	var cfg map[string]any
 	e = json.Unmarshal(raw, &cfg)
+	return row, cfg, e
+}
+
+func (h *handler) profileConfig(ctx context.Context, tenant, key string) (map[string]any, error) {
+	_, cfg, e := h.profileConfigRow(ctx, tenant, key)
 	return cfg, e
 }
 func (h *handler) oauthStart(w http.ResponseWriter, r *http.Request) {
@@ -477,7 +516,7 @@ func (h *handler) oauthStart(w http.ResponseWriter, r *http.Request) {
 		}
 		b.SpaceID = space
 	}
-	cfg, e := h.profileConfig(r.Context(), p.TenantID, b.ProfileKey)
+	row, cfg, e := h.profileConfigRow(r.Context(), p.TenantID, b.ProfileKey)
 	if e != nil {
 		writeErr(w, e)
 		return
@@ -488,15 +527,40 @@ func (h *handler) oauthStart(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "OAuth profile is incomplete")
 		return
 	}
-	statePayload, _ := json.Marshal(map[string]any{"tenantId": p.TenantID, "userId": p.UserID, "agentId": b.AgentID, "spaceId": b.SpaceID, "ref": ref, "profileKey": b.ProfileKey, "redirectUri": b.RedirectURI, "exp": h.now().Add(10 * time.Minute).Unix()})
-	sig := hmac.New(sha256.New, h.deps.Secret)
-	sig.Write(statePayload)
-	state := base64.RawURLEncoding.EncodeToString(statePayload) + "." + base64.RawURLEncoding.EncodeToString(sig.Sum(nil))
 	u, e := url.Parse(authURL)
 	if e != nil {
 		writeErr(w, e)
 		return
 	}
+	if row.ID == nil || *row.ID == "" {
+		httpx.Error(w, 400, "profile unavailable")
+		return
+	}
+	now := h.now()
+	destinationProfileID := *row.ID
+	if row.ScopeKey == "platform" {
+		destinationProfileID = h.id()
+	}
+	sp := connectorOAuthStatePayload{
+		StateID: h.id(), TenantID: p.TenantID, UserID: p.UserID, AgentID: b.AgentID, SpaceID: b.SpaceID,
+		Ref: ref, ProfileKey: b.ProfileKey, SourceScope: row.ScopeKey, SourceProfileID: *row.ID,
+		DestinationScope: p.TenantID, DestinationProfileID: destinationProfileID, RedirectURI: b.RedirectURI,
+		Exp: now.Add(10 * time.Minute).Unix(),
+	}
+	_ = h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND expires_at < ?", p.TenantID, now.Unix()).Delete(&connectorOAuthState{}).Error
+	issued := connectorOAuthState{
+		ID: sp.StateID, TenantID: sp.TenantID, SourceScope: sp.SourceScope, SourceProfileID: sp.SourceProfileID,
+		DestinationScope: sp.DestinationScope, DestinationProfileID: sp.DestinationProfileID,
+		ExpiresAt: sp.Exp, CreatedAt: now.Format(time.RFC3339Nano),
+	}
+	if e = h.deps.Gorm.WithContext(r.Context()).Create(&issued).Error; e != nil {
+		writeErr(w, e)
+		return
+	}
+	statePayload, _ := json.Marshal(sp)
+	sig := hmac.New(sha256.New, h.deps.Secret)
+	sig.Write(statePayload)
+	state := base64.RawURLEncoding.EncodeToString(statePayload) + "." + base64.RawURLEncoding.EncodeToString(sig.Sum(nil))
 	q := u.Query()
 	q.Set("client_id", clientID)
 	q.Set("response_type", "code")
@@ -512,7 +576,7 @@ func (h *handler) oauthStart(w http.ResponseWriter, r *http.Request) {
 		q.Set("scope", strings.Join(vals, " "))
 	}
 	u.RawQuery = q.Encode()
-	httpx.JSON(w, 200, map[string]any{"authorizeUrl": u.String(), "state": state, "expiresAt": h.now().Add(10 * time.Minute)})
+	httpx.JSON(w, 200, map[string]any{"authorizeUrl": u.String(), "state": state, "expiresAt": time.Unix(sp.Exp, 0).UTC()})
 }
 func (h *handler) oauthComplete(w http.ResponseWriter, r *http.Request) {
 	var b struct{ Code, State string }
@@ -541,17 +605,12 @@ func (h *handler) oauthComplete(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "invalid state")
 		return
 	}
-	var sp struct {
-		TenantID    string `json:"tenantId"`
-		UserID      string `json:"userId"`
-		AgentID     string `json:"agentId"`
-		SpaceID     string `json:"spaceId"`
-		Ref         string `json:"ref"`
-		ProfileKey  string `json:"profileKey"`
-		RedirectURI string `json:"redirectUri"`
-		Exp         int64  `json:"exp"`
-	}
+	var sp connectorOAuthStatePayload
 	if e = json.Unmarshal(payload, &sp); e != nil {
+		httpx.Error(w, 400, "invalid state")
+		return
+	}
+	if sp.StateID == "" || sp.TenantID == "" || sp.ProfileKey == "" || sp.SourceProfileID == "" || sp.DestinationProfileID == "" || sp.DestinationScope != sp.TenantID || (sp.SourceScope != sp.TenantID && sp.SourceScope != "platform") || (sp.SourceScope == sp.TenantID && sp.SourceProfileID != sp.DestinationProfileID) || (sp.SourceScope == "platform" && sp.SourceProfileID == sp.DestinationProfileID) {
 		httpx.Error(w, 400, "invalid state")
 		return
 	}
@@ -559,8 +618,28 @@ func (h *handler) oauthComplete(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "state expired")
 		return
 	}
-	cfg, e := h.profileConfig(r.Context(), sp.TenantID, sp.ProfileKey)
+	consumed := h.deps.Gorm.WithContext(r.Context()).
+		Where("id = ? AND tenant_id = ? AND source_scope = ? AND source_profile_id = ? AND destination_scope = ? AND destination_profile_id = ? AND expires_at = ?", sp.StateID, sp.TenantID, sp.SourceScope, sp.SourceProfileID, sp.DestinationScope, sp.DestinationProfileID, sp.Exp).
+		Delete(&connectorOAuthState{})
+	if consumed.Error != nil || consumed.RowsAffected != 1 {
+		httpx.Error(w, 400, "invalid or already used state")
+		return
+	}
+	var row models.ConnectorAuthProfile
+	e = h.deps.Gorm.WithContext(r.Context()).
+		Where("id = ? AND scope_key = ? AND profile_key = ? AND enabled = true", sp.SourceProfileID, sp.SourceScope, sp.ProfileKey).
+		First(&row).Error
 	if e != nil {
+		httpx.Error(w, 400, "profile unavailable")
+		return
+	}
+	rawConfig, e := decrypt(h.deps.Secret, row.ScopeKey+":"+row.ProfileKey, row.ConfigEnc)
+	if e != nil {
+		httpx.Error(w, 400, "profile unavailable")
+		return
+	}
+	var cfg map[string]any
+	if e = json.Unmarshal(rawConfig, &cfg); e != nil {
 		httpx.Error(w, 400, "profile unavailable")
 		return
 	}
@@ -569,6 +648,11 @@ func (h *handler) oauthComplete(w http.ResponseWriter, r *http.Request) {
 	clientSecret, _ := cfg["clientSecret"].(string)
 	if tokenURL == "" || clientID == "" || clientSecret == "" {
 		httpx.Error(w, 400, "OAuth profile is incomplete")
+		return
+	}
+	tokenURL, e = connectorURL(tokenURL)
+	if e != nil {
+		httpx.Error(w, 400, "token exchange failed")
 		return
 	}
 	form := url.Values{}
@@ -584,11 +668,7 @@ func (h *handler) oauthComplete(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	client := h.deps.HTTPClient
-	if client == nil {
-		client = h.client
-	}
-	resp, e := client.Do(req)
+	resp, e := h.client.Do(req)
 	if e != nil {
 		httpx.Error(w, 400, "token exchange failed")
 		return
@@ -609,30 +689,38 @@ func (h *handler) oauthComplete(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, msg)
 		return
 	}
-	var row models.ConnectorAuthProfile
-	e = h.deps.Gorm.WithContext(r.Context()).
-		Where("scope_key IN ? AND profile_key = ? AND enabled = true", []string{sp.TenantID, "platform"}, sp.ProfileKey).
-		Order(clause.OrderBy{Expression: clause.Expr{SQL: "CASE WHEN scope_key = ? THEN 0 ELSE 1 END", Vars: []any{sp.TenantID}}}).
-		First(&row).Error
-	if e != nil {
-		httpx.Error(w, 400, "profile unavailable")
-		return
+	if row.ScopeKey == "platform" {
+		delete(cfg, "accessToken")
+		delete(cfg, "refreshToken")
 	}
 	cfg["accessToken"] = accessToken
 	if refreshToken, _ := tr["refresh_token"].(string); refreshToken != "" {
 		cfg["refreshToken"] = refreshToken
 	}
 	merged, _ := json.Marshal(cfg)
-	enc, e := encrypt(h.deps.Secret, row.ScopeKey+":"+row.ProfileKey, merged)
+	enc, e := encrypt(h.deps.Secret, sp.DestinationScope+":"+row.ProfileKey, merged)
 	if e != nil {
 		writeErr(w, e)
 		return
 	}
-	if e = h.deps.Gorm.WithContext(r.Context()).Model(&models.ConnectorAuthProfile{}).
-		Where("scope_key = ? AND profile_key = ?", row.ScopeKey, row.ProfileKey).
-		Updates(map[string]any{"config_enc": enc, "updated_at": h.now().Format(time.RFC3339Nano)}).Error; e != nil {
-		writeErr(w, e)
-		return
+	now := h.now().Format(time.RFC3339Nano)
+	if row.ScopeKey == sp.DestinationScope {
+		updated := h.deps.Gorm.WithContext(r.Context()).Model(&models.ConnectorAuthProfile{}).
+			Where("id = ? AND scope_key = ? AND profile_key = ?", sp.DestinationProfileID, sp.DestinationScope, sp.ProfileKey).
+			Updates(map[string]any{"config_enc": enc, "updated_at": now})
+		if updated.Error != nil || updated.RowsAffected != 1 {
+			httpx.Error(w, 400, "profile unavailable")
+			return
+		}
+	} else {
+		destination := models.ConnectorAuthProfile{
+			ID: &sp.DestinationProfileID, ScopeKey: sp.DestinationScope, ProfileKey: sp.ProfileKey,
+			Label: row.Label, Kind: row.Kind, Enabled: row.Enabled, ConfigEnc: enc, CreatedAt: now, UpdatedAt: now,
+		}
+		if e = h.deps.Gorm.WithContext(r.Context()).Create(&destination).Error; e != nil {
+			httpx.Error(w, 400, "profile unavailable")
+			return
+		}
 	}
 	httpx.JSON(w, 200, map[string]any{"ok": true, "ref": sp.Ref, "profileKey": sp.ProfileKey, "agentId": sp.AgentID, "spaceId": sp.SpaceID})
 }

@@ -30,16 +30,115 @@ type modelAuthLogin struct {
 	ExpiresAt                                            time.Time
 }
 
-var otelRateBuckets = struct {
-	sync.Mutex
-	values map[string]struct {
-		count   int
-		resetAt time.Time
-	}
-}{values: map[string]struct {
+const (
+	otelRateWindow            = time.Minute
+	otelClientRequestLimit    = 60
+	otelGlobalRequestLimit    = 600
+	otelGlobalByteLimit       = 64 << 20
+	otelMaxRateBuckets        = 512
+	otelMaxBodyBytes          = 8 << 20
+	otelMaxConcurrentIngest   = 8
+	otelMaxConcurrentForwards = 4
+)
+
+var errOTelByteBudget = errors.New("OTel global byte budget exceeded")
+
+type otelRateBucket struct {
 	count   int
 	resetAt time.Time
-}{}}
+}
+
+type otelGlobalBucket struct {
+	count   int
+	bytes   int64
+	resetAt time.Time
+}
+
+type otelLimiter struct {
+	sync.Mutex
+	clients      map[string]otelRateBucket
+	global       otelGlobalBucket
+	ingestSlots  chan struct{}
+	forwardSlots chan struct{}
+}
+
+func newOTelLimiter() *otelLimiter {
+	return &otelLimiter{
+		clients:      make(map[string]otelRateBucket),
+		ingestSlots:  make(chan struct{}, otelMaxConcurrentIngest),
+		forwardSlots: make(chan struct{}, otelMaxConcurrentForwards),
+	}
+}
+
+func (l *otelLimiter) resetGlobal(now time.Time) {
+	if !now.Before(l.global.resetAt) {
+		l.global = otelGlobalBucket{resetAt: now.Add(otelRateWindow)}
+	}
+}
+
+func (l *otelLimiter) rateLimited(key string, now time.Time) bool {
+	l.Lock()
+	defer l.Unlock()
+
+	for existingKey, bucket := range l.clients {
+		if !now.Before(bucket.resetAt) {
+			delete(l.clients, existingKey)
+		}
+	}
+	l.resetGlobal(now)
+	if l.global.count >= otelGlobalRequestLimit {
+		return true
+	}
+
+	bucket, ok := l.clients[key]
+	if !ok {
+		if len(l.clients) >= otelMaxRateBuckets {
+			return true
+		}
+		bucket.resetAt = now.Add(otelRateWindow)
+	}
+	if bucket.count >= otelClientRequestLimit {
+		return true
+	}
+	bucket.count++
+	l.clients[key] = bucket
+	l.global.count++
+	return false
+}
+
+func (l *otelLimiter) bytesLimited(size int64, now time.Time) bool {
+	l.Lock()
+	defer l.Unlock()
+	l.resetGlobal(now)
+	if size < 0 || size > otelGlobalByteLimit-l.global.bytes {
+		return true
+	}
+	l.global.bytes += size
+	return false
+}
+
+type otelByteBudgetReader struct {
+	reader io.Reader
+	limits *otelLimiter
+	now    func() time.Time
+}
+
+func (r *otelByteBudgetReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if n > 0 && r.limits.bytesLimited(int64(n), r.now()) {
+		return 0, errOTelByteBudget
+	}
+	return n, err
+}
+
+func acquireOTelSlot(slots chan struct{}) bool {
+	select {
+	case slots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
 
 func (h *handler) registerMisc(r chi.Router) {
 	r.Get("/capabilities", h.capabilities)
@@ -170,7 +269,7 @@ func (h *handler) putCapability(w http.ResponseWriter, r *http.Request, key stri
 		return
 	}
 	if endpoint, ok := cfg["endpoint"].(string); ok && endpoint != "" {
-		if _, e := safeProviderURL(endpoint, ""); e != nil {
+		if _, e := serviceURL(endpoint, ""); e != nil {
 			statusErr(w, e)
 			return
 		}
@@ -322,15 +421,19 @@ func (h *handler) modelAuthStart(w http.ResponseWriter, r *http.Request) {
 	}
 	req, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, deviceURL, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, e := h.service.gateway.client.Do(req)
+	resp, e := h.service.gateway.providerHTTPClient().Do(req)
 	if e != nil {
 		httpx.Error(w, 502, e.Error())
 		return
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	limit := int64(1 << 20)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		httpx.Error(w, 502, string(raw))
+		limit = maxProviderErrorResponse
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, limit))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		httpx.Error(w, 502, gwTruncate(strings.Join(strings.Fields(string(raw)), " "), 1000))
 		return
 	}
 	var device struct {
@@ -397,7 +500,7 @@ func (h *handler) modelAuthPoll(w http.ResponseWriter, r *http.Request) {
 	form := url.Values{"grant_type": []string{"urn:ietf:params:oauth:grant-type:device_code"}, "device_code": []string{login.DeviceCode}, "client_id": []string{clientID}}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, e := h.service.gateway.client.Do(req)
+	resp, e := h.service.gateway.providerHTTPClient().Do(req)
 	if e != nil {
 		if errors.Is(e, context.Canceled) {
 			httpx.Error(w, 409, "poll cancelled")
@@ -540,22 +643,32 @@ func (h *handler) getOTelConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 func (h *handler) ingestOTelLogs(w http.ResponseWriter, r *http.Request) {
-	actor := httpx.Principal{UserID: "0", TenantID: "0"}
-	if token := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")); token != "" {
-		if authenticated, err := h.authenticateRealtime(r.Context(), token); err == nil {
-			actor = authenticated
-		}
+	actor, ok := httpx.PrincipalFrom(r.Context())
+	if !ok || actor.UserID == "" || actor.TenantID == "" {
+		httpx.Error(w, http.StatusUnauthorized, "unauthorized")
+		return
 	}
-	remote := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0])
-	if remote == "" {
-		remote = r.RemoteAddr
-	}
-	if otelRateLimited(actor.UserID + ":" + actor.TenantID + ":" + remote) {
+	if h.otelLimits.rateLimited(otelRateIdentity(actor), h.store.now()) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		return
 	}
-	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 8<<20))
+	if !acquireOTelSlot(h.otelLimits.ingestSlots) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		return
+	}
+	defer func() { <-h.otelLimits.ingestSlots }()
+
+	body := &otelByteBudgetReader{
+		reader: http.MaxBytesReader(w, r.Body, otelMaxBodyBytes),
+		limits: h.otelLimits,
+		now:    h.store.now,
+	}
+	raw, err := io.ReadAll(body)
 	if err != nil {
+		if errors.Is(err, errOTelByteBudget) {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
 		httpx.Error(w, 413, "payload too large")
 		return
 	}
@@ -571,26 +684,21 @@ func (h *handler) ingestOTelLogs(w http.ResponseWriter, r *http.Request) {
 	endpoint := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"))
 	if endpoint != "" {
 		stamped, _ := json.Marshal(payload)
-		go h.forwardOTel(endpoint, stamped)
+		if acquireOTelSlot(h.otelLimits.forwardSlots) {
+			go func() {
+				defer func() { <-h.otelLimits.forwardSlots }()
+				h.forwardOTel(endpoint, stamped)
+			}()
+		}
 	}
 	w.WriteHeader(http.StatusAccepted)
 }
 
-func otelRateLimited(key string) bool {
-	now := time.Now()
-	otelRateBuckets.Lock()
-	defer otelRateBuckets.Unlock()
-	bucket, ok := otelRateBuckets.values[key]
-	if !ok || !now.Before(bucket.resetAt) {
-		otelRateBuckets.values[key] = struct {
-			count   int
-			resetAt time.Time
-		}{count: 1, resetAt: now.Add(time.Minute)}
-		return false
+func otelRateIdentity(actor httpx.Principal) string {
+	if actor.APIKey {
+		return "api-key\x00" + actor.TenantID + "\x00" + actor.APIKeyID
 	}
-	bucket.count++
-	otelRateBuckets.values[key] = bucket
-	return bucket.count > 60
+	return "user\x00" + actor.TenantID + "\x00" + actor.UserID
 }
 
 func filterAndStampOTel(payload map[string]any, userID, tenantID string) bool {

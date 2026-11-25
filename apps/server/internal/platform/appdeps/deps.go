@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -47,6 +48,8 @@ type Dependencies struct {
 	SendTransactionalEmail func(context.Context, string, string, string, string) error
 	RecordUsage            func(context.Context, UsageRecord) error
 	Redis                  RedisCache
+	ProviderTestPrivate    bool // Loopback provider fixtures only; production leaves this false.
+	TrustedProxyCIDRs      []netip.Prefix
 }
 
 type UsageRecord struct {

@@ -253,7 +253,7 @@ func TestJevEvaluationCancellation(t *testing.T) {
 
 func TestJevHTTPProviderCredentialContract(t *testing.T) {
 	d := testDeps(t)
-	token := seedTenant(t, d, "tenant")
+	token := seedProviderAdmin(t, d, "tenant")
 	router := chi.NewRouter()
 	RegisterRoutes(router, d)
 	server := httptest.NewServer(router)

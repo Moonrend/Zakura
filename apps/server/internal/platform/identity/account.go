@@ -58,7 +58,11 @@ func (s *Service) changeMyEmail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := appdeps.InTx(r.Context(), s.deps.DB, func(tx *sql.Tx) error {
-		if _, e := tx.ExecContext(r.Context(), s.q(`UPDATE users SET email=?,email_verified_at=NULL,updated_at=? WHERE id=?`), email, s.now(), p.UserID); e != nil {
+		now := s.now()
+		if _, e := tx.ExecContext(r.Context(), s.q(`UPDATE users SET email=?,email_verified_at=NULL,email_version=email_version+1,updated_at=? WHERE id=?`), email, now, p.UserID); e != nil {
+			return e
+		}
+		if _, e := tx.ExecContext(r.Context(), s.q(`UPDATE auth_tokens SET consumed_at=? WHERE user_id=? AND kind='email_verify' AND consumed_at IS NULL`), now, p.UserID); e != nil {
 			return e
 		}
 		return s.appendAuditTx(r.Context(), tx, p.TenantID, "auth.email_change", p.UserID, "user", p.UserID, nil)
@@ -67,7 +71,7 @@ func (s *Service) changeMyEmail(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 500, "update failed")
 		return
 	}
-	sent, _ := s.sendVerificationEmail(r.Context(), p.UserID, email)
+	sent, _ := s.sendVerificationEmail(r.Context(), p.UserID)
 	httpx.JSON(w, 200, map[string]any{"ok": true, "sent": sent})
 }
 

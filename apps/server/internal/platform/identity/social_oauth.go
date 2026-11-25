@@ -213,7 +213,7 @@ func (s *Service) completeOAuthLogin(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 403, err.Error())
 		return
 	}
-	result, err := s.socialAuthResult(r.Context(), user, tenant, role, requestIP(r), r.UserAgent())
+	result, err := s.socialAuthResult(r.Context(), user, tenant, role, s.requestIP(r), r.UserAgent())
 	if err != nil {
 		httpx.Error(w, 500, err.Error())
 		return
@@ -301,7 +301,6 @@ func fetchGitHubEmail(ctx context.Context, client *http.Client, userinfoURL, tok
 	for _, preference := range []func(emailRecord) bool{
 		func(item emailRecord) bool { return item.Primary && item.Verified },
 		func(item emailRecord) bool { return item.Verified },
-		func(emailRecord) bool { return true },
 	} {
 		for _, item := range list {
 			email := strings.ToLower(strings.TrimSpace(item.Email))
@@ -318,10 +317,17 @@ func (s *Service) linkSocialIdentity(ctx context.Context, provider, subject, ema
 	var identity models.OauthIdentity
 	err := s.gdb(ctx).Select("user_id").Where("provider = ? AND provider_user_id = ?", provider, subject).Take(&identity).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		if !isSyntheticEmail(email) {
+		syntheticEmail := isSyntheticEmail(email)
+		if !syntheticEmail && !verified {
+			return User{}, Tenant{}, "", errors.New("OAuth provider did not verify the email address")
+		}
+		if !syntheticEmail {
 			var existing models.User
-			if s.gdb(ctx).Select("id").Where("email = ?", email).Take(&existing).Error == nil {
+			lookupErr := s.gdb(ctx).Select("id").Where("email = ?", email).Take(&existing).Error
+			if lookupErr == nil {
 				uid = derefString(existing.ID)
+			} else if !errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+				return User{}, Tenant{}, "", lookupErr
 			}
 		}
 		if uid == "" {

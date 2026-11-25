@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/mail"
 	"net/url"
 	"strconv"
 	"strings"
@@ -224,16 +225,18 @@ func emailMailContent(mail bettermailMail) string {
 }
 
 func emailAddress(value string) string {
-	if i := strings.Index(value, "<"); i >= 0 {
-		if j := strings.Index(value[i+1:], ">"); j >= 0 {
-			return strings.ToLower(strings.TrimSpace(value[i+1 : i+1+j]))
-		}
+	address, e := mail.ParseAddress(strings.TrimSpace(value))
+	if e != nil {
+		return ""
 	}
-	return strings.ToLower(strings.TrimSpace(value))
+	return strings.ToLower(strings.TrimSpace(address.Address))
 }
 
 func allowedSender(sender string, allowlist []string) bool {
 	address := emailAddress(sender)
+	if address == "" {
+		return false
+	}
 	for _, rule := range allowlist {
 		normalized := strings.ToLower(strings.TrimSpace(rule))
 		if normalized == "" {

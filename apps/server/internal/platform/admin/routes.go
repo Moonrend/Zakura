@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/agentconfig"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
@@ -357,7 +358,21 @@ func (a *routes) patchUser(w http.ResponseWriter, r *http.Request) {
 		password = string(hash)
 		passwordChanged = true
 	}
-	err := a.d.Gorm.WithContext(r.Context()).Model(&models.User{}).Where("id=?", id).Updates(map[string]any{"name": nullIfBlank(name), "email": email, "password_hash": password, "is_platform_admin": admin, "can_use_local_runner": runner, "updated_at": a.now()}).Error
+	now := a.now()
+	emailChanged := email != current.Email
+	updates := map[string]any{"name": nullIfBlank(name), "email": email, "password_hash": password, "is_platform_admin": admin, "can_use_local_runner": runner, "updated_at": now}
+	if emailChanged {
+		updates["email_version"] = gorm.Expr("email_version + 1")
+	}
+	err := a.d.Gorm.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.User{}).Where("id=?", id).Updates(updates).Error; err != nil {
+			return err
+		}
+		if emailChanged {
+			return tx.Model(&models.AuthToken{}).Where("user_id=? AND kind='email_verify' AND consumed_at IS NULL", id).Update("consumed_at", now).Error
+		}
+		return nil
+	})
 	if err != nil {
 		httpx.Error(w, 409, "update conflict")
 		return

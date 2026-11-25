@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -87,6 +88,20 @@ func request(t *testing.T, c *http.Client, method, url, token string, v any) (in
 	return resp.StatusCode, out
 }
 
+const fixtureConnectorEndpoint = "http://provider.example.test"
+
+func fixtureConnectorClient(server *httptest.Server) *http.Client {
+	dialer := net.Dialer{}
+	return &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			if address != "provider.example.test:80" {
+				return nil, fmt.Errorf("unexpected fixture destination %s", address)
+			}
+			return dialer.DialContext(ctx, network, server.Listener.Addr().String())
+		},
+	}}
+}
+
 func TestConnectorEncryptionRetryIsolationAndWebhookIdempotency(t *testing.T) {
 	d, tokA, tokB := setup(t)
 	var attempts atomic.Int32
@@ -103,11 +118,11 @@ func TestConnectorEncryptionRetryIsolationAndWebhookIdempotency(t *testing.T) {
 	}))
 	defer provider.Close()
 	router := chi.NewRouter()
-	RegisterRoutes(router, d)
+	registerRoutesWithClient(router, d, fixtureConnectorClient(provider))
 	server := httptest.NewServer(router)
 	defer server.Close()
 	client := server.Client()
-	code, out := request(t, client, "PUT", server.URL+"/api/connectors/profiles/slack-main", tokA, map[string]any{"label": "Slack", "kind": "oauth2", "config": map[string]any{"baseUrl": provider.URL, "accessToken": "secret-token", "webhookSecret": "hook-secret"}})
+	code, out := request(t, client, "PUT", server.URL+"/api/connectors/profiles/slack-main", tokA, map[string]any{"label": "Slack", "kind": "oauth2", "config": map[string]any{"baseUrl": fixtureConnectorEndpoint, "accessToken": "secret-token", "webhookSecret": "hook-secret"}})
 	if code != 200 {
 		t.Fatalf("profile %d %#v", code, out)
 	}
@@ -483,21 +498,30 @@ func TestPlatformProfileScopes(t *testing.T) {
 	}
 }
 
-func oauthTestState(t *testing.T, secret []byte, payload map[string]any) string {
+func startConnectorOAuth(t *testing.T, client *http.Client, serverURL, token, ref, profileKey, redirectURI string) string {
 	t.Helper()
-	raw, e := json.Marshal(payload)
+	code, out := request(t, client, "POST", serverURL+"/api/connectors/"+ref+"/oauth/start", token, map[string]any{"profileKey": profileKey, "redirectURI": redirectURI})
+	if code != 200 {
+		t.Fatalf("start OAuth %d %#v", code, out)
+	}
+	authorizeURL, _ := out["authorizeUrl"].(string)
+	u, e := url.Parse(authorizeURL)
 	if e != nil {
 		t.Fatal(e)
 	}
-	mac := hmac.New(sha256.New, secret)
-	mac.Write(raw)
-	return base64.RawURLEncoding.EncodeToString(raw) + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	state := u.Query().Get("state")
+	if state == "" {
+		t.Fatalf("authorizeUrl missing state: %q", authorizeURL)
+	}
+	return state
 }
 
 func TestConnectorOAuthCompleteExchange(t *testing.T) {
 	d, tokA, _ := setup(t)
 	var form url.Values
+	var tokenCalls atomic.Int32
 	token := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenCalls.Add(1)
 		_ = r.ParseForm()
 		form = r.Form
 		w.Header().Set("Content-Type", "application/json")
@@ -505,15 +529,15 @@ func TestConnectorOAuthCompleteExchange(t *testing.T) {
 	}))
 	defer token.Close()
 	r := chi.NewRouter()
-	RegisterRoutes(r, d)
+	registerRoutesWithClient(r, d, fixtureConnectorClient(token))
 	srv := httptest.NewServer(r)
 	defer srv.Close()
 	client := srv.Client()
-	code, out := request(t, client, "PUT", srv.URL+"/api/connectors/profiles/slack-main", tokA, map[string]any{"label": "Slack", "kind": "oauth2", "config": map[string]any{"authorizationUrl": "https://slack.test/authorize", "tokenUrl": token.URL, "clientId": "cid", "clientSecret": "csecret"}})
+	code, out := request(t, client, "PUT", srv.URL+"/api/connectors/profiles/slack-main", tokA, map[string]any{"label": "Slack", "kind": "oauth2", "config": map[string]any{"authorizationUrl": "https://slack.test/authorize", "tokenUrl": fixtureConnectorEndpoint, "clientId": "cid", "clientSecret": "csecret"}})
 	if code != 200 {
 		t.Fatalf("profile %d %#v", code, out)
 	}
-	state := oauthTestState(t, d.Secret, map[string]any{"tenantId": "ta", "userId": "user-ta", "agentId": "agent-ta", "ref": "slack", "profileKey": "slack-main", "redirectUri": "http://app.test/console/connectors/oauth/callback", "exp": d.Clock().Add(10 * time.Minute).Unix()})
+	state := startConnectorOAuth(t, client, srv.URL, tokA, "slack", "slack-main", "http://app.test/console/connectors/oauth/callback")
 	code, out = request(t, client, "POST", srv.URL+"/api/connectors/oauth/complete", "", map[string]any{"code": "abc", "state": state})
 	if code != 200 || out["ok"] != true {
 		t.Fatalf("complete %d %#v", code, out)
@@ -534,50 +558,143 @@ func TestConnectorOAuthCompleteExchange(t *testing.T) {
 	if cfg["accessToken"] != "tok-123" || cfg["refreshToken"] != "ref-456" {
 		t.Fatalf("tokens not persisted: %#v", cfg)
 	}
+	code, out = request(t, client, "POST", srv.URL+"/api/connectors/oauth/complete", "", map[string]any{"code": "abc", "state": state})
+	if code != 400 || out["error"] != "invalid or already used state" || tokenCalls.Load() != 1 {
+		t.Fatalf("replayed state reached token exchange: code=%d calls=%d %#v", code, tokenCalls.Load(), out)
+	}
 }
 
 func TestConnectorOAuthCompleteRejectsBadState(t *testing.T) {
 	d, tokA, _ := setup(t)
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	d.Clock = func() time.Time { return now }
 	token := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{"access_token":"tok-123"}`)
 	}))
 	defer token.Close()
 	r := chi.NewRouter()
-	RegisterRoutes(r, d)
+	registerRoutesWithClient(r, d, fixtureConnectorClient(token))
 	srv := httptest.NewServer(r)
 	defer srv.Close()
 	client := srv.Client()
-	code, out := request(t, client, "PUT", srv.URL+"/api/connectors/profiles/slack-main", tokA, map[string]any{"label": "Slack", "kind": "oauth2", "config": map[string]any{"authorizationUrl": "https://slack.test/authorize", "tokenUrl": token.URL, "clientId": "cid", "clientSecret": "csecret"}})
+	code, out := request(t, client, "PUT", srv.URL+"/api/connectors/profiles/slack-main", tokA, map[string]any{"label": "Slack", "kind": "oauth2", "config": map[string]any{"authorizationUrl": "https://slack.test/authorize", "tokenUrl": fixtureConnectorEndpoint, "clientId": "cid", "clientSecret": "csecret"}})
 	if code != 200 {
 		t.Fatalf("profile %d %#v", code, out)
 	}
-	base := map[string]any{"tenantId": "ta", "userId": "user-ta", "agentId": "agent-ta", "ref": "slack", "profileKey": "slack-main", "redirectUri": "http://app.test/console/connectors/oauth/callback"}
-	base["exp"] = d.Clock().Add(10 * time.Minute).Unix()
-	good := oauthTestState(t, d.Secret, base)
-	tampered := oauthTestState(t, []byte("wrong-secret-wrong-secret-wrong"), base)
+	good := startConnectorOAuth(t, client, srv.URL, tokA, "slack", "slack-main", "http://app.test/console/connectors/oauth/callback")
+	goodParts := strings.Split(good, ".")
+	if len(goodParts) != 2 || goodParts[1] == "" {
+		t.Fatalf("invalid issued state: %q", good)
+	}
+	replacement := byte('A')
+	if goodParts[1][0] == replacement {
+		replacement = 'B'
+	}
+	tampered := goodParts[0] + "." + string(replacement) + goodParts[1][1:]
 	code, _ = request(t, client, "POST", srv.URL+"/api/connectors/oauth/complete", "", map[string]any{"code": "abc", "state": tampered})
 	if code != 400 {
 		t.Fatalf("tampered state should 400: %d", code)
 	}
-	expiredPayload := map[string]any{"tenantId": "ta", "userId": "user-ta", "agentId": "agent-ta", "ref": "slack", "profileKey": "slack-main", "redirectUri": "http://app.test/console/connectors/oauth/callback", "exp": d.Clock().Add(-time.Minute).Unix()}
-	code, out = request(t, client, "POST", srv.URL+"/api/connectors/oauth/complete", "", map[string]any{"code": "abc", "state": oauthTestState(t, d.Secret, expiredPayload)})
+	expired := startConnectorOAuth(t, client, srv.URL, tokA, "slack", "slack-main", "http://app.test/console/connectors/oauth/callback")
+	now = now.Add(11 * time.Minute)
+	code, out = request(t, client, "POST", srv.URL+"/api/connectors/oauth/complete", "", map[string]any{"code": "abc", "state": expired})
 	if code != 400 || out["error"] != "state expired" {
 		t.Fatalf("expired state should 400 state expired: %d %#v", code, out)
 	}
+	now = now.Add(-11 * time.Minute)
 	code, out = request(t, client, "POST", srv.URL+"/api/connectors/oauth/complete", "", map[string]any{"code": "abc", "state": good})
 	if code != 200 {
 		t.Fatalf("good state should complete: %d %#v", code, out)
 	}
 
-	code, out = request(t, client, "PUT", srv.URL+"/api/connectors/profiles/incomplete", tokA, map[string]any{"label": "Incomplete", "kind": "oauth2", "config": map[string]any{"clientId": "cid", "clientSecret": "csecret"}})
+	code, out = request(t, client, "PUT", srv.URL+"/api/connectors/profiles/incomplete", tokA, map[string]any{"label": "Incomplete", "kind": "oauth2", "config": map[string]any{"authorizationUrl": "https://slack.test/authorize", "clientId": "cid"}})
 	if code != 200 {
 		t.Fatalf("incomplete profile %d %#v", code, out)
 	}
-	incompletePayload := map[string]any{"tenantId": "ta", "userId": "user-ta", "agentId": "agent-ta", "ref": "slack", "profileKey": "incomplete", "redirectUri": "http://app.test/cb", "exp": d.Clock().Add(10 * time.Minute).Unix()}
-	code, out = request(t, client, "POST", srv.URL+"/api/connectors/oauth/complete", "", map[string]any{"code": "abc", "state": oauthTestState(t, d.Secret, incompletePayload)})
+	incomplete := startConnectorOAuth(t, client, srv.URL, tokA, "slack", "incomplete", "http://app.test/cb")
+	code, out = request(t, client, "POST", srv.URL+"/api/connectors/oauth/complete", "", map[string]any{"code": "abc", "state": incomplete})
 	if code != 400 || out["error"] != "OAuth profile is incomplete" {
 		t.Fatalf("missing tokenUrl should 400: %d %#v", code, out)
+	}
+}
+
+func TestConnectorOAuthPlatformProfileCreatesTenantGrant(t *testing.T) {
+	d, tokA, _ := setup(t)
+	var tokenCalls atomic.Int32
+	token := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"access_token":"tenant-access"}`)
+	}))
+	defer token.Close()
+	r := chi.NewRouter()
+	registerRoutesWithClient(r, d, fixtureConnectorClient(token))
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+	client := srv.Client()
+	admin := platformAdminSession(t, d, "ta")
+	code, out := request(t, client, "PUT", srv.URL+"/api/connectors/profiles/slack?scope=platform", admin, map[string]any{
+		"label": "Shared Slack", "kind": "oauth2", "enabled": true,
+		"config": map[string]any{"authorizationUrl": "https://slack.test/authorize", "tokenUrl": fixtureConnectorEndpoint, "clientId": "shared-client", "clientSecret": "shared-secret", "accessToken": "platform-access", "refreshToken": "platform-refresh"},
+	})
+	if code != 200 {
+		t.Fatalf("platform profile %d %#v", code, out)
+	}
+	state := startConnectorOAuth(t, client, srv.URL, tokA, "slack", "slack", "http://app.test/callback")
+	parts := strings.Split(state, ".")
+	if len(parts) != 2 {
+		t.Fatalf("invalid issued state: %q", state)
+	}
+	payload, e := base64.RawURLEncoding.DecodeString(parts[0])
+	if e != nil {
+		t.Fatal(e)
+	}
+	var issued connectorOAuthStatePayload
+	if e = json.Unmarshal(payload, &issued); e != nil {
+		t.Fatal(e)
+	}
+	if issued.SourceScope != "platform" || issued.DestinationScope != "ta" || issued.SourceProfileID == issued.DestinationProfileID {
+		t.Fatalf("state did not pin isolated destination: %#v", issued)
+	}
+	var pending int
+	if e = d.DB.QueryRow(`SELECT COUNT(*) FROM connector_oauth_states WHERE id=? AND tenant_id='ta' AND source_scope='platform' AND destination_scope='ta'`, issued.StateID).Scan(&pending); e != nil || pending != 1 {
+		t.Fatalf("single-use state not issued: count=%d err=%v", pending, e)
+	}
+	code, out = request(t, client, "POST", srv.URL+"/api/connectors/oauth/complete", "", map[string]any{"code": "abc", "state": state})
+	if code != 200 || out["ok"] != true {
+		t.Fatalf("complete platform template %d %#v", code, out)
+	}
+	var platformEnc, tenantEnc string
+	if e = d.DB.QueryRow(`SELECT config_enc FROM connector_auth_profiles WHERE scope_key='platform' AND profile_key='slack'`).Scan(&platformEnc); e != nil {
+		t.Fatal(e)
+	}
+	if e = d.DB.QueryRow(`SELECT config_enc FROM connector_auth_profiles WHERE id=? AND scope_key='ta' AND profile_key='slack'`, issued.DestinationProfileID).Scan(&tenantEnc); e != nil {
+		t.Fatal(e)
+	}
+	platformRaw, e := decrypt(d.Secret, "platform:slack", platformEnc)
+	if e != nil {
+		t.Fatal(e)
+	}
+	tenantRaw, e := decrypt(d.Secret, "ta:slack", tenantEnc)
+	if e != nil {
+		t.Fatal(e)
+	}
+	var platformConfig, tenantConfig map[string]any
+	_ = json.Unmarshal(platformRaw, &platformConfig)
+	_ = json.Unmarshal(tenantRaw, &tenantConfig)
+	if platformConfig["accessToken"] != "platform-access" || platformConfig["refreshToken"] != "platform-refresh" {
+		t.Fatalf("platform grant changed: %#v", platformConfig)
+	}
+	if tenantConfig["accessToken"] != "tenant-access" || tenantConfig["refreshToken"] != nil || tenantConfig["clientId"] != "shared-client" {
+		t.Fatalf("tenant grant not isolated from shared client config: %#v", tenantConfig)
+	}
+	if e = d.DB.QueryRow(`SELECT COUNT(*) FROM connector_oauth_states WHERE id=?`, issued.StateID).Scan(&pending); e != nil || pending != 0 {
+		t.Fatalf("OAuth state not consumed: count=%d err=%v", pending, e)
+	}
+	code, out = request(t, client, "POST", srv.URL+"/api/connectors/oauth/complete", "", map[string]any{"code": "abc", "state": state})
+	if code != 400 || tokenCalls.Load() != 1 {
+		t.Fatalf("platform state replay reached exchange: code=%d calls=%d %#v", code, tokenCalls.Load(), out)
 	}
 }
 

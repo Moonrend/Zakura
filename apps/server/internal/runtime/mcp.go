@@ -9,10 +9,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +37,34 @@ type rpcEnvelope struct {
 	ID      any    `json:"id,omitempty"`
 	Method  string `json:"method"`
 	Params  any    `json:"params,omitempty"`
+}
+
+const (
+	maxMCPResponseBytes = 16 << 20
+	maxMCPErrorBytes    = 4 << 10
+	maxMCPErrorText     = 512
+)
+
+func boundedMCPErrorDetail(raw []byte) string {
+	detail := strings.Join(strings.Fields(string(raw)), " ")
+	return gwTruncate(detail, maxMCPErrorText)
+}
+
+func sanitizeMCPProbeHeaders(headers map[string]string) (map[string]string, error) {
+	clean := make(map[string]string, len(headers))
+	for key, value := range headers {
+		canonical := http.CanonicalHeaderKey(strings.TrimSpace(key))
+		switch canonical {
+		case "Authorization", "Api-Key", "X-Api-Key":
+		default:
+			return nil, fmt.Errorf("probe header %q is not allowed", key)
+		}
+		if strings.ContainsAny(value, "\r\n") {
+			return nil, fmt.Errorf("probe header %q has an invalid value", key)
+		}
+		clean[canonical] = value
+	}
+	return clean, nil
 }
 
 func (h *handler) protectMCPConfig(id string, raw json.RawMessage) (string, string, error) {
@@ -177,6 +208,9 @@ func (h *handler) getMCPInstance(ctx context.Context, tenant, id string) (mcpIns
 	return x, e
 }
 func (h *handler) mcpRPC(ctx context.Context, inst mcpInstance, method string, params any) (json.RawMessage, error) {
+	if err := requireStdioOCIConfigApproval(inst.Config); err != nil {
+		return nil, err
+	}
 	var cfg struct {
 		URL             string            `json:"url"`
 		RuntimeNodeID   string            `json:"runtimeNodeId"`
@@ -227,13 +261,11 @@ func (h *handler) mcpRPC(ctx context.Context, inst mcpInstance, method string, p
 			return nil, errors.New("invalid MCP credential payload")
 		}
 	}
-	u, e := url.Parse(cfg.URL)
-	if e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return nil, errors.New("invalid MCP URL")
-	}
 	var safe *url.URL
+	client := h.service.gateway.providerHTTPClient()
+	var e error
 	if cfg.RuntimeNodeID == "" {
-		safe, e = safeProviderURL(cfg.URL, "")
+		safe, e = h.providerURL(cfg.URL, "")
 		if e != nil {
 			return nil, e
 		}
@@ -255,10 +287,18 @@ func (h *handler) mcpRPC(ctx context.Context, inst mcpInstance, method string, p
 		_ = json.Unmarshal([]byte(hostInfo), &reported)
 		primary, _ := reported["primaryIp"].(string)
 		hostname, _ := reported["hostname"].(string)
-		if !strings.EqualFold(u.Hostname(), primary) && !strings.EqualFold(u.Hostname(), hostname) {
+		safe, e = providerURL(cfg.URL, "", true)
+		if e != nil {
+			return nil, errors.New("invalid runtime MCP URL")
+		}
+		if !strings.EqualFold(safe.Hostname(), primary) && !strings.EqualFold(safe.Hostname(), hostname) {
 			return nil, errors.New("MCP URL does not match its runtime node")
 		}
-		safe = u
+		primaryIP, parseErr := netip.ParseAddr(strings.Trim(strings.TrimSpace(primary), "[]"))
+		if parseErr != nil || primaryIP.Zone() != "" || !primaryIP.IsValid() || primaryIP.IsUnspecified() || primaryIP.IsMulticast() {
+			return nil, errors.New("MCP runtime node has no usable primary address")
+		}
+		client = newPinnedProviderHTTPClient(primaryIP)
 	}
 	type callResult struct {
 		result json.RawMessage
@@ -306,18 +346,31 @@ func (h *handler) mcpRPC(ctx context.Context, inst mcpInstance, method string, p
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
-		resp, err := h.service.gateway.client.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			return callResult{}, err
 		}
-		raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+		limit := int64(maxMCPResponseBytes)
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			limit = maxMCPErrorBytes
+		}
+		raw, readErr := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 		_ = resp.Body.Close()
+		if int64(len(raw)) > limit {
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				return callResult{}, errors.New("MCP response exceeds size limit")
+			}
+			raw = raw[:limit]
+		}
 		result := callResult{sid: resp.Header.Get("Mcp-Session-Id"), status: resp.StatusCode, body: raw}
 		if readErr != nil {
 			return result, readErr
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return result, fmt.Errorf("MCP status %d: %s", resp.StatusCode, string(raw))
+			if detail := boundedMCPErrorDetail(raw); detail != "" {
+				return result, fmt.Errorf("MCP status %d: %s", resp.StatusCode, detail)
+			}
+			return result, fmt.Errorf("MCP status %d", resp.StatusCode)
 		}
 		if notification || len(bytes.TrimSpace(raw)) == 0 {
 			return result, nil
@@ -341,7 +394,7 @@ func (h *handler) mcpRPC(ctx context.Context, inst mcpInstance, method string, p
 			return result, errors.New("invalid MCP JSON-RPC response")
 		}
 		if out.Error != nil {
-			return result, fmt.Errorf("MCP %d: %s", out.Error.Code, out.Error.Message)
+			return result, fmt.Errorf("MCP %d: %s", out.Error.Code, boundedMCPErrorDetail([]byte(out.Error.Message)))
 		}
 		result.result = out.Result
 		return result, nil
@@ -385,7 +438,7 @@ func (h *handler) mcpRPC(ctx context.Context, inst mcpInstance, method string, p
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
-		if resp, err := h.service.gateway.client.Do(req); err == nil {
+		if resp, err := client.Do(req); err == nil {
 			_ = resp.Body.Close()
 		}
 	}()
@@ -568,6 +621,9 @@ func (h *handler) deleteMCPPolicy(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, map[string]any{"ok": true})
 }
 func (h *handler) probeMCP(w http.ResponseWriter, r *http.Request) {
+	if !requireProviderAdmin(w, r) {
+		return
+	}
 	var b struct {
 		URL     string            `json:"url"`
 		Headers map[string]string `json:"headers"`
@@ -576,7 +632,12 @@ func (h *handler) probeMCP(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "url required")
 		return
 	}
-	cfg, _ := json.Marshal(map[string]any{"url": b.URL, "headers": b.Headers})
+	headers, err := sanitizeMCPProbeHeaders(b.Headers)
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	cfg, _ := json.Marshal(map[string]any{"url": b.URL, "headers": headers})
 	result, e := h.mcpRPC(r.Context(), mcpInstance{ID: "probe", Config: cfg, Secret: json.RawMessage(`{}`)}, "initialize", map[string]any{"protocolVersion": "2025-06-18", "capabilities": map[string]any{}, "clientInfo": map[string]any{"name": "zakura", "version": "go-rewrite"}})
 	if e != nil {
 		statusErr(w, e)
@@ -603,9 +664,98 @@ type stdioImportBody struct {
 	Headers                                                            map[string]string `json:"headers"`
 	Args                                                               []string          `json:"args"`
 	Env                                                                map[string]string `json:"env"`
+	OCIPlatformApproved                                                bool              `json:"-"`
+}
+
+const stdioOCIApprovalKey = "ociPlatformApproved"
+
+var errStdioOCIPlatformAdminRequired = errors.New("OCI stdio MCP requires platform administrator approval")
+
+var stdioConfigControlKeys = []string{"command", "args", "env", "workingDir", "packageManager", "bridgeImage", stdioOCIApprovalKey}
+
+func stdioPackageManager(command, configured string) string {
+	packageManager := strings.ToLower(strings.TrimSpace(configured))
+	if packageManager == "" {
+		if command == "docker" || command == "podman" {
+			return "oci"
+		}
+		return "npm"
+	}
+	return packageManager
+}
+
+func authorizeStdioOCI(p httpx.Principal, command, packageManager string) (bool, error) {
+	if stdioPackageManager(command, packageManager) != "oci" {
+		return false, nil
+	}
+	if !p.IsPlatformAdmin {
+		return false, errStdioOCIPlatformAdminRequired
+	}
+	return true, nil
+}
+
+func requireStdioOCIApproval(body stdioImportBody) error {
+	if stdioPackageManager(body.Command, body.PackageManager) == "oci" && !body.OCIPlatformApproved {
+		return errStdioOCIPlatformAdminRequired
+	}
+	return nil
+}
+
+func validateStdioConfigControlKeys(cfg map[string]any) error {
+	for key := range cfg {
+		for _, canonical := range stdioConfigControlKeys {
+			if key != canonical && strings.EqualFold(key, canonical) {
+				return fmt.Errorf("stdio config field %s must use its canonical name", canonical)
+			}
+		}
+	}
+	return nil
+}
+
+func stdioConfigControls(raw json.RawMessage) (command, packageManager string, approved, hasCommand bool, err error) {
+	var cfg map[string]any
+	if json.Unmarshal(raw, &cfg) != nil {
+		return "", "", false, false, errors.New("invalid MCP config")
+	}
+	if err = validateStdioConfigControlKeys(cfg); err != nil {
+		return "", "", false, false, err
+	}
+	commandValue, hasCommand := cfg["command"]
+	if !hasCommand {
+		return "", "", false, false, nil
+	}
+	command, valid := commandValue.(string)
+	if !valid {
+		return "", "", false, true, errors.New("invalid stdio MCP command")
+	}
+	if value, ok := cfg["packageManager"]; ok && value != nil {
+		packageManager, valid = value.(string)
+		if !valid {
+			return "", "", false, true, errors.New("invalid stdio MCP packageManager")
+		}
+	}
+	if value, ok := cfg[stdioOCIApprovalKey]; ok {
+		approved, valid = value.(bool)
+		if !valid {
+			return "", "", false, true, errors.New("invalid OCI platform approval")
+		}
+	}
+	return command, packageManager, approved, true, nil
+}
+
+func requireStdioOCIConfigApproval(raw json.RawMessage) error {
+	command, packageManager, approved, hasCommand, err := stdioConfigControls(raw)
+	if err != nil || !hasCommand || command == "" {
+		return err
+	}
+	return requireStdioOCIApproval(stdioImportBody{Command: command, PackageManager: packageManager, OCIPlatformApproved: approved})
 }
 
 func stdioBodyFromConfig(raw json.RawMessage) (stdioImportBody, bool) {
+	command, packageManager, approved, hasCommand, err := stdioConfigControls(raw)
+	if err != nil || !hasCommand || command == "" {
+		return stdioImportBody{}, false
+	}
 	var cfg struct {
 		Command        string            `json:"command"`
 		Args           []string          `json:"args"`
@@ -615,11 +765,11 @@ func stdioBodyFromConfig(raw json.RawMessage) (stdioImportBody, bool) {
 		RuntimeNodeID  string            `json:"runtimeNodeId"`
 		BridgeImage    string            `json:"bridgeImage"`
 	}
-	if json.Unmarshal(raw, &cfg) != nil || cfg.Command == "" {
+	if json.Unmarshal(raw, &cfg) != nil {
 		return stdioImportBody{}, false
 	}
 	node := cfg.RuntimeNodeID
-	return stdioImportBody{Command: cfg.Command, Args: cfg.Args, Env: cfg.Env, WorkingDir: cfg.WorkingDir, PackageManager: cfg.PackageManager, RuntimeNodeID: &node, Image: cfg.BridgeImage}, true
+	return stdioImportBody{Command: command, Args: cfg.Args, Env: cfg.Env, WorkingDir: cfg.WorkingDir, PackageManager: packageManager, RuntimeNodeID: &node, Image: cfg.BridgeImage, OCIPlatformApproved: approved}, true
 }
 
 func (h *handler) stdioBodyForInstance(instance mcpInstance) (stdioImportBody, bool, error) {
@@ -688,6 +838,13 @@ func (h *handler) installMCP(ctx context.Context, p httpx.Principal, body stdioI
 	if body.Command != "" && body.URL != "" {
 		return nil, errors.New("choose command or url, not both")
 	}
+	if body.Command != "" {
+		approved, err := authorizeStdioOCI(p, body.Command, body.PackageManager)
+		if err != nil {
+			return nil, err
+		}
+		body.OCIPlatformApproved = approved
+	}
 	if body.Command != "" && body.Image != "" && !p.IsPlatformAdmin && p.Role != "owner" && p.Role != "admin" {
 		return nil, errors.New("custom stdio images require an administrator")
 	}
@@ -729,7 +886,7 @@ func (h *handler) installMCP(ctx context.Context, p httpx.Principal, body stdioI
 		return nil, errors.New("stdio MCP requires exactly one owning Space")
 	}
 	if body.URL != "" {
-		if _, err := safeProviderURL(body.URL, ""); err != nil {
+		if _, err := h.providerURL(body.URL, ""); err != nil {
 			return nil, err
 		}
 	}
@@ -756,6 +913,9 @@ func (h *handler) installMCP(ctx context.Context, p httpx.Principal, body stdioI
 			return nil, errors.New("stdio runtime node must be the owning Space server computer")
 		}
 		cfg = map[string]any{"ownerSpaceId": spaces[0], "serverComputerId": exec.computer.ID, "command": body.Command, "args": body.Args, "workingDir": body.WorkingDir, "packageManager": body.PackageManager, "bridgeImage": body.Image}
+		if body.OCIPlatformApproved {
+			cfg[stdioOCIApprovalKey] = true
+		}
 	}
 	envKeys := make([]string, 0, len(body.Env))
 	for key := range body.Env {
@@ -863,13 +1023,9 @@ func (h *handler) provisionStdioMCPWithLease(ctx context.Context, tenant, instan
 		return err
 	}
 	remote := h.executionRemote(runner, exec)
-	packageManager := strings.ToLower(strings.TrimSpace(body.PackageManager))
-	if packageManager == "" {
-		if body.Command == "docker" || body.Command == "podman" {
-			packageManager = "oci"
-		} else {
-			packageManager = "npm"
-		}
+	packageManager := stdioPackageManager(body.Command, body.PackageManager)
+	if err = requireStdioOCIApproval(body); err != nil {
+		return err
 	}
 	if exec.workspace != nil && packageManager == "oci" {
 		return errors.New("OCI stdio MCP is unavailable on managed disks because nested Docker writers are not tracked")
@@ -1005,15 +1161,13 @@ func (h *handler) provisionStdioMCPWithLease(ctx context.Context, tenant, instan
 	if port == 0 {
 		return cleanup(errors.New("runner did not publish stdio bridge port"))
 	}
-	hostname, _ := host["primaryIp"].(string)
-	if hostname == "" {
-		hostname, _ = host["hostname"].(string)
+	primary, _ := host["primaryIp"].(string)
+	primaryIP, parseErr := netip.ParseAddr(strings.Trim(strings.TrimSpace(primary), "[]"))
+	if parseErr != nil || primaryIP.Zone() != "" || !primaryIP.IsValid() || primaryIP.IsUnspecified() || primaryIP.IsMulticast() {
+		return cleanup(errors.New("runtime node did not report a usable primary address"))
 	}
-	if hostname == "" {
-		return cleanup(errors.New("runtime node did not report an address"))
-	}
-	endpoint := fmt.Sprintf("http://%s:%d/mcp", hostname, port)
-	if err = h.probeStdioBridge(ctx, endpoint); err != nil {
+	endpoint := "http://" + net.JoinHostPort(primaryIP.Unmap().String(), strconv.Itoa(port)) + "/mcp"
+	if err = h.probeStdioBridge(ctx, endpoint, newPinnedProviderHTTPClient(primaryIP)); err != nil {
 		return cleanup(fmt.Errorf("stdio bridge readiness failed: %w", err))
 	}
 	envKeys := make([]string, 0, len(body.Env))
@@ -1022,6 +1176,9 @@ func (h *handler) provisionStdioMCPWithLease(ctx context.Context, tenant, instan
 	}
 	slices.Sort(envKeys)
 	config := map[string]any{"url": endpoint, "ownerSpaceId": owner, "serverComputerId": exec.computer.ID, "runtimeNodeId": nodeID, "dataSpaceId": dataSpaceID, "dataPath": dataPath, "command": body.Command, "args": body.Args, "environmentVariables": envKeys, "workingDir": body.WorkingDir, "packageManager": packageManager, "bridgeImage": image}
+	if body.OCIPlatformApproved {
+		config[stdioOCIApprovalKey] = true
+	}
 	if exec.workspace != nil {
 		config["workspaceTarget"] = exec.workspace.Target
 	}
@@ -1045,7 +1202,7 @@ func (h *handler) provisionStdioMCPWithLease(ctx context.Context, tenant, instan
 	return nil
 }
 
-func (h *handler) probeStdioBridge(ctx context.Context, endpoint string) error {
+func (h *handler) probeStdioBridge(ctx context.Context, endpoint string, client *http.Client) error {
 	base := strings.TrimSuffix(endpoint, "/mcp")
 	var last error
 	for attempt := 0; attempt < 20; attempt++ {
@@ -1058,7 +1215,7 @@ func (h *handler) probeStdioBridge(ctx context.Context, endpoint string) error {
 		}
 		callCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		req, _ := http.NewRequestWithContext(callCtx, http.MethodGet, base+"/health", nil)
-		resp, err := h.service.gateway.client.Do(req)
+		resp, err := client.Do(req)
 		if err == nil {
 			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 			_ = resp.Body.Close()
@@ -1088,7 +1245,7 @@ func (h *handler) probeStdioBridge(ctx context.Context, endpoint string) error {
 		if sid != "" {
 			req.Header.Set("Mcp-Session-Id", sid)
 		}
-		resp, err := h.service.gateway.client.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1124,7 +1281,7 @@ func (h *handler) probeStdioBridge(ctx context.Context, endpoint string) error {
 			defer cancel()
 			req, _ := http.NewRequestWithContext(cleanupCtx, http.MethodDelete, endpoint, nil)
 			req.Header.Set("Mcp-Session-Id", sid)
-			if resp, err := h.service.gateway.client.Do(req); err == nil {
+			if resp, err := client.Do(req); err == nil {
 				_ = resp.Body.Close()
 			}
 		}()

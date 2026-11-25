@@ -75,7 +75,7 @@ func (h *handler) fetchUpstreamModelList(ctx context.Context, tenant string, u U
 	if cfg.BaseURL == "" {
 		return nil, errors.New("baseUrl not configured")
 	}
-	target, e := safeProviderURL(cfg.BaseURL, "/v1/models")
+	target, e := h.providerURL(cfg.BaseURL, "/v1/models")
 	if e != nil {
 		return nil, e
 	}
@@ -96,7 +96,7 @@ func (h *handler) fetchUpstreamModelList(ctx context.Context, tenant string, u U
 			req.Header.Set(k, v)
 		}
 	}
-	client := h.service.gateway.client
+	client := h.service.gateway.providerHTTPClient()
 	if cfg.Timeout > 0 {
 		clone := *client
 		clone.Timeout = time.Duration(cfg.Timeout) * time.Millisecond
@@ -107,7 +107,11 @@ func (h *handler) fetchUpstreamModelList(ctx context.Context, tenant string, u U
 		return nil, e
 	}
 	defer resp.Body.Close()
-	raw, e := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	limit := int64(16 << 20)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		limit = maxProviderErrorResponse
+	}
+	raw, e := io.ReadAll(io.LimitReader(resp.Body, limit))
 	if e != nil {
 		return nil, e
 	}

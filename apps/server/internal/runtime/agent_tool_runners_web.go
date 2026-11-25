@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -32,10 +33,46 @@ const (
 )
 
 var (
-	webSearchHTTPClient = &http.Client{Timeout: webSearchTimeout}
-	webFetchHTTPClient  = &http.Client{Timeout: webFetchTimeout}
-	webSearchEngineIDs  = []string{"tavily", "serper", "brave", "jina", "bing", "searxng"}
+	webSearchHTTPClient      = &http.Client{Timeout: webSearchTimeout}
+	webFetchHTTPClient       = &http.Client{Timeout: webFetchTimeout}
+	webFetchPublicHTTPClient = newPublicWebFetchHTTPClient(
+		net.DefaultResolver.LookupIPAddr,
+		(&net.Dialer{Timeout: webFetchTimeout, KeepAlive: 30 * time.Second}).DialContext,
+	)
+	webSearchEngineIDs = []string{"tavily", "serper", "brave", "jina", "bing", "searxng"}
+
+	errWebFetchPrivateAddress = errors.New("fetching private addresses is not allowed")
+	webFetchIPv6GlobalPrefix  = netip.MustParsePrefix("2000::/3")
+	webFetchNAT64Prefix       = netip.MustParsePrefix("64:ff9b::/96")
+	webFetchNonPublicPrefixes = []netip.Prefix{
+		netip.MustParsePrefix("0.0.0.0/8"),
+		netip.MustParsePrefix("10.0.0.0/8"),
+		netip.MustParsePrefix("100.64.0.0/10"),
+		netip.MustParsePrefix("127.0.0.0/8"),
+		netip.MustParsePrefix("169.254.0.0/16"),
+		netip.MustParsePrefix("172.16.0.0/12"),
+		netip.MustParsePrefix("192.0.0.0/24"),
+		netip.MustParsePrefix("192.0.2.0/24"),
+		netip.MustParsePrefix("192.88.99.0/24"),
+		netip.MustParsePrefix("192.168.0.0/16"),
+		netip.MustParsePrefix("198.18.0.0/15"),
+		netip.MustParsePrefix("198.51.100.0/24"),
+		netip.MustParsePrefix("203.0.113.0/24"),
+		netip.MustParsePrefix("224.0.0.0/4"),
+		netip.MustParsePrefix("240.0.0.0/4"),
+		netip.MustParsePrefix("2001::/32"),
+		netip.MustParsePrefix("2001:2::/48"),
+		netip.MustParsePrefix("2001:10::/28"),
+		netip.MustParsePrefix("2001:20::/28"),
+		netip.MustParsePrefix("2001:db8::/32"),
+		netip.MustParsePrefix("2002::/16"),
+		netip.MustParsePrefix("3fff::/20"),
+		netip.MustParsePrefix("fec0::/10"),
+	}
 )
+
+type webFetchLookupIPAddr func(context.Context, string) ([]net.IPAddr, error)
+type webFetchDialContext func(context.Context, string, string) (net.Conn, error)
 
 type webSearchEngine struct {
 	ID      string
@@ -480,15 +517,10 @@ func (h *handler) runWebFetch(ctx context.Context, tenant, agent string, args js
 	if err != nil {
 		return nil, err
 	}
-	if backend.ID == "native" && !backend.AllowPrivateHosts {
-		if err := rejectPrivateHost(parsedURL.Hostname()); err != nil {
-			return nil, err
-		}
-	}
 	var content string
 	switch backend.ID {
 	case "native":
-		content, err = fetchNative(ctx, parsedURL, maxBytes)
+		content, err = fetchNative(ctx, parsedURL, maxBytes, backend.AllowPrivateHosts)
 	case "jina-reader":
 		content, err = fetchJinaReader(ctx, backend, rawURL)
 	case "firecrawl":
@@ -503,22 +535,96 @@ func (h *handler) runWebFetch(ctx context.Context, tenant, agent string, args js
 	return json.RawMessage(text), nil
 }
 
-func rejectPrivateHost(host string) error {
-	name := strings.ToLower(strings.Trim(strings.TrimSpace(host), "[]"))
+func publicWebFetchIP(ip net.IP) bool {
+	address, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	address = address.Unmap()
+	if !address.IsGlobalUnicast() || address.IsPrivate() {
+		return false
+	}
+	if webFetchNAT64Prefix.Contains(address) {
+		bytes := address.As16()
+		return publicWebFetchIP(net.IPv4(bytes[12], bytes[13], bytes[14], bytes[15]))
+	}
+	if address.Is6() && !webFetchIPv6GlobalPrefix.Contains(address) {
+		return false
+	}
+	for _, prefix := range webFetchNonPublicPrefixes {
+		if prefix.Contains(address) {
+			return false
+		}
+	}
+	return true
+}
+
+func resolvePublicWebFetchHost(ctx context.Context, host string, lookup webFetchLookupIPAddr) ([]net.IPAddr, error) {
+	name := strings.TrimSuffix(strings.ToLower(strings.Trim(strings.TrimSpace(host), "[]")), ".")
 	if name == "" || name == "localhost" || strings.HasSuffix(name, ".localhost") {
-		return errors.New("fetching private addresses is not allowed")
+		return nil, errWebFetchPrivateAddress
 	}
-	ip := net.ParseIP(name)
-	if ip == nil {
-		return nil
+	if ip := net.ParseIP(name); ip != nil {
+		if !publicWebFetchIP(ip) {
+			return nil, errWebFetchPrivateAddress
+		}
+		return []net.IPAddr{{IP: ip}}, nil
 	}
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
-		return errors.New("fetching private addresses is not allowed")
+	addresses, err := lookup(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("resolving web fetch host %q: %w", name, err)
 	}
-	if v4 := ip.To4(); v4 != nil && v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
-		return errors.New("fetching private addresses is not allowed")
+	if len(addresses) == 0 {
+		return nil, fmt.Errorf("web fetch host %q did not resolve to an address", name)
 	}
-	return nil
+	for _, address := range addresses {
+		if !publicWebFetchIP(address.IP) {
+			return nil, errWebFetchPrivateAddress
+		}
+	}
+	return addresses, nil
+}
+
+func newPublicWebFetchDialContext(lookup webFetchLookupIPAddr, dial webFetchDialContext) webFetchDialContext {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, fmt.Errorf("invalid web fetch address: %w", err)
+		}
+		addresses, err := resolvePublicWebFetchHost(ctx, host, lookup)
+		if err != nil {
+			return nil, err
+		}
+		var dialErr error
+		for _, resolved := range addresses {
+			connection, err := dial(ctx, network, net.JoinHostPort(resolved.IP.String(), port))
+			if err == nil {
+				return connection, nil
+			}
+			dialErr = err
+		}
+		return nil, dialErr
+	}
+}
+
+func newPublicWebFetchHTTPClient(lookup webFetchLookupIPAddr, dial webFetchDialContext) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.Dial = nil
+	transport.DialContext = newPublicWebFetchDialContext(lookup, dial)
+	transport.DialTLS = nil
+	transport.DialTLSContext = nil
+	return &http.Client{
+		Transport: transport,
+		Timeout:   webFetchTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			_, err := resolvePublicWebFetchHost(req.Context(), req.URL.Hostname(), lookup)
+			return err
+		},
+	}
 }
 
 var (
@@ -543,14 +649,18 @@ func htmlToText(input string) string {
 	return strings.TrimSpace(text)
 }
 
-func fetchNative(ctx context.Context, target *url.URL, maxBytes int) (string, error) {
+func fetchNative(ctx context.Context, target *url.URL, maxBytes int, allowPrivateHosts bool) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("User-Agent", webFetchUserAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5")
-	resp, err := webFetchHTTPClient.Do(req)
+	client := webFetchPublicHTTPClient
+	if allowPrivateHosts {
+		client = webFetchHTTPClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}

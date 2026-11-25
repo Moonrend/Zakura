@@ -258,7 +258,7 @@ type workspaceRunnerError struct{ error }
 func (h *handler) serverComputerLifecycleError(w http.ResponseWriter, err error) {
 	var runnerErr workspaceRunnerError
 	switch {
-	case errors.Is(err, errWorkspaceNodeRequired), errors.Is(err, errWorkspaceStarting), errors.Is(err, errWorkspaceLeaseLost), errors.Is(err, workspaces.ErrConflict), errors.Is(err, workspaces.ErrTargetRevoked), errors.Is(err, workspaces.ErrUnverified):
+	case errors.Is(err, errWorkspaceNodeRequired), errors.Is(err, errWorkspaceStarting), errors.Is(err, errWorkspaceLeaseLost), errors.Is(err, errLegacyHostWorkspace), errors.Is(err, workspaces.ErrConflict), errors.Is(err, workspaces.ErrTargetRevoked), errors.Is(err, workspaces.ErrUnverified):
 		httpx.Error(w, http.StatusConflict, err.Error())
 	case errors.As(err, &runnerErr):
 		httpx.Error(w, http.StatusBadGateway, err.Error())

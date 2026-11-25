@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/emailtmpl"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/emailverify"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 )
 
@@ -163,7 +165,7 @@ func setupHandler(s *Service, deps *appdeps.Dependencies) http.HandlerFunc {
 			httpx.Error(w, 400, "invalid request")
 			return
 		}
-		res, err := s.Setup(r.Context(), b.AdminEmail, b.AdminPassword, b.AdminName, b.TenantName, requestIP(r), r.UserAgent())
+		res, err := s.Setup(r.Context(), b.AdminEmail, b.AdminPassword, b.AdminName, b.TenantName, s.requestIP(r), r.UserAgent())
 		if err != nil {
 			httpx.Error(w, 400, err.Error())
 			return
@@ -190,12 +192,21 @@ func loginHandler(s *Service, deps *appdeps.Dependencies) http.HandlerFunc {
 			httpx.JSON(w, 403, map[string]any{"error": "This account requires company SSO", "code": "sso_required"})
 			return
 		}
-		ip := requestIP(r)
-		res, err := s.Login(r.Context(), b.Email, b.Password, b.TenantSlug, requestIP(r), r.UserAgent())
+		ip := s.requestIP(r)
+		allowed, err := s.reserveLoginAttempt(r.Context(), b.Email)
+		if err != nil {
+			httpx.Error(w, 503, "Login temporarily unavailable")
+			return
+		}
+		if !allowed {
+			httpx.Error(w, 429, "Too many login attempts; try again later")
+			return
+		}
+		res, err := s.Login(r.Context(), b.Email, b.Password, b.TenantSlug, ip, r.UserAgent())
 		if err != nil {
 			var mfa *MFARequiredError
 			if errors.As(err, &mfa) {
-				s.clearLoginFailures(r.Context(), b.Email, ip)
+				s.clearLoginFailures(r.Context(), b.Email)
 				if mfa.Enrollment {
 					httpx.JSON(w, 200, map[string]any{"mfaEnrollmentRequired": true, "mfaEnrollmentTicket": mfa.Ticket, "methods": mfa.Methods, "code": "mfa_enrollment_required"})
 				} else {
@@ -203,14 +214,10 @@ func loginHandler(s *Service, deps *appdeps.Dependencies) http.HandlerFunc {
 				}
 				return
 			}
-			if s.recordLoginFailure(r.Context(), b.Email, ip) {
-				httpx.Error(w, 429, "Too many login attempts; try again later")
-				return
-			}
 			httpx.Error(w, 401, "Invalid credentials")
 			return
 		}
-		s.clearLoginFailures(r.Context(), b.Email, ip)
+		s.clearLoginFailures(r.Context(), b.Email)
 		httpx.JSON(w, 200, map[string]any{"session": res.Session, "user": res.User, "tenant": res.Tenant, "role": res.Role, "multiTenant": deps.MultiTenant, "edition": deps.Edition})
 	}
 }
@@ -243,7 +250,7 @@ func registerHandler(s *Service, deps *appdeps.Dependencies) http.HandlerFunc {
 		if join.action == "auto_join" {
 			joinTarget = &join
 		}
-		res, err := s.Register(r.Context(), b.Email, b.Password, b.Name, b.TenantName, requestIP(r), r.UserAgent(), joinTarget)
+		res, err := s.Register(r.Context(), b.Email, b.Password, b.Name, b.TenantName, s.requestIP(r), r.UserAgent(), joinTarget)
 		if err != nil {
 			status := 400
 			if strings.Contains(err.Error(), "registered") {
@@ -255,7 +262,7 @@ func registerHandler(s *Service, deps *appdeps.Dependencies) http.HandlerFunc {
 			httpx.Error(w, status, err.Error())
 			return
 		}
-		_, _ = s.sendVerificationEmail(r.Context(), res.User.ID, res.User.Email)
+		_, _ = s.sendVerificationEmail(r.Context(), res.User.ID)
 		httpx.JSON(w, 201, map[string]any{"session": res.Session, "user": res.User, "tenant": res.Tenant, "next": "/onboarding"})
 	}
 }
@@ -474,7 +481,7 @@ func createTenantHandler(s *Service) http.HandlerFunc {
 			httpx.Error(w, 400, "invalid request")
 			return
 		}
-		res, err := s.CreateTenant(r.Context(), p, b.Name, b.Slug, requestIP(r), r.UserAgent())
+		res, err := s.CreateTenant(r.Context(), p, b.Name, b.Slug, s.requestIP(r), r.UserAgent())
 		if err != nil {
 			httpx.Error(w, 400, err.Error())
 			return
@@ -499,7 +506,7 @@ func switchTenantHandler(s *Service) http.HandlerFunc {
 			httpx.Error(w, 400, "tenantId required")
 			return
 		}
-		res, err := s.SwitchTenant(r.Context(), p, b.TenantID, requestIP(r), r.UserAgent())
+		res, err := s.SwitchTenant(r.Context(), p, b.TenantID, s.requestIP(r), r.UserAgent())
 		if err != nil {
 			httpx.Error(w, 403, err.Error())
 			return
@@ -590,7 +597,7 @@ func deleteTenantHandler(s *Service) http.HandlerFunc {
 		// Issue the replacement session before deleting the current tenant, just as
 		// the TypeScript service does, so a successful response can immediately be
 		// used by the preserved frontend.
-		switched, err := s.SwitchTenant(r.Context(), p, next.ID, requestIP(r), r.UserAgent())
+		switched, err := s.SwitchTenant(r.Context(), p, next.ID, s.requestIP(r), r.UserAgent())
 		if err != nil {
 			httpx.Error(w, 500, "Could not switch teams")
 			return
@@ -1024,7 +1031,7 @@ func acceptInviteHandler(s *Service, deps *appdeps.Dependencies) http.HandlerFun
 			httpx.Error(w, 409, err.Error())
 			return
 		}
-		res, err := s.SwitchTenant(r.Context(), p, tenantID, requestIP(r), r.UserAgent())
+		res, err := s.SwitchTenant(r.Context(), p, tenantID, s.requestIP(r), r.UserAgent())
 		if err != nil {
 			httpx.Error(w, 500, "session issue failed")
 			return
@@ -1181,14 +1188,34 @@ func forgotPasswordHandler(s *Service) http.HandlerFunc {
 			httpx.Error(w, 400, "invalid request")
 			return
 		}
+		email := strings.ToLower(strings.TrimSpace(b.Email))
+		if !s.allowPasswordReset(r.Context(), email, s.requestIP(r)) {
+			httpx.JSON(w, 200, map[string]any{"sent": true})
+			return
+		}
 		var dbUser models.User
-		if s.gdb(r.Context()).Where("email = ? AND status = 'active'", strings.ToLower(strings.TrimSpace(b.Email))).Take(&dbUser).Error == nil {
-			userID, email := derefString(dbUser.ID), dbUser.Email
-			token, _ := randomToken(32)
+		if s.gdb(r.Context()).Where("email = ? AND status = 'active'", email).Take(&dbUser).Error == nil {
+			userID, destination := derefString(dbUser.ID), dbUser.Email
+			token, tokenErr := randomToken(32)
+			if tokenErr != nil {
+				httpx.JSON(w, 200, map[string]any{"sent": true})
+				return
+			}
 			h := sha256.Sum256([]byte(token))
 			tokenID := s.deps.NewID()
-			_ = s.gdb(r.Context()).Create(&models.AuthToken{ID: &tokenID, UserID: &userID, Kind: "password_reset", TokenHash: hex.EncodeToString(h[:]), ExpiresAt: s.deps.Clock().UTC().Add(time.Hour).Format(time.RFC3339Nano), CreatedAt: s.now()}).Error
-			if s.deps.SendTransactionalEmail != nil {
+			now := s.now()
+			expires := s.deps.Clock().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+			createErr := appdeps.InTx(r.Context(), s.deps.DB, func(tx *sql.Tx) error {
+				if _, err := tx.ExecContext(r.Context(), s.q(`DELETE FROM auth_tokens WHERE kind='password_reset' AND expires_at<=?`), now); err != nil {
+					return err
+				}
+				if _, err := tx.ExecContext(r.Context(), s.q(`DELETE FROM auth_tokens WHERE kind='password_reset' AND user_id=?`), userID); err != nil {
+					return err
+				}
+				_, err := tx.ExecContext(r.Context(), s.q(`INSERT INTO auth_tokens(id,user_id,kind,token_hash,expires_at,created_at) VALUES(?,?,'password_reset',?,?,?)`), tokenID, userID, hex.EncodeToString(h[:]), expires, now)
+				return err
+			})
+			if createErr == nil && s.deps.SendTransactionalEmail != nil {
 				resetURL := s.deps.WebURL + "/reset-password?token=" + url.QueryEscape(token)
 				setPassword := derefString(dbUser.PasswordHash) == ""
 				htmlBody, textBody, renderErr := emailtmpl.Render(emailtmpl.ResetPassword, emailtmpl.ResetPasswordData{ResetURL: resetURL, SetPassword: setPassword})
@@ -1197,7 +1224,7 @@ func forgotPasswordHandler(s *Service) http.HandlerFunc {
 					if setPassword {
 						subject = "设置 Zakura 密码"
 					}
-					_ = s.deps.SendTransactionalEmail(r.Context(), email, subject, htmlBody, textBody)
+					_ = s.deps.SendTransactionalEmail(r.Context(), destination, subject, htmlBody, textBody)
 				}
 			}
 		}
@@ -1205,17 +1232,18 @@ func forgotPasswordHandler(s *Service) http.HandlerFunc {
 	}
 }
 
-func (s *Service) sendVerificationEmail(ctx context.Context, userID, email string) (bool, error) {
+func (s *Service) sendVerificationEmail(ctx context.Context, userID string) (bool, error) {
 	if s.deps.SendTransactionalEmail == nil {
 		return false, nil
 	}
 	var account models.User
-	if err := s.gdb(ctx).Select("email_verified_at").Where("id = ? AND status = 'active'", userID).Take(&account).Error; err != nil {
+	if err := s.gdb(ctx).Select("email,email_version,email_verified_at").Where("id = ? AND status = 'active'", userID).Take(&account).Error; err != nil {
 		return false, err
 	}
 	if account.EmailVerifiedAt != nil {
 		return true, nil
 	}
+	email := emailverify.Normalize(account.Email)
 	token, err := randomToken(32)
 	if err != nil {
 		return false, err
@@ -1223,7 +1251,7 @@ func (s *Service) sendVerificationEmail(ctx context.Context, userID, email strin
 	digest := sha256.Sum256([]byte(token))
 	tokenID := s.deps.NewID()
 	uid := userID
-	if err = s.gdb(ctx).Create(&models.AuthToken{ID: &tokenID, UserID: &uid, Kind: "email_verify", TokenHash: hex.EncodeToString(digest[:]), ExpiresAt: s.deps.Clock().UTC().Add(24 * time.Hour).Format(time.RFC3339Nano), CreatedAt: s.now()}).Error; err != nil {
+	if err = s.gdb(ctx).Create(&models.AuthToken{ID: &tokenID, UserID: &uid, Kind: "email_verify", TokenHash: hex.EncodeToString(digest[:]), MetaJSON: emailverify.Encode(email, account.EmailVersion), ExpiresAt: s.deps.Clock().UTC().Add(24 * time.Hour).Format(time.RFC3339Nano), CreatedAt: s.now()}).Error; err != nil {
 		return false, err
 	}
 	verifyURL := s.deps.WebURL + "/verify-email?token=" + url.QueryEscape(token)
@@ -1268,6 +1296,9 @@ func resetPasswordHandler(s *Service) http.HandlerFunc {
 			if _, e = tx.ExecContext(r.Context(), s.q(`UPDATE users SET password_hash=?,updated_at=? WHERE id=?`), string(hash), s.now(), uid); e != nil {
 				return e
 			}
+			if _, e = tx.ExecContext(r.Context(), s.q(`UPDATE oauth_refresh_tokens SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL`), s.now(), uid); e != nil {
+				return e
+			}
 			_, e = tx.ExecContext(r.Context(), s.q(`UPDATE user_sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL`), s.now(), uid)
 			return e
 		})
@@ -1288,10 +1319,13 @@ func verifyEmailTokenHandler(s *Service) http.HandlerFunc {
 			return
 		}
 		h := sha256.Sum256([]byte(b.Token))
-		var verifiedUserID string
 		err := appdeps.InTx(r.Context(), s.deps.DB, func(tx *sql.Tx) error {
-			var id, uid string
-			if e := tx.QueryRowContext(r.Context(), s.q(`SELECT id,user_id FROM auth_tokens WHERE token_hash=? AND kind='email_verify' AND consumed_at IS NULL AND expires_at>?`), hex.EncodeToString(h[:]), s.now()).Scan(&id, &uid); e != nil {
+			var id, uid, metaRaw string
+			if e := tx.QueryRowContext(r.Context(), s.q(`SELECT id,user_id,meta_json FROM auth_tokens WHERE token_hash=? AND kind='email_verify' AND consumed_at IS NULL AND expires_at>?`), hex.EncodeToString(h[:]), s.now()).Scan(&id, &uid, &metaRaw); e != nil {
+				return errors.New("invalid or expired token")
+			}
+			binding, e := emailverify.Decode(metaRaw)
+			if e != nil {
 				return errors.New("invalid or expired token")
 			}
 			res, e := tx.ExecContext(r.Context(), s.q(`UPDATE auth_tokens SET consumed_at=? WHERE id=? AND consumed_at IS NULL`), s.now(), id)
@@ -1302,38 +1336,52 @@ func verifyEmailTokenHandler(s *Service) http.HandlerFunc {
 			if n != 1 {
 				return errors.New("token already used")
 			}
-			verifiedUserID = uid
-			_, e = tx.ExecContext(r.Context(), s.q(`UPDATE users SET email_verified_at=?,updated_at=? WHERE id=?`), s.now(), s.now(), uid)
-			return e
+			now := s.now()
+			res, e = tx.ExecContext(r.Context(), s.q(`UPDATE users SET email_verified_at=?,updated_at=? WHERE id=? AND LOWER(TRIM(email))=? AND email_version=? AND status='active'`), now, now, uid, binding.TargetEmail, binding.EmailVersion)
+			if e != nil {
+				return e
+			}
+			n, _ = res.RowsAffected()
+			if n != 1 {
+				return errors.New("invalid or expired token")
+			}
+			return s.maybeAutoJoinTenantTx(r.Context(), tx, uid, binding.TargetEmail)
 		})
 		if err != nil {
 			httpx.Error(w, 400, err.Error())
 			return
 		}
-		if verifiedUserID != "" {
-			var account models.User
-			if s.gdb(r.Context()).Select("email").Where("id = ?", verifiedUserID).Take(&account).Error == nil {
-				_ = s.maybeAutoJoinTenant(r.Context(), verifiedUserID, account.Email)
-			}
-		}
 		httpx.JSON(w, 200, map[string]any{"ok": true})
 	}
 }
 
-func requestIP(r *http.Request) string {
-	for _, key := range []string{"CF-Connecting-IP", "X-Real-IP"} {
-		if v := strings.TrimSpace(r.Header.Get(key)); v != "" {
-			return v
+func (s *Service) requestIP(r *http.Request) string {
+	peer, ok := parseRemoteIP(r.RemoteAddr)
+	if !ok {
+		return r.RemoteAddr
+	}
+	for _, prefix := range s.deps.TrustedProxyCIDRs {
+		if !prefix.Contains(peer) {
+			continue
 		}
+		forwarded, err := netip.ParseAddr(strings.TrimSpace(r.Header.Get("X-Real-IP")))
+		if err == nil {
+			return forwarded.Unmap().String()
+		}
+		break
 	}
-	if v := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0]); v != "" {
-		return v
+	return peer.String()
+}
+func parseRemoteIP(remote string) (netip.Addr, bool) {
+	host, _, err := net.SplitHostPort(remote)
+	if err != nil {
+		host = remote
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
-		return host
+	address, err := netip.ParseAddr(strings.Trim(strings.TrimSpace(host), "[]"))
+	if err != nil {
+		return netip.Addr{}, false
 	}
-	return r.RemoteAddr
+	return address.Unmap(), true
 }
 func nullString(v sql.NullString) any {
 	if v.Valid {

@@ -168,7 +168,7 @@ func (h *handler) callProvider(ctx context.Context, tenant, agent, ref, action s
 	if pathValue == "" {
 		pathValue = "/" + strings.TrimPrefix(action, "/")
 	}
-	target, e := safeURL(strings.TrimRight(base, "/") + "/" + strings.TrimLeft(pathValue, "/"))
+	target, e := connectorURL(strings.TrimRight(base, "/") + "/" + strings.TrimLeft(pathValue, "/"))
 	if e != nil {
 		return 0, nil, e
 	}

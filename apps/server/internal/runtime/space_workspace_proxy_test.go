@@ -104,6 +104,52 @@ func (rig *workspaceProxyRig) issueAs(t *testing.T, kind string, actor httpx.Pri
 	return response.Ticket
 }
 
+func TestSpaceWorkspaceTicketRejectsLegacyHostWorkspace(t *testing.T) {
+	rig := newWorkspaceProxyRig(t)
+	if err := rig.h.deps.Gorm.Table("spaces").Where("id=?", rig.space.ID).Update("workspace_kind", "host").Error; err != nil {
+		t.Fatal(err)
+	}
+	router := chi.NewRouter()
+	router.Post("/spaces/{id}/ticket", func(w http.ResponseWriter, r *http.Request) { rig.h.issueSpaceWorkspaceTicket(w, r, "terminal") })
+	req := httptest.NewRequest(http.MethodPost, "/spaces/"+rig.space.ID+"/ticket", nil)
+	req = req.WithContext(httpx.WithPrincipal(req.Context(), acpLoginPrincipal()))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "migration") {
+		t.Fatalf("legacy host ticket: %d %s", w.Code, w.Body)
+	}
+	var tickets int64
+	if err := rig.h.deps.Gorm.Table("runtime_connection_tickets").Count(&tickets).Error; err != nil || tickets != 0 {
+		t.Fatalf("legacy host ticket persisted: %d %v", tickets, err)
+	}
+	rig.mu.Lock()
+	defer rig.mu.Unlock()
+	for _, call := range rig.calls {
+		if strings.HasPrefix(call.method, "host.pty.") {
+			t.Fatalf("legacy host ticket reached runner method %s", call.method)
+		}
+	}
+}
+
+func TestSpaceWorkspaceTicketRejectsHostModeAfterIssue(t *testing.T) {
+	rig := newWorkspaceProxyRig(t)
+	token := rig.issue(t, "terminal")
+	if err := rig.h.deps.Gorm.Table("spaces").Where("id=?", rig.space.ID).Update("workspace_kind", "host").Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, lease, _, err := rig.h.consumeSpaceWorkspaceTicket(context.Background(), token, rig.space.ID, "terminal"); err == nil {
+		lease.release()
+		t.Fatal("terminal ticket survived migration to legacy host mode")
+	}
+	rig.mu.Lock()
+	defer rig.mu.Unlock()
+	for _, call := range rig.calls {
+		if strings.HasPrefix(call.method, "host.pty.") {
+			t.Fatalf("legacy host ticket reached runner method %s", call.method)
+		}
+	}
+}
+
 func TestSpaceWorkspaceTicketRevalidation(t *testing.T) {
 	for _, scenario := range []string{"valid", "cross-space", "cross-kind", "tampered", "expired", "revoked-key", "changed-container", "changed-node", "migrating"} {
 		t.Run(scenario, func(t *testing.T) {

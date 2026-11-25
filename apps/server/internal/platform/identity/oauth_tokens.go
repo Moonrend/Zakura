@@ -171,7 +171,8 @@ func (s *Service) exchangeRefresh(w http.ResponseWriter, r *http.Request, c oaut
 }
 func (s *Service) issueOAuthTokensTx(ctx context.Context, tx *sql.Tx, key *oauthSigningKey, clientID, userID, tenantID string, agentID any, scope string, resource any, family string) (map[string]any, error) {
 	var email, name, role string
-	if tx.QueryRowContext(ctx, s.q(`SELECT u.email,COALESCE(u.name,''),m.role FROM users u JOIN tenant_memberships m ON m.user_id=u.id JOIN tenants t ON t.id=m.tenant_id WHERE u.id=? AND m.tenant_id=? AND u.status='active' AND m.status='active' AND t.status='active'`), userID, tenantID).Scan(&email, &name, &role) != nil {
+	var emailVerifiedAt sql.NullString
+	if tx.QueryRowContext(ctx, s.q(`SELECT u.email,COALESCE(u.name,''),u.email_verified_at,m.role FROM users u JOIN tenant_memberships m ON m.user_id=u.id JOIN tenants t ON t.id=m.tenant_id WHERE u.id=? AND m.tenant_id=? AND u.status='active' AND m.status='active' AND t.status='active'`), userID, tenantID).Scan(&email, &name, &emailVerifiedAt, &role) != nil {
 		return nil, errors.New("inactive account")
 	}
 	agent, _ := agentID.(string)
@@ -209,7 +210,7 @@ func (s *Service) issueOAuthTokensTx(ctx context.Context, tx *sql.Tx, key *oauth
 	if scopeContains(scope, "openid") {
 		idClaims := jwt.MapClaims{"iss": s.deps.PublicURL, "sub": userID, "aud": clientID, "iat": now.Unix(), "exp": now.Add(time.Hour).Unix(), "auth_time": now.Unix()}
 		if scopeContains(scope, "email") {
-			idClaims["email"], idClaims["email_verified"] = email, true
+			idClaims["email"], idClaims["email_verified"] = email, emailVerifiedAt.Valid
 		}
 		if scopeContains(scope, "profile") {
 			if name != "" {
@@ -277,7 +278,7 @@ func (s *Service) userinfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var account models.User
-	if s.gdb(r.Context()).Select("email,name").Where("id = ? AND status = 'active'", subject).Take(&account).Error != nil {
+	if s.gdb(r.Context()).Select("email,name,email_verified_at").Where("id = ? AND status = 'active'", subject).Take(&account).Error != nil {
 		oauthError(w, 401, "invalid_token", "User not found")
 		return
 	}
@@ -285,7 +286,7 @@ func (s *Service) userinfo(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{"sub": subject}
 	scope, _ := c["scope"].(string)
 	if scopeContains(scope, "email") || scopeContains(scope, "openid") || scopeContains(scope, "mcp") {
-		out["email"], out["email_verified"] = email, true
+		out["email"], out["email_verified"] = email, account.EmailVerifiedAt != nil
 	}
 	if scopeContains(scope, "profile") || scopeContains(scope, "openid") {
 		if name != "" {

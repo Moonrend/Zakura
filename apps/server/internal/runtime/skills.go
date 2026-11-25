@@ -851,7 +851,7 @@ func (h *handler) healthMemoryProvider(w http.ResponseWriter, r *http.Request) {
 		httpx.JSON(w, http.StatusOK, map[string]any{"status": "unhealthy", "message": "baseUrl required"})
 		return
 	}
-	u, e := safeProviderURL(baseURL, func() string {
+	u, e := h.providerURL(baseURL, func() string {
 		if kind == "openviking" {
 			return "health"
 		}
@@ -862,7 +862,7 @@ func (h *handler) healthMemoryProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, u.String(), nil)
-	resp, e := h.service.gateway.client.Do(req)
+	resp, e := h.service.gateway.providerHTTPClient().Do(req)
 	if e != nil {
 		httpx.JSON(w, http.StatusOK, map[string]any{"status": "unhealthy", "message": e.Error()})
 		return
