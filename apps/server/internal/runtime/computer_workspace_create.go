@@ -137,6 +137,28 @@ func (op *workspaceCreateOperation) matches(c computerContainer, digest string) 
 		c.Labels["zakura.create-operation"] == op.OperationID && c.Labels["zakura.create-digest"] == digest
 }
 
+// errWorkspaceCreateVoided reports that a durable create intent was cleared
+// because its recorded container no longer exists. Callers must treat the
+// Space as having no workspace instead of retrying the dead operation.
+var errWorkspaceCreateVoided = errors.New("workspace create effect no longer exists")
+
+// workspaceContainerGone distinguishes a removed container from an
+// unobservable one. Only an explicit Docker "no such object" is proof of
+// absence; a transport failure must retain the intent.
+func (h *handler) workspaceContainerGone(ctx context.Context, runner *runnerSession, id string) (bool, error) {
+	if id == "" {
+		return true, nil
+	}
+	var out computerContainer
+	if err := runner.call(ctx, "docker.inspect", map[string]any{"id": id}, &out); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "no such object") {
+			return true, nil
+		}
+		return false, err
+	}
+	return false, nil
+}
+
 func (h *handler) reconcileWorkspaceCreate(ctx context.Context, lease *workspaceLease, runner *runnerSession, op *workspaceCreateOperation, obs workspaceObservation) error {
 	var receipt struct {
 		State, ConfigDigest, Name string
@@ -155,8 +177,35 @@ func (h *handler) reconcileWorkspaceCreate(ctx context.Context, lease *workspace
 	if op.ConfigDigest != nil && *op.ConfigDigest != receipt.ConfigDigest {
 		return errors.New("workspace creation receipt changed configuration")
 	}
-	// A receipt proves a past effect, not current liveness or absence.
-	if obs.Container.DockerID != receipt.Container.DockerID || !op.matches(obs.Container, receipt.ConfigDigest) {
+	if obs.Container.DockerID == "" {
+		gone, err := h.workspaceContainerGone(ctx, runner, receipt.Container.DockerID)
+		if err != nil {
+			return err
+		}
+		if !gone {
+			return errors.New("workspace creation receipt does not match the current container")
+		}
+		// The receipt describes an effect Docker no longer has (for example the
+		// container was removed out of band). Keeping the durable intent would
+		// deadlock the Space forever, because a receipt is never re-executed.
+		// Only an explicit "no such object" reaches this point, so the effect is
+		// provably absent and a new operation is safe.
+		if err := lease.fenced(ctx, func(tx *gorm.DB) error {
+			return tx.Table("workspace_create_operations").Where("space_id=? AND tenant_id=? AND node_id=? AND operation_id=?", op.SpaceID, op.TenantID, op.NodeID, op.OperationID).Delete(map[string]any{}).Error
+		}); err != nil {
+			return err
+		}
+		return errWorkspaceCreateVoided
+	}
+	// A receipt proves a past effect, not current liveness or absence. The
+	// Docker identity can change underneath it: docker.recreate (node image
+	// update) restarts running workspace containers with the same name, labels
+	// and create digest but a new DockerID, and a Docker restart may do the
+	// same. Observation already rejects multiple containers for one space or
+	// instance, so a container carrying this operation's complete identity is
+	// the same logical effect and the receipt must be rebound to it instead of
+	// deadlocking the Space forever on a stale ID.
+	if !op.matches(obs.Container, receipt.ConfigDigest) {
 		return errors.New("workspace creation receipt does not match the current container")
 	}
 	return lease.fenced(ctx, func(tx *gorm.DB) error {

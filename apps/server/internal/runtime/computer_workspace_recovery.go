@@ -121,7 +121,12 @@ func (h *handler) recoverSpaceWorkspace(ctx context.Context, l *workspaceLease) 
 				return l.uncertain(err)
 			}
 			if err = h.reconcileWorkspaceCreate(ctx, l, runner, op, obs); err != nil {
-				return l.uncertain(err)
+				if !errors.Is(err, errWorkspaceCreateVoided) {
+					return l.uncertain(err)
+				}
+				// The container is gone. Recovery never recreates a workspace, so
+				// settle the Space as stopped and let its owner start it again.
+				return l.finish(ctx, "stopped", map[string]any{"last_error": nil})
 			}
 		}
 	}

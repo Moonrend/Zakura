@@ -307,7 +307,12 @@ func (h *handler) startSpaceWorkspaceWithLease(ctx context.Context, lease *works
 	}
 	if op != nil {
 		if err := h.reconcileWorkspaceCreate(ctx, lease, runner, op, obs); err != nil {
-			return lease.uncertain(err)
+			if !errors.Is(err, errWorkspaceCreateVoided) {
+				return lease.uncertain(err)
+			}
+			// The recorded create effect is gone; the Space has no workspace and
+			// the create path below starts a fresh operation.
+			op = nil
 		}
 	} else if obs.Container.DockerID == "" {
 		for _, row := range obs.Rows {
