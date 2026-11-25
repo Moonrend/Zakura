@@ -51,12 +51,12 @@ func copyProviderResponse(w http.ResponseWriter, resp *ProviderResponse) error {
 		}
 	}
 	if resp.Status < 200 || resp.Status >= 300 {
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxProviderErrorResponse))
 		if err != nil {
 			writeGatewayError(w, resp.Operation, http.StatusBadGateway, err.Error(), "upstream_error")
 			return err
 		}
-		message := gwOr(gwErrorMessage(body), http.StatusText(resp.Status))
+		message := gwTruncate(gwOr(gwErrorMessage(body), http.StatusText(resp.Status)), 1000)
 		if stream, ok := w.(*gatewayStreamWriter); ok {
 			return stream.writeError(resp.Operation, resp.Status, message, "upstream_error")
 		}
@@ -137,7 +137,7 @@ func writeGatewayFailure(w http.ResponseWriter, operation string, err error) {
 	var routeErr *gatewayRouteError
 	if errors.As(err, &routeErr) && routeErr.Status > 0 {
 		status = routeErr.Status
-		message = gwOr(gwErrorMessage(routeErr.Body), err.Error())
+		message = gwTruncate(gwOr(gwErrorMessage(routeErr.Body), err.Error()), 1000)
 		if routeErr.RetryAfter != "" {
 			w.Header().Set("Retry-After", routeErr.RetryAfter)
 		}

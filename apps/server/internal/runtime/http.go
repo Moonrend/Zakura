@@ -42,10 +42,11 @@ type handler struct {
 	loadedToolCache  map[string]cachedLoaded
 	trigramMu        sync.Mutex
 	trigramStates    map[string]string
+	otelLimits       *otelLimiter
 }
 
 func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) MCPInstanceLifecycle {
-	h := &handler{deps: deps, store: NewStore(deps), mcpSessions: map[string]spaceMCPSession{}}
+	h := &handler{deps: deps, store: NewStore(deps), mcpSessions: map[string]spaceMCPSession{}, otelLimits: newOTelLimiter()}
 	if err := h.store.protectStoredAgentApprovals(deps.RunContext()); err != nil {
 		panic(fmt.Errorf("initialize tool approval protection: %w", err))
 	}
@@ -91,7 +92,7 @@ func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) MCPInstanceLifecyc
 	r.Get("/api/runtime-nodes/{id}/install.ps1", h.runtimeInstallPS)
 	r.Get("/api/runtime-nodes/{id}/bootstrap.sh", h.runtimeBootstrapSh)
 	r.Get("/api/otel/config", h.getOTelConfig)
-	r.Post("/api/otel/v1/logs", h.ingestOTelLogs)
+	r.With(httpx.Auth(deps), RequireAPIScope).Post("/api/otel/v1/logs", h.ingestOTelLogs)
 	r.Get("/api/zakurabot/ws", h.zakuraBotWS)
 	r.Get("/api/agents/{id}/desktop-proxy", h.desktopProxy)
 	r.Get("/api/agents/{id}/terminal-proxy", h.terminalProxy)
@@ -235,7 +236,7 @@ func decodeMap(r *http.Request) (map[string]any, error) {
 }
 func statusErr(w http.ResponseWriter, e error) {
 	switch {
-	case errors.Is(e, errLocalRunnerForbidden):
+	case errors.Is(e, errLocalRunnerForbidden), errors.Is(e, errStdioOCIPlatformAdminRequired):
 		httpx.Error(w, 403, e.Error())
 	case errors.Is(e, ErrNotFound):
 		httpx.Error(w, 404, "Not found")
@@ -1209,6 +1210,9 @@ func (h *handler) listUpstreams(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, map[string]any{"upstreams": x})
 }
 func (h *handler) createUpstream(w http.ResponseWriter, r *http.Request) {
+	if !requireProviderAdmin(w, r) {
+		return
+	}
 	var in Upstream
 	if httpx.DecodeJSON(r, &in) != nil {
 		httpx.Error(w, 400, "invalid JSON")

@@ -32,7 +32,16 @@ type Service struct {
 	cimdCache    map[string]cimdCacheEntry
 }
 
-const passwordBcryptCost = 12
+const (
+	passwordBcryptCost         = 12
+	passwordResetAccountLimit  = 1
+	passwordResetNetworkLimit  = 20
+	passwordResetGlobalLimit   = 100
+	passwordResetAccountWindow = 15 * time.Minute
+	passwordResetNetworkWindow = 15 * time.Minute
+	passwordResetGlobalWindow  = time.Minute
+	maxPasswordLoginAttempts   = 8
+)
 
 func New(deps *appdeps.Dependencies) *Service {
 	return &Service{deps: deps, cimdCache: map[string]cimdCacheEntry{}}
@@ -268,27 +277,26 @@ func (s *Service) recordLoginUsage(ctx context.Context, tenantID, userID, method
 }
 
 func (s *Service) maybeAutoJoinTenant(ctx context.Context, userID, email string) error {
+	return appdeps.InTx(ctx, s.deps.DB, func(tx *sql.Tx) error {
+		return s.maybeAutoJoinTenantTx(ctx, tx, userID, email)
+	})
+}
+
+func (s *Service) maybeAutoJoinTenantTx(ctx context.Context, tx *sql.Tx, userID, email string) error {
 	parts := strings.SplitN(strings.ToLower(strings.TrimSpace(email)), "@", 2)
 	if len(parts) != 2 {
 		return nil
 	}
-	var row struct {
-		TenantID string `gorm:"column:tenant_id"`
-	}
-	err := s.gdb(ctx).Table("tenant_domains AS d").
-		Select("d.tenant_id AS tenant_id").
-		Joins("JOIN tenants t ON t.id = d.tenant_id").
-		Where("d.domain = ? AND d.verified_at IS NOT NULL AND d.join_mode = 'auto_join' AND t.status = 'active'", parts[1]).
-		Take(&row).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
+	var tenantID string
+	err := tx.QueryRowContext(ctx, s.q(`SELECT d.tenant_id FROM tenant_domains d JOIN tenants t ON t.id=d.tenant_id WHERE d.domain=? AND d.verified_at IS NOT NULL AND d.join_mode='auto_join' AND t.status='active' LIMIT 1`), parts[1]).Scan(&tenantID)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	tenantID := row.TenantID
 	now := s.now()
-	err = s.gdb(ctx).Exec(`INSERT INTO tenant_memberships(id,tenant_id,user_id,role,status,created_at,updated_at) VALUES(?,?,?,'member','active',?,?) ON CONFLICT(tenant_id,user_id) DO NOTHING`, s.deps.NewID(), tenantID, userID, now, now).Error
+	_, err = tx.ExecContext(ctx, s.q(`INSERT INTO tenant_memberships(id,tenant_id,user_id,role,status,created_at,updated_at) VALUES(?,?,?,'member','active',?,?) ON CONFLICT(tenant_id,user_id) DO NOTHING`), s.deps.NewID(), tenantID, userID, now, now)
 	return err
 }
 
@@ -458,18 +466,47 @@ func (s *Service) resolveRegistrationJoin(ctx context.Context, email string) (re
 	}
 }
 
-func (s *Service) recordLoginFailure(ctx context.Context, email, ip string) bool {
-	key := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(email)) + "|" + ip))
+func (s *Service) reserveLoginAttempt(ctx context.Context, email string) (bool, error) {
+	key := loginFailureKey(email)
 	now := s.deps.Clock().UTC()
 	_ = s.gdb(ctx).Where("reset_at <= ?", now.Format(time.RFC3339Nano)).Delete(&models.AuthLoginFailure{}).Error
 	reset := now.Add(15 * time.Minute).Format(time.RFC3339Nano)
 	var count int
 	err := s.gdb(ctx).Raw(`INSERT INTO auth_login_failures(key_hash,count,reset_at,updated_at) VALUES(?,1,?,?) ON CONFLICT(key_hash) DO UPDATE SET count=CASE WHEN auth_login_failures.reset_at<=excluded.updated_at THEN 1 ELSE auth_login_failures.count+1 END,reset_at=CASE WHEN auth_login_failures.reset_at<=excluded.updated_at THEN excluded.reset_at ELSE auth_login_failures.reset_at END,updated_at=excluded.updated_at RETURNING count`, hex.EncodeToString(key[:]), reset, now.Format(time.RFC3339Nano)).Scan(&count).Error
-	return err == nil && count > 8
+	return count <= maxPasswordLoginAttempts, err
 }
-func (s *Service) clearLoginFailures(ctx context.Context, email, ip string) {
-	key := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(email)) + "|" + ip))
+func (s *Service) clearLoginFailures(ctx context.Context, email string) {
+	key := loginFailureKey(email)
 	_ = s.gdb(ctx).Where("key_hash = ?", hex.EncodeToString(key[:])).Delete(&models.AuthLoginFailure{}).Error
+}
+func (s *Service) allowPasswordReset(ctx context.Context, email, ip string) bool {
+	now := s.deps.Clock().UTC()
+	if err := s.gdb(ctx).Where("reset_at <= ?", now.Format(time.RFC3339Nano)).Delete(&models.AuthLoginFailure{}).Error; err != nil {
+		return false
+	}
+	limits := []struct {
+		key    string
+		limit  int
+		window time.Duration
+	}{
+		{key: "password-reset:global", limit: passwordResetGlobalLimit, window: passwordResetGlobalWindow},
+		{key: "password-reset:network:" + ip, limit: passwordResetNetworkLimit, window: passwordResetNetworkWindow},
+		{key: "password-reset:account:" + strings.ToLower(strings.TrimSpace(email)), limit: passwordResetAccountLimit, window: passwordResetAccountWindow},
+	}
+	for _, rate := range limits {
+		key := sha256.Sum256([]byte(rate.key))
+		reset := now.Add(rate.window).Format(time.RFC3339Nano)
+		var count int
+		err := s.gdb(ctx).Raw(`INSERT INTO auth_login_failures(key_hash,count,reset_at,updated_at) VALUES(?,1,?,?) ON CONFLICT(key_hash) DO UPDATE SET count=CASE WHEN auth_login_failures.reset_at<=excluded.updated_at THEN 1 ELSE auth_login_failures.count+1 END,reset_at=CASE WHEN auth_login_failures.reset_at<=excluded.updated_at THEN excluded.reset_at ELSE auth_login_failures.reset_at END,updated_at=excluded.updated_at RETURNING count`, hex.EncodeToString(key[:]), reset, now.Format(time.RFC3339Nano)).Scan(&count).Error
+		if err != nil || count > rate.limit {
+			return false
+		}
+	}
+	return true
+}
+
+func loginFailureKey(email string) [sha256.Size]byte {
+	return sha256.Sum256([]byte("account|" + strings.ToLower(strings.TrimSpace(email))))
 }
 func (s *Service) appendAuditTx(ctx context.Context, tx *sql.Tx, tenantID, action, actorID, targetType, targetID string, detail map[string]any) error {
 	_, err := tx.ExecContext(ctx, s.q(`INSERT INTO security_audit_logs(id,tenant_id,action,actor_type,actor_id,target_type,target_id,detail_json,created_at) VALUES(?,?,?,'user',?,?,?,?,?)`), s.deps.NewID(), tenantID, action, actorID, targetType, targetID, encodeJSON(detail), s.now())

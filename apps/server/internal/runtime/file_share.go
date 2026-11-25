@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -18,6 +19,39 @@ import (
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
 )
+
+func fileShareResponsePolicy(mimeType, disposition string) (string, string) {
+	mediaType, params, err := mime.ParseMediaType(mimeType)
+	if err != nil || mediaType == "" {
+		return "application/octet-stream", "attachment"
+	}
+	mediaType = strings.ToLower(mediaType)
+	normalized := mime.FormatMediaType(mediaType, params)
+	if normalized == "" {
+		return "application/octet-stream", "attachment"
+	}
+	if disposition != "inline" {
+		return normalized, "attachment"
+	}
+	switch mediaType {
+	case "image/avif", "image/bmp", "image/gif", "image/jpeg", "image/png", "image/webp", "image/x-icon", "text/plain":
+		return normalized, "inline"
+	default:
+		return normalized, "attachment"
+	}
+}
+
+func setFileShareResponseHeaders(w http.ResponseWriter, mimeType, disposition, fileName string, size int64) string {
+	mimeType, disposition = fileShareResponsePolicy(mimeType, disposition)
+	safeName := strings.NewReplacer("\"", "_", "\r", "_", "\n", "_").Replace(fileName)
+	w.Header().Set("Content-Type", mimeType)
+	w.Header().Set("Content-Disposition", disposition+`; filename="`+safeName+`"`)
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.Header().Set("Cache-Control", "private, max-age=60")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
+	return safeName
+}
 
 func newShareToken() (string, string, error) {
 	raw := make([]byte, 32)
@@ -44,9 +78,7 @@ func (h *handler) createFileShare(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "ttlMinutes exceeds 7 days")
 		return
 	}
-	if b.Disposition != "inline" {
-		b.Disposition = "attachment"
-	}
+	b.MimeType, b.Disposition = fileShareResponsePolicy(b.MimeType, b.Disposition)
 	f, ok := h.fs(w, r)
 	if !ok {
 		return
@@ -139,10 +171,6 @@ func (h *handler) downloadSharedFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = h.deps.Gorm.WithContext(r.Context()).Table("file_shares").Where("id = ?", row.ID).Updates(map[string]any{"download_count": gorm.Expr("download_count+1"), "updated_at": runtimeTimeString(h.store.now())})
-	safe := strings.NewReplacer("\"", "_", "\r", "_", "\n", "_").Replace(row.Name)
-	w.Header().Set("Content-Type", row.Mime)
-	w.Header().Set("Content-Disposition", row.Disposition+`; filename="`+safe+`"`)
-	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
-	w.Header().Set("Cache-Control", "private, max-age=60")
+	safe := setFileShareResponseHeaders(w, row.Mime, row.Disposition, row.Name, info.Size())
 	http.ServeContent(w, r, safe, info.ModTime(), file)
 }

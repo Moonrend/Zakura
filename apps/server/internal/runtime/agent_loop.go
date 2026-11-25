@@ -569,8 +569,8 @@ func (s *Service) readModelRound(ctx context.Context, tenant, model string, payl
 	}
 	defer resp.Body.Close()
 	if resp.Status < 200 || resp.Status >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		return modelRoundResult{}, &providerError{Status: resp.Status, Message: string(body), Retryable: resp.Status == 429 || resp.Status >= 500}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxProviderErrorResponse))
+		return modelRoundResult{}, &providerError{Status: resp.Status, Message: gwTruncate(string(body), 1000), Retryable: resp.Status == 429 || resp.Status >= 500}
 	}
 	reader := bufio.NewReader(resp.Body)
 	prefix, _ := reader.Peek(1)

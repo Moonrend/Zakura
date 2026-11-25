@@ -365,7 +365,7 @@ func (s *Service) completeMFALogin(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 409, err.Error())
 		return
 	}
-	res, err := s.sessionForTicket(r.Context(), t, requestIP(r), r.UserAgent())
+	res, err := s.sessionForTicket(r.Context(), t, s.requestIP(r), r.UserAgent())
 	if err != nil {
 		httpx.Error(w, 500, "session issue failed: "+err.Error())
 		return
@@ -410,7 +410,7 @@ func (s *Service) completeTicketTOTP(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 409, err.Error())
 		return
 	}
-	res, err := s.sessionForTicket(r.Context(), t, requestIP(r), r.UserAgent())
+	res, err := s.sessionForTicket(r.Context(), t, s.requestIP(r), r.UserAgent())
 	if err != nil {
 		httpx.Error(w, 500, "session issue failed: "+err.Error())
 		return

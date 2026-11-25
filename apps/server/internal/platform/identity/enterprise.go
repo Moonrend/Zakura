@@ -800,7 +800,15 @@ func (s *Service) scimUpdateUser(w http.ResponseWriter, r *http.Request, replace
 		if (next.Email != mapped.Email || next.Name != mapped.Name) && s.scimHasOtherMembership(r.Context(), tx, tid, mapped.UserID) {
 			return errSCIMSharedProfile
 		}
-		if _, e = tx.ExecContext(r.Context(), s.q(`UPDATE users SET email=?,name=?,updated_at=? WHERE id=?`), next.Email, next.Name, s.now(), mapped.UserID); e != nil {
+		now := s.now()
+		if next.Email != mapped.Email {
+			if _, e = tx.ExecContext(r.Context(), s.q(`UPDATE users SET email=?,name=?,email_version=email_version+1,updated_at=? WHERE id=?`), next.Email, next.Name, now, mapped.UserID); e != nil {
+				return e
+			}
+			if _, e = tx.ExecContext(r.Context(), s.q(`UPDATE auth_tokens SET consumed_at=? WHERE user_id=? AND kind='email_verify' AND consumed_at IS NULL`), now, mapped.UserID); e != nil {
+				return e
+			}
+		} else if _, e = tx.ExecContext(r.Context(), s.q(`UPDATE users SET name=?,updated_at=? WHERE id=?`), next.Name, now, mapped.UserID); e != nil {
 			return e
 		}
 		if _, e = tx.ExecContext(r.Context(), s.q(`UPDATE tenant_memberships SET status=?,updated_at=? WHERE tenant_id=? AND user_id=?`), scimMembershipStatus(next.Active), s.now(), tid, mapped.UserID); e != nil {

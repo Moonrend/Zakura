@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -23,7 +24,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-func TestPublicOTelContractAndFiltering(t *testing.T) {
+func TestAuthenticatedOTelContractAndFiltering(t *testing.T) {
 	forwarded := make(chan map[string]any, 1)
 	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
@@ -34,6 +35,7 @@ func TestPublicOTelContractAndFiltering(t *testing.T) {
 	defer collector.Close()
 	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", collector.URL+"/v1/logs")
 	d := testDeps(t)
+	token := seedTenant(t, d, "tenant")
 	router := chi.NewRouter()
 	RegisterRoutes(router, d)
 	server := httptest.NewServer(router)
@@ -65,19 +67,30 @@ func TestPublicOTelContractAndFiltering(t *testing.T) {
 			},
 		}
 	}
-	post := func(body any) int {
+	post := func(body any, token, forwardedFor string) int {
 		raw, _ := json.Marshal(body)
-		resp, err := http.Post(server.URL+"/api/otel/v1/logs", "application/json", bytes.NewReader(raw))
+		req, _ := http.NewRequest(http.MethodPost, server.URL+"/api/otel/v1/logs", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		if forwardedFor != "" {
+			req.Header.Set("X-Forwarded-For", forwardedFor)
+		}
+		resp, err := server.Client().Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer resp.Body.Close()
 		return resp.StatusCode
 	}
-	if status := post(payload(9)); status != http.StatusNoContent {
+	if status := post(payload(9), "", "198.51.100.10"); status != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status %d", status)
+	}
+	if status := post(payload(9), token, "198.51.100.11"); status != http.StatusNoContent {
 		t.Fatalf("info status %d", status)
 	}
-	if status := post(payload(17)); status != http.StatusAccepted {
+	if status := post(payload(17), token, "198.51.100.12"); status != http.StatusAccepted {
 		t.Fatalf("error status %d", status)
 	}
 	select {
@@ -88,6 +101,83 @@ func TestPublicOTelContractAndFiltering(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("OTel payload was not forwarded")
+	}
+}
+
+func TestOTelLimiterBoundsAndExpiresIdentityBuckets(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	limits := newOTelLimiter()
+	for i := 0; i < otelMaxRateBuckets; i++ {
+		if limits.rateLimited(fmt.Sprintf("actor-%d", i), now) {
+			t.Fatalf("actor %d was rejected before the bucket cap", i)
+		}
+	}
+	if !limits.rateLimited("overflow", now) {
+		t.Fatal("new identity was accepted beyond the bucket cap")
+	}
+	if len(limits.clients) != otelMaxRateBuckets {
+		t.Fatalf("bucket count %d exceeds fixed cap %d", len(limits.clients), otelMaxRateBuckets)
+	}
+	if limits.rateLimited("fresh", now.Add(otelRateWindow)) {
+		t.Fatal("fresh identity was rejected after stale buckets expired")
+	}
+	if len(limits.clients) != 1 {
+		t.Fatalf("expired buckets were not evicted: %d remain", len(limits.clients))
+	}
+}
+
+func TestOTelLimiterAppliesGlobalResourceCaps(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	clientLimits := newOTelLimiter()
+	for request := 0; request < otelClientRequestLimit; request++ {
+		if clientLimits.rateLimited("same-actor", now) {
+			t.Fatalf("request %d was rejected before the per-client cap", request)
+		}
+	}
+	if !clientLimits.rateLimited("same-actor", now) {
+		t.Fatal("request was accepted beyond the per-client cap")
+	}
+
+	limits := newOTelLimiter()
+	for actor := 0; actor < otelGlobalRequestLimit/otelClientRequestLimit; actor++ {
+		for request := 0; request < otelClientRequestLimit; request++ {
+			if limits.rateLimited(fmt.Sprintf("actor-%d", actor), now) {
+				t.Fatalf("request %d for actor %d was rejected before the global cap", request, actor)
+			}
+		}
+	}
+	if !limits.rateLimited("global-overflow", now) {
+		t.Fatal("request was accepted beyond the global cap")
+	}
+
+	byteLimits := newOTelLimiter()
+	if byteLimits.bytesLimited(otelGlobalByteLimit-1, now) || !byteLimits.bytesLimited(2, now) {
+		t.Fatal("global byte budget did not reject overflow")
+	}
+	byteLimits = newOTelLimiter()
+	byteLimits.global = otelGlobalBucket{bytes: otelGlobalByteLimit - 1, resetAt: now.Add(otelRateWindow)}
+	reader := &otelByteBudgetReader{reader: strings.NewReader("xx"), limits: byteLimits, now: func() time.Time { return now }}
+	if _, err := io.ReadAll(reader); !errors.Is(err, errOTelByteBudget) {
+		t.Fatalf("body reader did not enforce the global byte budget: %v", err)
+	}
+	for i := 0; i < otelMaxConcurrentIngest; i++ {
+		if !acquireOTelSlot(byteLimits.ingestSlots) {
+			t.Fatalf("ingest slot %d was rejected before the concurrency cap", i)
+		}
+	}
+	if acquireOTelSlot(byteLimits.ingestSlots) {
+		t.Fatal("ingest was accepted beyond the concurrency cap")
+	}
+	for i := 0; i < otelMaxConcurrentIngest; i++ {
+		<-byteLimits.ingestSlots
+	}
+	for i := 0; i < otelMaxConcurrentForwards; i++ {
+		if !acquireOTelSlot(byteLimits.forwardSlots) {
+			t.Fatalf("forward slot %d was rejected before the concurrency cap", i)
+		}
+	}
+	if acquireOTelSlot(byteLimits.forwardSlots) {
+		t.Fatal("forward was accepted beyond the concurrency cap")
 	}
 }
 

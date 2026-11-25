@@ -467,13 +467,13 @@ func (s *Service) issuePasswordlessSession(w http.ResponseWriter, r *http.Reques
 	}
 	u := User{ID: derefString(dbUser.ID), Email: dbUser.Email, Name: derefString(dbUser.Name), IsPlatformAdmin: dbUser.IsPlatformAdmin, HasPassword: dbUser.PasswordHash != nil && *dbUser.PasswordHash != ""}
 	u.EmailVerified = dbUser.EmailVerifiedAt != nil
-	token, err := s.issueSession(r.Context(), u, t, role, requestIP(r), r.UserAgent())
+	token, err := s.issueSession(r.Context(), u, t, role, s.requestIP(r), r.UserAgent())
 	if err != nil {
 		return err
 	}
 	now := s.now()
 	_ = s.gdb(r.Context()).Model(&models.User{}).Where("id = ?", userID).Updates(map[string]any{"last_login_at": now, "updated_at": now}).Error
-	_ = s.Audit(r.Context(), t.ID, "auth.login", userID, "user", userID, map[string]any{"method": "passkey", "ip": requestIP(r)})
+	_ = s.Audit(r.Context(), t.ID, "auth.login", userID, "user", userID, map[string]any{"method": "passkey", "ip": s.requestIP(r)})
 	s.recordLoginUsage(r.Context(), t.ID, userID, "passkey")
 	httpx.JSON(w, 200, map[string]any{"session": token, "user": u, "tenant": t, "role": role, "multiTenant": s.deps.MultiTenant, "edition": s.deps.Edition})
 	return nil

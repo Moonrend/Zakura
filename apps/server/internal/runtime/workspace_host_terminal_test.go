@@ -6,71 +6,54 @@ import (
 	"context"
 	"encoding/json"
 	"net"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
 
-func TestSpaceWorkspaceTerminalSelectsHostShell(t *testing.T) {
-	for _, platform := range []string{"windows", "linux", "legacy-windows"} {
-		t.Run(platform, func(t *testing.T) {
-			d := testDeps(t)
-			seedTenant(t, d, "tenant")
-			starts := make(chan map[string]any, 1)
-			h := builtinToolHarness(t, d, "rnr_host_shell", func(method string, params map[string]any) (any, error) {
-				switch method {
-				case "sys.info":
-					info := codemodeInfo()
-					if platform == "legacy-windows" {
-						info["hostInfo"] = map[string]any{"platform": "windows"}
-					} else {
-						info["goos"] = platform
-					}
-					return info, nil
-				case "host.pty.start":
-					starts <- params
-					return map[string]any{"id": "host-terminal"}, nil
-				default:
-					return map[string]any{"ok": true}, nil
-				}
-			})
-			runner, err := h.hub.get("node")
-			if err != nil {
-				t.Fatal(err)
-			}
-			server, client := net.Pipe()
-			defer server.Close()
-			defer client.Close()
-			bridge := &workspaceBridge{conn: server, rw: bufio.NewReadWriter(bufio.NewReader(server), bufio.NewWriter(server))}
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				h.bridgeTerminalContainer(context.Background(), bridge, runner, "space", "host", "", "")
-			}()
-			_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
-			raw, err := readRunnerServerText(bufio.NewReader(client))
-			if err != nil {
-				t.Fatal(err)
-			}
-			var ready struct{ Type, Command string }
-			if err := json.Unmarshal([]byte(raw), &ready); err != nil || ready.Type != "ready" {
-				t.Fatalf("terminal ready=%s err=%v", raw, err)
-			}
-			want := []string{"bash", "-l"}
-			if platform != "linux" {
-				want = []string{"powershell.exe", "-NoLogo", "-NoProfile"}
-			}
-			params := <-starts
-			if !reflect.DeepEqual(stringSlice(params["command"]), want) || ready.Command != strings.Join(want, " ") || params["spaceId"] != "space" || params["workingDir"] != "/workspace" {
-				t.Fatalf("shell allocation=%#v ready=%+v want=%v", params, ready, want)
-			}
-			_ = client.Close()
+func TestSpaceWorkspaceTerminalRejectsHostMode(t *testing.T) {
+	d := testDeps(t)
+	seedTenant(t, d, "tenant")
+	hostCalls := make(chan string, 1)
+	h := builtinToolHarness(t, d, "rnr_host_shell", func(method string, params map[string]any) (any, error) {
+		if strings.HasPrefix(method, "host.pty.") {
 			select {
-			case <-done:
-			case <-time.After(time.Second):
-				t.Fatal("host terminal did not close")
+			case hostCalls <- method:
+			default:
 			}
-		})
+		}
+		return map[string]any{"ok": true}, nil
+	})
+	runner, err := h.hub.get("node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+	bridge := &workspaceBridge{conn: server, rw: bufio.NewReadWriter(bufio.NewReader(server), bufio.NewWriter(server))}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.bridgeTerminalContainer(context.Background(), bridge, runner, "space", "host", "", "")
+	}()
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	raw, err := readRunnerServerText(bufio.NewReader(client))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response struct{ Type, Message string }
+	if err := json.Unmarshal([]byte(raw), &response); err != nil || response.Type != "error" || !strings.Contains(response.Message, "migration") {
+		t.Fatalf("host terminal response=%s err=%v", raw, err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("host terminal refusal did not complete")
+	}
+	select {
+	case method := <-hostCalls:
+		t.Fatalf("host terminal reached runner method %s", method)
+	default:
 	}
 }

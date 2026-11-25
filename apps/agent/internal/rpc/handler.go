@@ -525,11 +525,15 @@ func (h *Handler) hostExecKill(raw json.RawMessage) (any, error) {
 func (h *Handler) ptyStart(raw json.RawMessage, send func(Msg)) (any, error) {
 	var p struct {
 		host.ExecParams
-		SpaceID string `json:"spaceId"`
-		Cols    int    `json:"cols"`
-		Rows    int    `json:"rows"`
+		SpaceID            string `json:"spaceId"`
+		AllowHostWorkspace bool   `json:"allowHostWorkspace"`
+		Cols               int    `json:"cols"`
+		Rows               int    `json:"rows"`
 	}
 	_ = json.Unmarshal(raw, &p)
+	if p.SpaceID != "" && !p.AllowHostWorkspace {
+		return nil, fmt.Errorf("space-scoped host terminals are disabled; migrate the workspace to container mode")
+	}
 	root := h.StorageRoot
 	if p.SpaceID != "" {
 		root = h.workspace(p.SpaceID)

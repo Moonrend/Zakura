@@ -275,6 +275,22 @@ func (h *handler) createInstance(w http.ResponseWriter, r *http.Request) {
 	if body.Type == "mcp" {
 		configValues := map[string]any{}
 		_ = json.Unmarshal([]byte(configPlain), &configValues)
+		command, packageManager, _, hasCommand, controlErr := stdioConfigControls(json.RawMessage(configPlain))
+		if controlErr != nil {
+			httpx.Error(w, http.StatusBadRequest, controlErr.Error())
+			return
+		}
+		delete(configValues, stdioOCIApprovalKey)
+		if hasCommand && command != "" {
+			approved, approvalErr := authorizeStdioOCI(p, command, packageManager)
+			if approvalErr != nil {
+				statusErr(w, approvalErr)
+				return
+			}
+			if approved {
+				configValues[stdioOCIApprovalKey] = true
+			}
+		}
 		if configured, _ := configValues["ownerSpaceId"].(string); configured != "" {
 			if owner != "" && owner != configured {
 				httpx.Error(w, 400, "conflicting Space ownership")
@@ -390,7 +406,7 @@ func (h *handler) patchInstance(w http.ResponseWriter, r *http.Request) {
 				statusErr(w, e)
 				return
 			}
-			config, secret, e := h.PatchMCPConfig(r.Context(), p.TenantID, id, raw)
+			config, secret, e := h.patchMCPConfig(r.Context(), p.TenantID, id, raw, p)
 			if e != nil {
 				statusErr(w, e)
 				return
@@ -1187,6 +1203,11 @@ func (h *handler) listContainers(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, out)
 }
 func (h *handler) allocateContainer(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	if !p.IsPlatformAdmin {
+		httpx.Error(w, http.StatusForbidden, "platform admin required")
+		return
+	}
 	var b struct {
 		InstanceID, SpaceID, AgentID *string
 		RuntimeNodeID                *string `json:"runtimeNodeId"`
@@ -1207,7 +1228,6 @@ func (h *handler) allocateContainer(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "invalid container name")
 		return
 	}
-	p := principal(r)
 	if b.RuntimeNodeID == nil || *b.RuntimeNodeID == "" {
 		var nodeRow struct {
 			NodeID *string `gorm:"column:runtime_node_id"`

@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
@@ -9,18 +10,24 @@ import (
 	"time"
 )
 
+const (
+	publishedComposeSecret = "zakura-local-dev-secret-change-me-0123456789abcdef"
+	publishedReadmeSecret  = "replace-with-at-least-32-random-bytes"
+)
+
 type Config struct {
-	ListenAddr   string
-	DatabaseURL  string
-	DataDir      string
-	Secret       string
-	PublicURL    string
-	WebURL       string
-	Edition      string
-	MultiTenant  bool
-	AutoMigrate  bool
-	ReadTimeout  time.Duration
-	WriteTimeout time.Duration
+	ListenAddr        string
+	DatabaseURL       string
+	DataDir           string
+	Secret            string
+	PublicURL         string
+	WebURL            string
+	Edition           string
+	MultiTenant       bool
+	AutoMigrate       bool
+	ReadTimeout       time.Duration
+	WriteTimeout      time.Duration
+	TrustedProxyCIDRs []netip.Prefix
 }
 
 func Load() (Config, error) {
@@ -40,21 +47,30 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	trustedProxyCIDRs, err := prefixListEnv("TRUSTED_PROXY_CIDRS")
+	if err != nil {
+		return Config{}, err
+	}
 	c := Config{
-		ListenAddr:   env("LISTEN_ADDR", ":8787"),
-		DatabaseURL:  env("DATABASE_URL", "file:./data/zakura.db"),
-		DataDir:      env("DATA_DIR", ""),
-		Secret:       os.Getenv("ZAKURA_SECRET"),
-		PublicURL:    strings.TrimRight(env("PUBLIC_BASE_URL", "http://localhost:8787"), "/"),
-		WebURL:       strings.TrimRight(env("WEB_PUBLIC_URL", "http://localhost:3000"), "/"),
-		Edition:      env("ZAKURA_EDITION", "oss"),
-		MultiTenant:  multiTenant,
-		AutoMigrate:  autoMigrate,
-		ReadTimeout:  readTimeout,
-		WriteTimeout: writeTimeout,
+		ListenAddr:        env("LISTEN_ADDR", ":8787"),
+		DatabaseURL:       env("DATABASE_URL", "file:./data/zakura.db"),
+		DataDir:           env("DATA_DIR", ""),
+		Secret:            os.Getenv("ZAKURA_SECRET"),
+		PublicURL:         strings.TrimRight(env("PUBLIC_BASE_URL", "http://localhost:8787"), "/"),
+		WebURL:            strings.TrimRight(env("WEB_PUBLIC_URL", "http://localhost:3000"), "/"),
+		Edition:           env("ZAKURA_EDITION", "oss"),
+		MultiTenant:       multiTenant,
+		AutoMigrate:       autoMigrate,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		TrustedProxyCIDRs: trustedProxyCIDRs,
 	}
 	if len(c.Secret) < 32 {
 		return Config{}, errors.New("ZAKURA_SECRET must contain at least 32 bytes")
+	}
+	normalizedSecret := strings.TrimSpace(c.Secret)
+	if normalizedSecret == publishedComposeSecret || normalizedSecret == publishedReadmeSecret {
+		return Config{}, errors.New("ZAKURA_SECRET must not use a published placeholder value")
 	}
 	if err := validBaseURL(c.PublicURL); err != nil {
 		return Config{}, errors.New("invalid PUBLIC_BASE_URL")
@@ -106,6 +122,21 @@ func durationEnvAllowZero(k string, fallback time.Duration) (time.Duration, erro
 		return 0, errors.New(k + " must be a non-negative duration")
 	}
 	return d, nil
+}
+func prefixListEnv(k string) ([]netip.Prefix, error) {
+	raw := strings.TrimSpace(os.Getenv(k))
+	if raw == "" {
+		return nil, nil
+	}
+	prefixes := make([]netip.Prefix, 0, strings.Count(raw, ",")+1)
+	for _, value := range strings.Split(raw, ",") {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(value))
+		if err != nil {
+			return nil, errors.New(k + " must be a comma-separated list of IP prefixes")
+		}
+		prefixes = append(prefixes, prefix.Masked())
+	}
+	return prefixes, nil
 }
 func validBaseURL(raw string) error {
 	u, err := url.ParseRequestURI(raw)

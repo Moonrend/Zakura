@@ -69,13 +69,14 @@ func (h *handler) enrollComposeNode(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, credential)
 }
 
-// Compose credentials never enter the manual-install token cache or UI.
+// Compose credentials never enter the manual-install token cache or UI. Manual
+// enrollment tokens enter the cache only when their node is created; presenting
+// a node credential must never restore installation material after enrollment.
 func (h *handler) cacheRuntimeNodeToken(ctx context.Context, nodeID, token string) (string, error) {
 	var incarnation string
 	var revoked bool
 	err := h.deps.DB.QueryRowContext(ctx, h.deps.Rebind(`SELECT node_incarnation,revoked FROM node_installations WHERE node_id=?`), nodeID).Scan(&incarnation, &revoked)
 	if errors.Is(err, sql.ErrNoRows) {
-		runnerTokenCache.Store(nodeID, token)
 		return "", nil
 	}
 	runnerTokenCache.Delete(nodeID)

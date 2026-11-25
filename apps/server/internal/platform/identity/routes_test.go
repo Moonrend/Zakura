@@ -238,22 +238,37 @@ func TestConcurrentSetupCreatesExactlyOnePlatformAdmin(t *testing.T) {
 
 func TestLoginThrottleIsDurableAndClearsOnSuccess(t *testing.T) {
 	deps := testDeps(t)
+	now := deps.Clock()
+	deps.Clock = func() time.Time { return now }
 	r := chi.NewRouter()
 	identity.RegisterRoutes(r, deps)
 	setupUser(t, r, "throttle@example.com", "Throttle")
-	for i := 0; i < 8; i++ {
+	for i := 0; i < 3; i++ {
 		failed := call(t, r, http.MethodPost, "/api/auth/login", map[string]any{"email": "throttle@example.com", "password": "wrong-password"}, "")
+		if failed.Code != http.StatusUnauthorized {
+			t.Fatalf("initial failure %d status=%d body=%s", i+1, failed.Code, failed.Body.String())
+		}
+	}
+	success := call(t, r, http.MethodPost, "/api/auth/login", map[string]any{"email": "throttle@example.com", "password": "setup-password-123"}, "")
+	if success.Code != http.StatusOK {
+		t.Fatalf("valid login before limit: %d %s", success.Code, success.Body.String())
+	}
+	for i := 0; i < 8; i++ {
+		forwarded := fmt.Sprintf("203.0.113.%d", i+1)
+		remote := fmt.Sprintf("198.51.100.%d:42000", i+1)
+		failed := callFrom(t, r, http.MethodPost, "/api/auth/login", map[string]any{"email": "throttle@example.com", "password": "wrong-password"}, "", remote, map[string]string{"CF-Connecting-IP": forwarded, "X-Real-IP": forwarded, "X-Forwarded-For": forwarded})
 		if failed.Code != http.StatusUnauthorized {
 			t.Fatalf("failure %d status=%d body=%s", i+1, failed.Code, failed.Body.String())
 		}
 	}
-	blocked := call(t, r, http.MethodPost, "/api/auth/login", map[string]any{"email": "throttle@example.com", "password": "wrong-password"}, "")
+	blocked := callFrom(t, r, http.MethodPost, "/api/auth/login", map[string]any{"email": "throttle@example.com", "password": "setup-password-123"}, "", "198.51.100.20:42000", map[string]string{"CF-Connecting-IP": "192.0.2.10", "X-Real-IP": "192.0.2.11", "X-Forwarded-For": "192.0.2.12"})
 	if blocked.Code != http.StatusTooManyRequests {
-		t.Fatalf("ninth failure status=%d body=%s", blocked.Code, blocked.Body.String())
+		t.Fatalf("rotated headers bypassed throttle: status=%d body=%s", blocked.Code, blocked.Body.String())
 	}
-	success := call(t, r, http.MethodPost, "/api/auth/login", map[string]any{"email": "throttle@example.com", "password": "setup-password-123"}, "")
-	if success.Code != http.StatusOK {
-		t.Fatalf("valid login after failures: %d %s", success.Code, success.Body.String())
+	now = now.Add(16 * time.Minute)
+	recovered := call(t, r, http.MethodPost, "/api/auth/login", map[string]any{"email": "throttle@example.com", "password": "setup-password-123"}, "")
+	if recovered.Code != http.StatusOK {
+		t.Fatalf("valid login after reset: %d %s", recovered.Code, recovered.Body.String())
 	}
 	again := call(t, r, http.MethodPost, "/api/auth/login", map[string]any{"email": "throttle@example.com", "password": "wrong-password"}, "")
 	if again.Code != http.StatusUnauthorized {
@@ -375,6 +390,14 @@ func TestOAuthCodeAndRefreshAreSingleUse(t *testing.T) {
 	if tokenBody.AccessToken == "" || tokenBody.IDToken == "" || !strings.HasPrefix(tokenBody.RefreshToken, "rcr_") {
 		t.Fatalf("pinned OAuth token response missing fields: %+v", tokenBody)
 	}
+	idToken, _, err := jwt.NewParser().ParseUnverified(tokenBody.IDToken, jwt.MapClaims{})
+	if err != nil {
+		t.Fatalf("parse ID token claims: %v", err)
+	}
+	idClaims, claimsOK := idToken.Claims.(jwt.MapClaims)
+	if !claimsOK || idClaims["email"] != "oauth@example.com" || idClaims["email_verified"] != false {
+		t.Fatalf("unverified email ID token claims: %#v", idToken.Claims)
+	}
 	unverified, _, err := jwt.NewParser().ParseUnverified(tokenBody.AccessToken, jwt.MapClaims{})
 	if err != nil || unverified == nil || unverified.Method.Alg() != "RS256" || unverified.Header["typ"] != "at+jwt" {
 		header := map[string]any(nil)
@@ -384,8 +407,16 @@ func TestOAuthCodeAndRefreshAreSingleUse(t *testing.T) {
 		t.Fatalf("access token is not pinned RS256 at+jwt: header=%#v err=%v", header, err)
 	}
 	userinfo := call(t, r, http.MethodGet, "/userinfo", nil, tokenBody.AccessToken)
-	if userinfo.Code != http.StatusOK || !strings.Contains(userinfo.Body.String(), "oauth@example.com") {
+	if userinfo.Code != http.StatusOK {
 		t.Fatalf("userinfo with issued token: %d %s", userinfo.Code, userinfo.Body.String())
+	}
+	var userinfoBody struct {
+		Email         string `json:"email"`
+		EmailVerified *bool  `json:"email_verified"`
+	}
+	decode(t, userinfo, &userinfoBody)
+	if userinfoBody.Email != "oauth@example.com" || userinfoBody.EmailVerified == nil || *userinfoBody.EmailVerified {
+		t.Fatalf("unverified email userinfo claims: %+v", userinfoBody)
 	}
 	oauthMe := call(t, r, http.MethodGet, "/api/me", nil, tokenBody.AccessToken)
 	if oauthMe.Code != http.StatusOK {
@@ -395,6 +426,17 @@ func TestOAuthCodeAndRefreshAreSingleUse(t *testing.T) {
 	if jwks.Code != http.StatusOK || !strings.Contains(jwks.Body.String(), `"kty":"RSA"`) || !strings.Contains(jwks.Body.String(), `"alg":"RS256"`) {
 		t.Fatalf("RS256 JWKS: %d %s", jwks.Code, jwks.Body.String())
 	}
+	if _, err := deps.DB.Exec(`UPDATE users SET email_verified_at=? WHERE email=?`, deps.Clock().Format(time.RFC3339Nano), "oauth@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	verifiedUserinfo := call(t, r, http.MethodGet, "/userinfo", nil, tokenBody.AccessToken)
+	if verifiedUserinfo.Code != http.StatusOK {
+		t.Fatalf("verified userinfo with issued token: %d %s", verifiedUserinfo.Code, verifiedUserinfo.Body.String())
+	}
+	decode(t, verifiedUserinfo, &userinfoBody)
+	if userinfoBody.Email != "oauth@example.com" || userinfoBody.EmailVerified == nil || !*userinfoBody.EmailVerified {
+		t.Fatalf("verified email userinfo claims: %+v", userinfoBody)
+	}
 	refresh := url.Values{"grant_type": {"refresh_token"}, "client_id": {client.ClientID}, "refresh_token": {tokenBody.RefreshToken}}
 	wg.Add(2)
 	for i := 0; i < 2; i++ {
@@ -402,15 +444,28 @@ func TestOAuthCodeAndRefreshAreSingleUse(t *testing.T) {
 	}
 	wg.Wait()
 	ok, bad = 0, 0
+	var refreshedTokenBody struct {
+		AccessToken string `json:"access_token"`
+		IDToken     string `json:"id_token"`
+	}
 	for _, rr := range results {
 		if rr.Code == 200 {
 			ok++
+			decode(t, rr, &refreshedTokenBody)
 		} else if rr.Code == 400 {
 			bad++
 		}
 	}
 	if ok != 1 || bad != 1 {
 		t.Fatalf("refresh replay statuses %d,%d", results[0].Code, results[1].Code)
+	}
+	refreshedIDToken, _, err := jwt.NewParser().ParseUnverified(refreshedTokenBody.IDToken, jwt.MapClaims{})
+	if err != nil {
+		t.Fatalf("parse refreshed ID token claims: %v", err)
+	}
+	refreshedIDClaims, claimsOK := refreshedIDToken.Claims.(jwt.MapClaims)
+	if !claimsOK || refreshedIDClaims["email"] != "oauth@example.com" || refreshedIDClaims["email_verified"] != true {
+		t.Fatalf("verified email ID token claims: %#v", refreshedIDToken.Claims)
 	}
 }
 
@@ -850,6 +905,99 @@ func TestForgotPasswordForPasswordlessAccount(t *testing.T) {
 	}
 }
 
+func TestForgotPasswordAccountCooldownCoalescesTokens(t *testing.T) {
+	deps := testDeps(t)
+	var emails int
+	deps.SendTransactionalEmail = func(context.Context, string, string, string, string) error {
+		emails++
+		return nil
+	}
+	r := chi.NewRouter()
+	identity.RegisterRoutes(r, deps)
+	setupUser(t, r, "owner@example.com", "Owner Team")
+	var userID string
+	if err := deps.DB.QueryRow(`SELECT id FROM users WHERE email='owner@example.com'`).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	now := deps.Clock().UTC()
+	if _, err := deps.DB.Exec(`INSERT INTO auth_tokens(id,user_id,kind,token_hash,expires_at,created_at) VALUES(?,?,'password_reset','older-reset-token',?,?)`, deps.NewID(), userID, now.Add(30*time.Minute).Format(time.RFC3339Nano), now.Add(-time.Minute).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deps.DB.Exec(`INSERT INTO auth_tokens(id,user_id,kind,token_hash,expires_at,created_at) VALUES(?,NULL,'password_reset','expired-reset-token',?,?)`, deps.NewID(), now.Add(-time.Minute).Format(time.RFC3339Nano), now.Add(-time.Hour).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+
+	first := forgotPasswordCall(t, r, "owner@example.com", "192.0.2.10")
+	second := forgotPasswordCall(t, r, " OWNER@EXAMPLE.COM ", "198.51.100.10")
+	if first.Code != http.StatusOK || second.Code != http.StatusOK || !strings.Contains(second.Body.String(), `"sent":true`) {
+		t.Fatalf("generic forgot-password response changed: first=%d second=%d body=%s", first.Code, second.Code, second.Body.String())
+	}
+	var tokens, expired int
+	if err := deps.DB.QueryRow(`SELECT COUNT(*) FROM auth_tokens t JOIN users u ON u.id=t.user_id WHERE t.kind='password_reset' AND u.email='owner@example.com'`).Scan(&tokens); err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.DB.QueryRow(`SELECT COUNT(*) FROM auth_tokens WHERE token_hash='expired-reset-token'`).Scan(&expired); err != nil {
+		t.Fatal(err)
+	}
+	if tokens != 1 || expired != 0 || emails != 1 {
+		t.Fatalf("account cooldown did not coalesce work: tokens=%d expired=%d emails=%d", tokens, expired, emails)
+	}
+}
+
+func TestForgotPasswordNetworkAndGlobalLimits(t *testing.T) {
+	t.Run("network", func(t *testing.T) {
+		deps := testDeps(t)
+		var emails int
+		deps.SendTransactionalEmail = func(context.Context, string, string, string, string) error {
+			emails++
+			return nil
+		}
+		r := chi.NewRouter()
+		identity.RegisterRoutes(r, deps)
+		setupUser(t, r, "owner@example.com", "Owner Team")
+		for i := 0; i < 20; i++ {
+			response := forgotPasswordCall(t, r, fmt.Sprintf("unknown-%d@example.com", i), "192.0.2.20")
+			if response.Code != http.StatusOK {
+				t.Fatalf("unknown request %d status=%d", i, response.Code)
+			}
+		}
+		blocked := forgotPasswordCall(t, r, "owner@example.com", "192.0.2.20")
+		allowed := forgotPasswordCall(t, r, "owner@example.com", "198.51.100.20")
+		if blocked.Code != http.StatusOK || allowed.Code != http.StatusOK || emails != 1 {
+			t.Fatalf("network limit: blocked=%d allowed=%d emails=%d", blocked.Code, allowed.Code, emails)
+		}
+	})
+
+	t.Run("global", func(t *testing.T) {
+		deps := testDeps(t)
+		now := deps.Clock()
+		deps.Clock = func() time.Time { return now }
+		var emails int
+		deps.SendTransactionalEmail = func(context.Context, string, string, string, string) error {
+			emails++
+			return nil
+		}
+		r := chi.NewRouter()
+		identity.RegisterRoutes(r, deps)
+		setupUser(t, r, "owner@example.com", "Owner Team")
+		for i := 0; i < 100; i++ {
+			response := forgotPasswordCall(t, r, fmt.Sprintf("unknown-%d@example.com", i), fmt.Sprintf("198.51.100.%d", i+1))
+			if response.Code != http.StatusOK {
+				t.Fatalf("unknown request %d status=%d", i, response.Code)
+			}
+		}
+		blocked := forgotPasswordCall(t, r, "owner@example.com", "203.0.113.10")
+		if blocked.Code != http.StatusOK || emails != 0 {
+			t.Fatalf("global limit did not suppress delivery: status=%d emails=%d", blocked.Code, emails)
+		}
+		now = now.Add(16 * time.Minute)
+		allowed := forgotPasswordCall(t, r, "owner@example.com", "203.0.113.10")
+		if allowed.Code != http.StatusOK || emails != 1 {
+			t.Fatalf("global window did not reopen: status=%d emails=%d", allowed.Code, emails)
+		}
+	})
+}
+
 func TestResetPasswordMessages(t *testing.T) {
 	deps := testDeps(t)
 	r := chi.NewRouter()
@@ -865,6 +1013,89 @@ func TestResetPasswordMessages(t *testing.T) {
 	unknownToken := call(t, r, http.MethodPost, "/api/auth/reset-password", map[string]any{"token": "unknown-reset-token", "password": "a-valid-long-password"}, "")
 	if unknownToken.Code != http.StatusBadRequest || !strings.Contains(unknownToken.Body.String(), "invalid or expired token") {
 		t.Fatalf("unknown token: %d %s", unknownToken.Code, unknownToken.Body.String())
+	}
+}
+
+func TestResetPasswordRevokesOAuthRefreshTokens(t *testing.T) {
+	deps := testDeps(t)
+	deps.Edition = "saas"
+	r := chi.NewRouter()
+	identity.RegisterRoutes(r, deps)
+	oldSession := setupUser(t, r, "reset@example.com", "Reset Team")
+	other := call(t, r, http.MethodPost, "/api/auth/register", map[string]any{"email": "other@example.com", "password": "other-password-123", "tenantName": "Other Team"}, "")
+	if other.Code != http.StatusCreated {
+		t.Fatalf("register other user: %d %s", other.Code, other.Body.String())
+	}
+	clientResponse := call(t, r, http.MethodPost, "/oauth/register", map[string]any{"redirect_uris": []string{"http://localhost/callback"}, "token_endpoint_auth_method": "none"}, "")
+	if clientResponse.Code != http.StatusCreated {
+		t.Fatalf("register client: %d %s", clientResponse.Code, clientResponse.Body.String())
+	}
+	var client struct {
+		ID string `json:"client_id"`
+	}
+	decode(t, clientResponse, &client)
+
+	var userID, tenantID, otherUserID, otherTenantID string
+	if err := deps.DB.QueryRow(`SELECT u.id,m.tenant_id FROM users u JOIN tenant_memberships m ON m.user_id=u.id WHERE u.email='reset@example.com'`).Scan(&userID, &tenantID); err != nil {
+		t.Fatal(err)
+	}
+	if err := deps.DB.QueryRow(`SELECT u.id,m.tenant_id FROM users u JOIN tenant_memberships m ON m.user_id=u.id WHERE u.email='other@example.com'`).Scan(&otherUserID, &otherTenantID); err != nil {
+		t.Fatal(err)
+	}
+	now := deps.Clock().UTC()
+	nowText := now.Format(time.RFC3339Nano)
+	resetToken := "known-password-reset-token"
+	resetHash := sha256.Sum256([]byte(resetToken))
+	if _, err := deps.DB.Exec(`INSERT INTO auth_tokens(id,user_id,kind,token_hash,expires_at,created_at) VALUES(?,?,?,?,?,?)`, "reset-token", userID, "password_reset", hex.EncodeToString(resetHash[:]), now.Add(time.Hour).Format(time.RFC3339Nano), nowText); err != nil {
+		t.Fatal(err)
+	}
+	type refreshFixture struct {
+		id, family, raw, user, tenant string
+		consumed                      any
+	}
+	refreshes := []refreshFixture{
+		{id: "consumed-parent", family: "rotated-family", raw: "rcr_consumed_parent", user: userID, tenant: tenantID, consumed: nowText},
+		{id: "rotated-descendant", family: "rotated-family", raw: "rcr_rotated_descendant", user: userID, tenant: tenantID},
+		{id: "second-family", family: "second-family", raw: "rcr_second_family", user: userID, tenant: tenantID},
+		{id: "other-user-token", family: "other-family", raw: "rcr_other_user", user: otherUserID, tenant: otherTenantID},
+	}
+	for _, refresh := range refreshes {
+		digest := sha256.Sum256([]byte(refresh.raw))
+		if _, err := deps.DB.Exec(`INSERT INTO oauth_refresh_tokens(id,family_id,token_hash,client_id,user_id,tenant_id,scope,expires_at,consumed_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, refresh.id, refresh.family, hex.EncodeToString(digest[:]), client.ID, refresh.user, refresh.tenant, "mcp", now.Add(24*time.Hour).Format(time.RFC3339Nano), refresh.consumed, nowText); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	reset := call(t, r, http.MethodPost, "/api/auth/reset-password", map[string]any{"token": resetToken, "password": "replacement-password-123"}, "")
+	if reset.Code != http.StatusOK {
+		t.Fatalf("reset password: %d %s", reset.Code, reset.Body.String())
+	}
+	var revoked int
+	if err := deps.DB.QueryRow(`SELECT COUNT(*) FROM oauth_refresh_tokens WHERE user_id=? AND revoked_at IS NOT NULL`, userID).Scan(&revoked); err != nil {
+		t.Fatal(err)
+	}
+	if revoked != 3 {
+		t.Fatalf("reset user refresh tokens revoked=%d", revoked)
+	}
+	var otherRevoked sql.NullString
+	if err := deps.DB.QueryRow(`SELECT revoked_at FROM oauth_refresh_tokens WHERE id='other-user-token'`).Scan(&otherRevoked); err != nil {
+		t.Fatal(err)
+	}
+	if otherRevoked.Valid {
+		t.Fatalf("other user's refresh token was revoked at %s", otherRevoked.String)
+	}
+	for _, raw := range []string{"rcr_rotated_descendant", "rcr_second_family"} {
+		response := callForm(r, "/token", url.Values{"grant_type": {"refresh_token"}, "client_id": {client.ID}, "refresh_token": {raw}})
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "invalid_grant") {
+			t.Fatalf("refresh token remained usable: %d %s", response.Code, response.Body.String())
+		}
+	}
+	if current := call(t, r, http.MethodGet, "/api/me", nil, oldSession); current.Code != http.StatusUnauthorized {
+		t.Fatalf("old session remained usable: %d %s", current.Code, current.Body.String())
+	}
+	login := call(t, r, http.MethodPost, "/api/auth/login", map[string]any{"email": "reset@example.com", "password": "replacement-password-123"}, "")
+	if login.Code != http.StatusOK {
+		t.Fatalf("new password login: %d %s", login.Code, login.Body.String())
 	}
 }
 
@@ -1066,6 +1297,14 @@ func TestSocialOAuthWithDeterministicFakeProvider(t *testing.T) {
 	deps := testDeps(t)
 	deps.Edition = "saas"
 	var tokenCalls atomic.Int64
+	var providerSubject atomic.Value
+	var profileEmail atomic.Value
+	var githubEmail atomic.Value
+	var providerVerified atomic.Bool
+	providerSubject.Store("12345")
+	profileEmail.Store("")
+	githubEmail.Store("social@example.com")
+	providerVerified.Store(true)
 	idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/token":
@@ -1080,13 +1319,13 @@ func TestSocialOAuthWithDeterministicFakeProvider(t *testing.T) {
 				http.Error(w, "bad token", http.StatusUnauthorized)
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"id": 12345, "email": nil, "name": "Social User"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": providerSubject.Load(), "sub": providerSubject.Load(), "email": profileEmail.Load(), "email_verified": providerVerified.Load(), "name": "Social User"})
 		case "/userinfo/emails":
 			if r.Header.Get("Authorization") != "Bearer fake-access" {
 				http.Error(w, "bad token", http.StatusUnauthorized)
 				return
 			}
-			_ = json.NewEncoder(w).Encode([]map[string]any{{"email": "social@example.com", "primary": true, "verified": true}})
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"email": githubEmail.Load(), "primary": true, "verified": providerVerified.Load()}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -1159,6 +1398,54 @@ func TestSocialOAuthWithDeterministicFakeProvider(t *testing.T) {
 	replay := call(t, r, http.MethodPost, "/api/auth/oauth/github/callback", callbackBody, "")
 	if replay.Code != http.StatusBadRequest || tokenCalls.Load() != 1 {
 		t.Fatalf("state replay was not rejected before provider exchange: %d %s", replay.Code, replay.Body.String())
+	}
+
+	githubLogin := func(subject string, verified bool) *httptest.ResponseRecorder {
+		t.Helper()
+		providerSubject.Store(subject)
+		profileEmail.Store("owner@example.com")
+		githubEmail.Store("owner@example.com")
+		providerVerified.Store(verified)
+		start := call(t, r, http.MethodPost, "/api/auth/oauth/github/start", map[string]any{}, "")
+		if start.Code != http.StatusOK {
+			t.Fatalf("start GitHub login: %d %s", start.Code, start.Body.String())
+		}
+		var started struct {
+			AuthorizeURL string `json:"authorizeUrl"`
+		}
+		decode(t, start, &started)
+		authorizeURL, err := url.Parse(started.AuthorizeURL)
+		if err != nil || authorizeURL.Query().Get("state") == "" {
+			t.Fatalf("invalid GitHub authorize URL: %q err=%v", started.AuthorizeURL, err)
+		}
+		return call(t, r, http.MethodPost, "/api/auth/oauth/github/callback", map[string]any{"code": "provider-code", "state": authorizeURL.Query().Get("state")}, "")
+	}
+	unverifiedGitHub := githubLogin("github-attacker", false)
+	if unverifiedGitHub.Code != http.StatusForbidden || !strings.Contains(unverifiedGitHub.Body.String(), "did not verify") {
+		t.Fatalf("unverified GitHub email linked an existing account: %d %s", unverifiedGitHub.Code, unverifiedGitHub.Body.String())
+	}
+	var unverifiedGitHubBindings int
+	if err := deps.DB.QueryRow(`SELECT COUNT(*) FROM oauth_identities WHERE provider='github' AND provider_user_id='github-attacker'`).Scan(&unverifiedGitHubBindings); err != nil || unverifiedGitHubBindings != 0 {
+		t.Fatalf("unverified GitHub identity was persisted: bindings=%d err=%v", unverifiedGitHubBindings, err)
+	}
+
+	verifiedGitHub := githubLogin("github-owner", true)
+	if verifiedGitHub.Code != http.StatusOK {
+		t.Fatalf("verified GitHub email did not link: %d %s", verifiedGitHub.Code, verifiedGitHub.Body.String())
+	}
+	var verifiedResult struct {
+		Session string `json:"session"`
+		User    struct {
+			Email string `json:"email"`
+		} `json:"user"`
+	}
+	decode(t, verifiedGitHub, &verifiedResult)
+	if verifiedResult.Session == "" || verifiedResult.User.Email != "owner@example.com" {
+		t.Fatalf("verified GitHub result mismatch: %+v", verifiedResult)
+	}
+	var verifiedGitHubBindings int
+	if err := deps.DB.QueryRow(`SELECT COUNT(*) FROM oauth_identities WHERE provider='github' AND provider_user_id='github-owner'`).Scan(&verifiedGitHubBindings); err != nil || verifiedGitHubBindings != 1 {
+		t.Fatalf("verified GitHub identity binding missing: bindings=%d err=%v", verifiedGitHubBindings, err)
 	}
 }
 
@@ -1337,21 +1624,41 @@ func testDeps(t *testing.T) *appdeps.Dependencies {
 		t.Fatal(err)
 	}
 	var seq atomic.Int64
-	return &appdeps.Dependencies{DB: c.DB, Gorm: gormDB, Dialect: c.Dialect, Rebind: c.Rebind, Clock: func() time.Time { return time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC) }, NewID: func() string { return fmt.Sprintf("%026d", seq.Add(1)) }, Secret: []byte("0123456789abcdef0123456789abcdef"), PublicURL: "http://api.test", WebURL: "http://web.test", Edition: "self-hosted", MultiTenant: true}
+	now := time.Now().UTC()
+	return &appdeps.Dependencies{DB: c.DB, Gorm: gormDB, Dialect: c.Dialect, Rebind: c.Rebind, Clock: func() time.Time { return now }, NewID: func() string { return fmt.Sprintf("%026d", seq.Add(1)) }, Secret: []byte("0123456789abcdef0123456789abcdef"), PublicURL: "http://api.test", WebURL: "http://web.test", Edition: "self-hosted", MultiTenant: true}
 }
 func call(t *testing.T, h http.Handler, method, path string, body any, token string) *httptest.ResponseRecorder {
+	return callFrom(t, h, method, path, body, token, "", nil)
+}
+func callFrom(t *testing.T, h http.Handler, method, path string, body any, token, remoteAddr string, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
 	var raw []byte
 	if body != nil {
 		raw, _ = json.Marshal(body)
 	}
 	req := httptest.NewRequest(method, path, bytes.NewReader(raw))
+	if remoteAddr != "" {
+		req.RemoteAddr = remoteAddr
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	return rr
+}
+func forgotPasswordCall(t *testing.T, h http.Handler, email, ip string) *httptest.ResponseRecorder {
+	t.Helper()
+	raw, _ := json.Marshal(map[string]any{"email": email})
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/forgot-password", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = net.JoinHostPort(ip, "12345")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	return rr

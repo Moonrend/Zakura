@@ -51,6 +51,8 @@ func TestAllowedSenderSemantics(t *testing.T) {
 		{"alice@example.com", "Alice@Example.com", true},
 		{"alice@example.com", "Bob <alice@example.com>", true},
 		{"alice@example.com", "bob@example.com", false},
+		{"*", "", false},
+		{"*", "Alice <alice@example.com>, Mallory <mallory@example.net>", false},
 	}
 	for _, tc := range cases {
 		if got := allowedSender(tc.sender, []string{tc.rule}); got != tc.want {
@@ -59,6 +61,9 @@ func TestAllowedSenderSemantics(t *testing.T) {
 	}
 	if emailAddress("Bob <bob@x.com>") != "bob@x.com" {
 		t.Fatalf("emailAddress extraction failed: %q", emailAddress("Bob <bob@x.com>"))
+	}
+	if emailAddress("Bob <bob@x.com>, Mallory <mallory@x.com>") != "" {
+		t.Fatal("emailAddress accepted multiple sender identities")
 	}
 }
 

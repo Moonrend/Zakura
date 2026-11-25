@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -300,5 +301,11 @@ func TestMCPStoreSharesProvisioningAndLegacyOwnership(t *testing.T) {
 	}
 	if _, _, err = h.PatchMCPConfig(context.Background(), "tenant", id, json.RawMessage(`{"ownerSpaceId":"other"}`)); err == nil {
 		t.Fatal("owner changed via generic config patch")
+	}
+	if _, _, err = h.PatchMCPConfig(context.Background(), "tenant", id, json.RawMessage(`{"packageManager":"oci"}`)); !errors.Is(err, errStdioOCIPlatformAdminRequired) {
+		t.Fatalf("OCI enabled without platform approval: %v", err)
+	}
+	if _, _, err = h.PatchMCPConfig(context.Background(), "tenant", id, json.RawMessage(`{"packageManager":"oci","ociPlatformApproved":true}`)); err == nil {
+		t.Fatal("OCI approval forged via generic config patch")
 	}
 }

@@ -9,23 +9,26 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
-	"path"
 	"strings"
 	"sync"
 	"time"
 )
 
-const maxProviderResponse = 64 << 20
+const (
+	maxProviderResponse      = 64 << 20
+	maxProviderErrorResponse = 4 << 10
+)
 
 type Gateway struct {
-	store        *Store
-	client       *http.Client
-	captureSlots chan struct{}
-	captureMu    sync.Mutex
-	captureTails map[*gatewayCapture]gatewayCaptureKey
+	store          *Store
+	client         *http.Client
+	providerClient *http.Client
+	allowPrivate   bool
+	captureSlots   chan struct{}
+	captureMu      sync.Mutex
+	captureTails   map[*gatewayCapture]gatewayCaptureKey
 }
 
 func NewGateway(store *Store) *Gateway {
@@ -33,7 +36,8 @@ func NewGateway(store *Store) *Gateway {
 	transport.MaxIdleConns = 256
 	transport.MaxIdleConnsPerHost = 64
 	transport.ResponseHeaderTimeout = 90 * time.Second
-	return &Gateway{store: store, client: &http.Client{Transport: transport}, captureSlots: make(chan struct{}, gatewayCaptureSlots)}
+	allowPrivate := store.deps.ProviderTestPrivate
+	return &Gateway{store: store, client: &http.Client{Transport: transport}, providerClient: newProviderHTTPClient(allowPrivate), allowPrivate: allowPrivate, captureSlots: make(chan struct{}, gatewayCaptureSlots)}
 }
 
 type upstreamConfig struct {
@@ -149,25 +153,15 @@ func clientWithTimeout(client *http.Client, timeoutMs int) *http.Client {
 	return &clone
 }
 
-func safeProviderURL(baseURL, endpoint string) (*url.URL, error) {
-	u, err := url.Parse(baseURL)
-	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
-		return nil, errors.New("upstream baseUrl must be an absolute http(s) URL")
+func (g *Gateway) providerURL(baseURL, endpoint string) (*url.URL, error) {
+	return providerURL(baseURL, endpoint, g.allowPrivate)
+}
+
+func (g *Gateway) providerHTTPClient() *http.Client {
+	if g.providerClient != nil {
+		return g.providerClient
 	}
-	if u.User != nil {
-		return nil, errors.New("credentials in upstream URL are not allowed")
-	}
-	host := strings.Trim(u.Hostname(), "[]")
-	if ip := net.ParseIP(host); ip != nil && (ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()) {
-		return nil, errors.New("unsafe upstream address")
-	}
-	basePath := strings.TrimSuffix(u.Path, "/")
-	if strings.HasPrefix(endpoint, "/v1/") && strings.HasSuffix(basePath, "/v1") {
-		endpoint = strings.TrimPrefix(endpoint, "/v1")
-	}
-	u.Path = path.Join(basePath, endpoint)
-	u.RawPath = ""
-	return u, nil
+	return newProviderHTTPClient(false)
 }
 
 // endpointFor maps a client operation onto the upstream's native endpoint. The
@@ -265,7 +259,7 @@ func (g *Gateway) doCandidate(ctx context.Context, tenant, operation string, ori
 	if cfg.BaseURL == "" {
 		return nil, errors.New("upstream baseUrl is not configured")
 	}
-	u, err := safeProviderURL(cfg.BaseURL, endpointFor(upstream.Protocol, operation))
+	u, err := g.providerURL(cfg.BaseURL, endpointFor(upstream.Protocol, operation))
 	if err != nil {
 		return nil, err
 	}
@@ -273,7 +267,7 @@ func (g *Gateway) doCandidate(ctx context.Context, tenant, operation string, ori
 	if err != nil {
 		return nil, err
 	}
-	client := clientWithTimeout(g.client, cfg.Timeout)
+	client := clientWithTimeout(g.providerHTTPClient(), cfg.Timeout)
 	forwarded, _ := ctx.Value(gatewayClientHeadersKey{}).(http.Header)
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {

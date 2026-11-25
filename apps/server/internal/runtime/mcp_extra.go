@@ -207,13 +207,13 @@ func (h *handler) syncMCPStore(w http.ResponseWriter, r *http.Request) {
 	synced := 0
 	failed := map[string]string{}
 	for _, s := range sources {
-		target, e := safeProviderURL(s.URL, "")
+		target, e := h.providerURL(s.URL, "")
 		if e != nil {
 			failed[s.ID] = e.Error()
 			continue
 		}
 		req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, target.String(), nil)
-		resp, e := h.service.gateway.client.Do(req)
+		resp, e := h.service.gateway.providerHTTPClient().Do(req)
 		if e != nil {
 			failed[s.ID] = e.Error()
 			continue
@@ -312,7 +312,7 @@ func (h *handler) mcpOAuthStart(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	mcpURL, e := safeProviderURL(b.MCPURL, "")
+	mcpURL, e := h.providerURL(b.MCPURL, "")
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -321,7 +321,7 @@ func (h *handler) mcpOAuthStart(w http.ResponseWriter, r *http.Request) {
 		u, _ := url.Parse(mcpURL.String())
 		metadataURL := u.Scheme + "://" + u.Host + "/.well-known/oauth-authorization-server"
 		req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, metadataURL, nil)
-		resp, e := h.service.gateway.client.Do(req)
+		resp, e := h.service.gateway.providerHTTPClient().Do(req)
 		if e != nil {
 			httpx.Error(w, 502, e.Error())
 			return
@@ -377,15 +377,19 @@ func (h *handler) mcpOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	req, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, state.TokenEndpoint, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, e := h.service.gateway.client.Do(req)
+	resp, e := h.service.gateway.providerHTTPClient().Do(req)
 	if e != nil {
 		httpx.Error(w, 502, e.Error())
 		return
 	}
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	limit := int64(2 << 20)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		limit = maxMCPErrorBytes
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, limit))
 	resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		httpx.Error(w, 502, string(raw))
+		httpx.Error(w, 502, boundedMCPErrorDetail(raw))
 		return
 	}
 	var token map[string]any

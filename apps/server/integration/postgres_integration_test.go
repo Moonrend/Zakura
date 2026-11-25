@@ -55,7 +55,8 @@ func TestPostgresCoreWorkflow(t *testing.T) {
 		NewID:  func() string { seq++; return fmt.Sprintf("pg-%023d", seq) },
 		Secret: bytes.Repeat([]byte("p"), 32), PublicURL: cfg.PublicURL,
 		WebURL: cfg.WebURL, Edition: cfg.Edition, MultiTenant: cfg.MultiTenant,
-		VerifyDomain: func(context.Context, string, string) error { return nil },
+		VerifyDomain:        func(context.Context, string, string) error { return nil },
+		ProviderTestPrivate: true,
 	}
 	srv := httptest.NewServer(platformserver.Router(cfg, deps, slog.New(slog.NewTextHandler(io.Discard, nil))))
 	defer srv.Close()

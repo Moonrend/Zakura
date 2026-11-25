@@ -44,7 +44,7 @@ func TestRouterZeroAgentConnectionUsesRegisteredRuntimeLifecycle(t *testing.T) {
 	var sequence atomic.Int32
 	d := &appdeps.Dependencies{Context: ctx, DB: db, Gorm: gdb, Dialect: "sqlite", Rebind: appdeps.IdentityRebind, Clock: time.Now, NewID: func() string {
 		return "router-" + time.Now().Format("150405.000000000") + string(rune(sequence.Add(1)+64))
-	}, Secret: bytes.Repeat([]byte("k"), 32), PublicURL: "http://local.test"}
+	}, Secret: bytes.Repeat([]byte("k"), 32), PublicURL: "http://local.test", ProviderTestPrivate: true}
 	now := time.Now().Format(time.RFC3339Nano)
 	if _, e = db.Exec(`INSERT INTO tenants(id,slug,name,created_at,updated_at) VALUES('owner','owner','Owner',?,?)`, now, now); e != nil {
 		t.Fatal(e)

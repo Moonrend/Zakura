@@ -112,11 +112,11 @@ func TestToolApprovalJevPolicyChangeDuringEvaluation(t *testing.T) {
 	}
 	// Change the persisted policy after the provider has returned but before the
 	// shared gate can authorize execution. No external side effect lives in CAS.
-	base := gateway.client.Transport
+	base := gateway.providerHTTPClient().Transport
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	gateway.client = &http.Client{Transport: approvalRoundTripper(func(req *http.Request) (*http.Response, error) {
+	gateway.providerClient = &http.Client{Transport: approvalRoundTripper(func(req *http.Request) (*http.Response, error) {
 		response, err := base.RoundTrip(req)
 		if err != nil {
 			return nil, err
@@ -182,12 +182,12 @@ func TestToolApprovalJevReceivesBoundedContext(t *testing.T) {
 				}
 				args = json.RawMessage(`{"computerId":"attached","path":"/workspace/project/note","apiKey":"private-argument-sentinel"}`)
 			}
-			base := gateway.client.Transport
+			base := gateway.providerHTTPClient().Transport
 			if base == nil {
 				base = http.DefaultTransport
 			}
 			var captured []byte
-			gateway.client = &http.Client{Transport: approvalRoundTripper(func(req *http.Request) (*http.Response, error) {
+			gateway.providerClient = &http.Client{Transport: approvalRoundTripper(func(req *http.Request) (*http.Response, error) {
 				body, err := io.ReadAll(req.Body)
 				if err != nil {
 					return nil, err

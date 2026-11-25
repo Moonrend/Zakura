@@ -248,34 +248,20 @@ func (h *handler) bridgeDesktopContainer(ctx context.Context, bridge *workspaceB
 }
 
 func (h *handler) bridgeTerminalContainer(ctx context.Context, bridge *workspaceBridge, session *runnerSession, spaceID, workspaceKind, adapterID, dockerID string) {
-	method, writeMethod, closeMethod := "host.pty.start", "host.pty.write", "host.pty.close"
-	command := []string{"bash", "-l"}
 	if workspaceKind == "host" && adapterID == "" {
-		var info struct {
-			GOOS     string `json:"goos"`
-			HostInfo struct {
-				Platform string `json:"platform"`
-			} `json:"hostInfo"`
-		}
-		if err := session.call(ctx, "sys.info", map[string]any{}, &info); err != nil {
-			bridge.cleanupErr = err
-			_ = bridge.write(0x1, []byte(`{"type":"error","message":"terminal unavailable"}`))
-			return
-		}
-		if info.GOOS == "windows" || info.HostInfo.Platform == "windows" {
-			command = []string{"powershell.exe", "-NoLogo", "-NoProfile"}
-		}
+		bridge.cleanupErr = errLegacyHostWorkspace
+		raw, _ := json.Marshal(map[string]any{"type": "error", "message": errLegacyHostWorkspace.Error()})
+		_ = bridge.write(0x1, raw)
+		return
 	}
-	params := map[string]any{"spaceId": spaceID, "command": command, "workingDir": "/workspace", "cols": 120, "rows": 30}
-	if workspaceKind != "host" || adapterID != "" {
-		if dockerID == "" {
-			bridge.cleanupErr = errors.New("canonical workspace container is required")
-			_ = bridge.write(0x1, []byte(`{"type":"error","message":"workspace container is not running"}`))
-			return
-		}
-		method, writeMethod, closeMethod = "docker.exec.start", "docker.exec.write", "docker.exec.close"
-		params = map[string]any{"id": dockerID, "command": []string{"bash", "-l"}, "workingDir": "/workspace", "tty": true, "cols": 120, "rows": 30}
+	if dockerID == "" {
+		bridge.cleanupErr = errors.New("canonical workspace container is required")
+		_ = bridge.write(0x1, []byte(`{"type":"error","message":"workspace container is not running"}`))
+		return
 	}
+	command := []string{"bash", "-l"}
+	method, writeMethod, closeMethod := "docker.exec.start", "docker.exec.write", "docker.exec.close"
+	params := map[string]any{"id": dockerID, "command": command, "workingDir": "/workspace", "tty": true, "cols": 120, "rows": 30}
 	var started struct {
 		ID string `json:"id"`
 	}
@@ -329,11 +315,7 @@ func (h *handler) bridgeTerminalContainer(ctx context.Context, bridge *workspace
 			message.Type, message.Data = "input", string(payload)
 		}
 		if message.Type == "resize" {
-			resizeMethod := "host.pty.resize"
-			if method == "docker.exec.start" {
-				resizeMethod = "docker.exec.resize"
-			}
-			if err := bridge.call(ctx, session, resizeMethod, map[string]any{"id": started.ID, "cols": message.Cols, "rows": message.Rows}, nil); err != nil {
+			if err := bridge.call(ctx, session, "docker.exec.resize", map[string]any{"id": started.ID, "cols": message.Cols, "rows": message.Rows}, nil); err != nil {
 				return
 			}
 		} else if message.Type == "input" {

@@ -36,7 +36,7 @@ func TestApplyExtendsPinnedLegacyIdentityTables(t *testing.T) {
 	}
 	for table, columns := range map[string][]string{
 		"platform_meta":       {"singleton", "settings_json"},
-		"users":               {"status", "avatar_data", "totp_secret"},
+		"users":               {"status", "avatar_data", "email_version", "totp_secret"},
 		"tenants":             {"status", "mfa_policy", "audit_retention_days"},
 		"user_sessions":       {"token_hash", "last_seen_at"},
 		"component_instances": {"agent_id", "component_type", "component_ref", "config_json", "secret_json"},

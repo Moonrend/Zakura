@@ -64,7 +64,7 @@ func TestFetchUpstreamModelListParsing(t *testing.T) {
 
 func TestSyncModelsRespectsSelectionAndNeverDeletes(t *testing.T) {
 	d := testDeps(t)
-	tok := seedTenant(t, d, "tenant-a")
+	tok := seedProviderAdmin(t, d, "tenant-a")
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer test-key" {
 			t.Errorf("missing decrypted model credential: %q", r.Header.Get("Authorization"))
@@ -133,7 +133,7 @@ func TestSyncModelsRespectsSelectionAndNeverDeletes(t *testing.T) {
 
 func TestPatchUpstreamModelCheckNoDelete(t *testing.T) {
 	d := testDeps(t)
-	tok := seedTenant(t, d, "tenant-a")
+	tok := seedProviderAdmin(t, d, "tenant-a")
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer test-key" {
 			t.Errorf("missing decrypted model credential: %q", r.Header.Get("Authorization"))
@@ -176,7 +176,7 @@ func TestPatchUpstreamModelCheckNoDelete(t *testing.T) {
 
 func TestPatchUpstreamCredentialMerge(t *testing.T) {
 	d := testDeps(t)
-	tok := seedTenant(t, d, "tenant-a")
+	tok := seedProviderAdmin(t, d, "tenant-a")
 	var mu sync.Mutex
 	lastAuth := ""
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -265,7 +265,7 @@ func TestGroupUpstreamModels(t *testing.T) {
 
 func TestListUpstreamModelsGroupedShape(t *testing.T) {
 	d := testDeps(t)
-	tok := seedTenant(t, d, "tenant-a")
+	tok := seedProviderAdmin(t, d, "tenant-a")
 	router := chi.NewRouter()
 	RegisterRoutes(router, d)
 	server := httptest.NewServer(router)
@@ -344,7 +344,7 @@ func findRouteByAlias(routes []any, alias string) map[string]any {
 
 func TestSyncAutoProvisionsRoutes(t *testing.T) {
 	d := testDeps(t)
-	tok := seedTenant(t, d, "tenant-a")
+	tok := seedProviderAdmin(t, d, "tenant-a")
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"id": "A"}, map[string]any{"id": "B"}}})
@@ -392,7 +392,7 @@ func TestSyncAutoProvisionsRoutes(t *testing.T) {
 
 func TestSyncPreservesExistingRoute(t *testing.T) {
 	d := testDeps(t)
-	tok := seedTenant(t, d, "tenant-a")
+	tok := seedProviderAdmin(t, d, "tenant-a")
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"id": "A"}, map[string]any{"id": "B"}}})
@@ -432,7 +432,7 @@ func TestSyncPreservesExistingRoute(t *testing.T) {
 
 func TestSetDefaultModelRoute(t *testing.T) {
 	d := testDeps(t)
-	tok := seedTenant(t, d, "tenant-a")
+	tok := seedProviderAdmin(t, d, "tenant-a")
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"id": "A"}, map[string]any{"id": "B"}}})
@@ -495,7 +495,7 @@ func TestSetDefaultModelRoute(t *testing.T) {
 
 func TestDeleteUpstreamModelRemovesRoutes(t *testing.T) {
 	d := testDeps(t)
-	tok := seedTenant(t, d, "tenant-a")
+	tok := seedProviderAdmin(t, d, "tenant-a")
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"id": "A"}, map[string]any{"id": "B"}}})
@@ -532,7 +532,7 @@ func TestDeleteUpstreamModelRemovesRoutes(t *testing.T) {
 
 func TestDeleteUpstreamRemovesRoutes(t *testing.T) {
 	d := testDeps(t)
-	tok := seedTenant(t, d, "tenant-a")
+	tok := seedProviderAdmin(t, d, "tenant-a")
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"id": "A"}, map[string]any{"id": "B"}}})
@@ -568,7 +568,7 @@ func TestDeleteUpstreamRemovesRoutes(t *testing.T) {
 
 func TestResolveCandidatesFindsAutoRoutes(t *testing.T) {
 	d := testDeps(t)
-	tok := seedTenant(t, d, "tenant-a")
+	tok := seedProviderAdmin(t, d, "tenant-a")
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"id": "A"}, map[string]any{"id": "B"}}})
